@@ -60,6 +60,8 @@ struct TrialDiagnosticsDashboard: View {
 
     enum Tab: String, CaseIterable, Identifiable {
         case windows = "Windows"
+        case alignment = "Alignment"
+        case channels = "Channels"
         case drift = "Drift"
         case stability = "Stability"
         case trials = "Trials"
@@ -195,7 +197,7 @@ struct TrialDiagnosticsDashboard: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 460)
+                .frame(maxWidth: 560)
 
                 Spacer()
 
@@ -212,6 +214,8 @@ struct TrialDiagnosticsDashboard: View {
             if let category {
                 switch tab {
                 case .windows: windowsTab(category)
+                case .alignment: alignmentTab(category)
+                case .channels: channelsTab(category)
                 case .drift: driftTab(category)
                 case .stability: stabilityTab(category)
                 case .trials: TrialScoreTable(rows: category.rows, selectedTrial: $selectedTrial)
@@ -219,6 +223,61 @@ struct TrialDiagnosticsDashboard: View {
                 }
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func alignmentTab(_ category: TrialDiagnosticsCategory) -> some View {
+        if let alignment = category.alignment {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 14) {
+                    alignmentHeatmap(alignment)
+                        .frame(minWidth: 320, maxWidth: .infinity)
+                    affinePanel(alignment, rows: category.rows)
+                        .frame(minWidth: 320, maxWidth: .infinity)
+                }
+                VStack(alignment: .leading, spacing: 16) {
+                    alignmentHeatmap(alignment)
+                    affinePanel(alignment, rows: category.rows)
+                }
+            }
+        } else {
+            ContentUnavailableView(
+                "Alignment unavailable",
+                systemImage: "waveform.path.ecg.rectangle",
+                description: Text("Score at least two trials to compare each one with the others.")
+            )
+        }
+    }
+
+    private func alignmentHeatmap(_ alignment: TrialAlignmentSummary) -> some View {
+        TrialTimeResolvedCorrelationHeatmap(
+            summary: alignment,
+            selectedTrial: $selectedTrial
+        )
+    }
+
+    private func affinePanel(
+        _ alignment: TrialAlignmentSummary,
+        rows: [TrialDiagnosticsRow]
+    ) -> some View {
+        TrialAffineAlignmentPanel(
+            summary: alignment,
+            rows: rows,
+            selectedTrial: $selectedTrial
+        )
+    }
+
+    @ViewBuilder
+    private func channelsTab(_ category: TrialDiagnosticsCategory) -> some View {
+        if let summary = category.channelResiduals {
+            TrialChannelResidualPanel(summary: summary, selectedTrial: $selectedTrial)
+        } else {
+            ContentUnavailableView(
+                "Channel attribution unavailable",
+                systemImage: "sensor.tag.radiowaves.forward",
+                description: Text("Choose a channel set with at least two channels, then score the trials again.")
+            )
         }
     }
 
@@ -256,6 +315,14 @@ struct TrialDiagnosticsDashboard: View {
                 TrialMeasureOverOrderChart(rows: category.rows, measure: secondaryMeasure, axis: axis)
             }
             TrialSplitGroupChart(rows: category.rows, measure: selectedMeasure, groupCount: groupCount)
+            if categories.count > 1 {
+                Divider()
+                CrossCategoryDriftSmallMultiples(
+                    categories: categories,
+                    measure: selectedMeasure,
+                    axis: axis
+                )
+            }
         }
     }
 

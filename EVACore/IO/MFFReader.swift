@@ -20,6 +20,19 @@ nonisolated struct MFFPackage: Sendable {
     let metrics: [String: String]
 }
 
+/// The signal facts needed by setup-time compatibility checks.
+///
+/// Unlike `MFFSignalData`, this never reads or allocates sample data. It reads
+/// only the first signal-block header plus the package's event XML, making it
+/// cheap enough to inspect every file in a batch while the setup sheet is open.
+nonisolated struct MFFSignalMetadata: Sendable, Equatable {
+    let signalURL: URL
+    let signalType: String
+    let numberOfChannels: Int
+    let samplingRate: Double
+    let events: [MFFEvent]
+}
+
 nonisolated struct MFFAntiAliasTimingCorrection: Sendable, Equatable {
     enum Evidence: Hashable, Sendable {
         case acquisitionVersion
@@ -674,6 +687,28 @@ nonisolated final class MFFReader {
             impedancesKOhm: impedances,
             acquisitionReference: acquisitionReference,
             referenceState: acquisitionReference == nil ? .unknown : .acquisition
+        )
+    }
+
+    /// Reads just enough of an MFF to run replay compatibility checks: the
+    /// first header block from the selected EEG signal and `Events*.xml`.
+    /// Sample bytes are never read.
+    func inspectSignalMetadata(
+        from packageURL: URL,
+        signalFileName: String? = nil
+    ) throws -> MFFSignalMetadata {
+        let packageURL = try validatedPackageURL(from: packageURL)
+        let signalDescriptor = try selectSignal(
+            in: packageURL,
+            preferredSignalFile: signalFileName
+        )
+        let header = try readFirstSignalHeader(from: signalDescriptor.signalURL)
+        return MFFSignalMetadata(
+            signalURL: signalDescriptor.signalURL,
+            signalType: signalDescriptor.signalType,
+            numberOfChannels: header.numberOfChannels,
+            samplingRate: header.samplingRate,
+            events: try parseEvents(in: packageURL)
         )
     }
 
@@ -1766,6 +1801,22 @@ nonisolated final class MFFReader {
             samples: allChannels,
             blockSampleCounts: blockSampleCounts
         )
+    }
+
+    private func readFirstSignalHeader(from signalURL: URL) throws -> SignalHeader {
+        let handle = try FileHandle(forReadingFrom: signalURL)
+        defer { try? handle.close() }
+
+        let flag = try Int(readInt32(from: handle, signalURL: signalURL))
+        guard flag == 1 else {
+            throw MFFReaderError.invalidBinaryData(
+                signalURL,
+                flag == 0
+                    ? "encountered a data block before any header block"
+                    : "unexpected block flag \(flag)"
+            )
+        }
+        return try readHeader(from: handle, signalURL: signalURL)
     }
 
     private func readHeader(from handle: FileHandle, signalURL: URL) throws -> SignalHeader {

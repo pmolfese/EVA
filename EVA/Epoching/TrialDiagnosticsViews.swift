@@ -59,6 +59,80 @@ nonisolated struct TrialWindowSeries: Identifiable, Sendable {
     var scores: [(trialIndex: Int, correlation: Double, slope: Double)]
 }
 
+/// The two alignment views for one trial, both computed against the average of
+/// the OTHER trials. Keeping the metrics together guarantees the heatmap and
+/// affine scatter refer to the same reference and trial index.
+nonisolated struct TrialAlignmentSeries: Identifiable, Sendable {
+    var id: Int { trialIndex }
+    var trialIndex: Int
+    var timeResolvedCorrelation: [TrialAlignmentMetrics.TimeResolvedPoint]
+    var affineFit: TrialAlignmentMetrics.AffineFit?
+}
+
+/// Ready-to-display alignment diagnostics plus the deliberately bounded search
+/// settings shown in the panel's caption.
+nonisolated struct TrialAlignmentSummary: Sendable {
+    var trials: [TrialAlignmentSeries]
+    var correlationWindowMs: Double
+    var correlationStepMs: Double
+    var maximumLagMs: Double
+    var maximumTimeScaleDeviation: Double
+
+    static func analyze(
+        trials: [SingleTrialAnalyzer.TrialInput],
+        samplingRate: Double,
+        correlationWindowMs: Double = 100,
+        correlationStepMs: Double = 10,
+        maximumLagMs: Double = 100,
+        maximumTimeScaleDeviation: Double = 0.10
+    ) -> TrialAlignmentSummary? {
+        guard trials.count >= 2, samplingRate > 0 else { return nil }
+
+        let windowSamples = max(Int((correlationWindowMs / 1000 * samplingRate).rounded()), 3)
+        let stepSamples = max(Int((correlationStepMs / 1000 * samplingRate).rounded()), 1)
+        let maxLagSamples = max(Int((maximumLagMs / 1000 * samplingRate).rounded()), 0)
+        let lagToleranceSamples = max(0.05 * samplingRate, 1) // 50 ms
+
+        let series = trials.indices.compactMap { index -> TrialAlignmentSeries? in
+            let others = trials.enumerated().compactMap { offset, trial in
+                offset == index ? nil : trial
+            }
+            guard let reference = TrialSimilarityAnalyzer.average(others, reference: .mean) else { return nil }
+            let trial = trials[index]
+            let samples = trial.samples.map(Double.init)
+            return TrialAlignmentSeries(
+                trialIndex: index,
+                timeResolvedCorrelation: TrialAlignmentMetrics.timeResolvedCorrelation(
+                    trial: samples,
+                    reference: reference,
+                    windowSamples: windowSamples,
+                    stepSamples: stepSamples,
+                    stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                    samplingRate: samplingRate
+                ),
+                affineFit: TrialAlignmentMetrics.affineFit(
+                    trial: samples,
+                    reference: reference,
+                    maxLagSamples: maxLagSamples,
+                    samplingRate: samplingRate,
+                    maxTimeScaleDeviation: maximumTimeScaleDeviation,
+                    timeScaleAnchorSample: Double(trial.stimulusOffsetSamples),
+                    lagToleranceSamples: lagToleranceSamples
+                )
+            )
+        }
+
+        guard !series.isEmpty else { return nil }
+        return TrialAlignmentSummary(
+            trials: series,
+            correlationWindowMs: correlationWindowMs,
+            correlationStepMs: correlationStepMs,
+            maximumLagMs: maximumLagMs,
+            maximumTimeScaleDeviation: maximumTimeScaleDeviation
+        )
+    }
+}
+
 nonisolated struct TrialDiagnosticsCategory: Identifiable, Sendable {
     var id: String { name }
     var name: String
@@ -76,6 +150,12 @@ nonisolated struct TrialDiagnosticsCategory: Identifiable, Sendable {
     var averageWaveform: [Double] = []
     var samplingRate: Double = 0
     var stimulusOffsetSamples: Int = 0
+    /// Sliding-correlation and bounded affine-fit results. Nil when the caller
+    /// did not request alignment diagnostics.
+    var alignment: TrialAlignmentSummary? = nil
+    /// Leave-one-out residual attribution across the selected channels. Nil
+    /// when fewer than two trials or no common channels were available.
+    var channelResiduals: TrialChannelResidualAnalyzer.Summary? = nil
 }
 
 enum TrialDiagnosticsAxis: String, CaseIterable, Identifiable {
@@ -587,7 +667,7 @@ struct TrialMeasureOverOrderChart: View {
                         title: "\(measure) over the run",
                         what: "One point per trial in order, with a running median through them. ρ is Spearman's rank correlation against order, with its p.",
                         read: "A sloped median line means the measure drifted — fatigue, habituation or electrode drift. Trial order and elapsed time differ wherever the session had breaks, so check both.",
-                        caution: "The p is uncorrected for the several measures in the picker; treat a single p just under 0.05 as a prompt to look, not a result."
+                        caution: "This single-category p is uncorrected. The cross-category small multiples below report Benjamini-Hochberg adjusted q values for the displayed family."
                     )
                 )
                 Spacer()
@@ -620,6 +700,135 @@ struct TrialMeasureOverOrderChart: View {
             }
             .chartXAxisLabel(axis == .trialIndex ? "Trial" : "Seconds")
             .frame(height: 180)
+        }
+    }
+}
+
+// MARK: - Cross-category drift
+
+/// The selected measure repeated with a shared y-scale across every scored
+/// category. Significance is based on the BH-adjusted q across exactly these
+/// visible panels, making the statistical family match what the user sees.
+struct CrossCategoryDriftSmallMultiples: View {
+    let categories: [TrialDiagnosticsCategory]
+    let measure: String
+    let axis: TrialDiagnosticsAxis
+
+    private struct Entry: Identifiable {
+        var id: String { category }
+        var category: String
+        var points: [(x: Double, y: Double)]
+        var rho: Double
+        var rawP: Double
+        var adjustedP: Double
+    }
+
+    private var entries: [Entry] {
+        let unadjusted = categories.compactMap { category -> Entry? in
+            let points = category.rows.compactMap { row -> (x: Double, y: Double)? in
+                guard let value = row.measures[measure] else { return nil }
+                return (
+                    axis == .trialIndex ? Double(row.trialIndex) : row.sourceTimeSeconds,
+                    value
+                )
+            }
+            guard let drift = TrialDriftStatistics.rankCorrelation(
+                of: points.map(\.y),
+                against: points.map(\.x)
+            ) else { return nil }
+            return Entry(
+                category: category.name,
+                points: points,
+                rho: drift.rho,
+                rawP: drift.p,
+                adjustedP: 1
+            )
+        }
+        let adjusted = TrialDriftStatistics.benjaminiHochbergAdjustedPValues(unadjusted.map(\.rawP))
+        return unadjusted.enumerated().map { offset, entry in
+            var entry = entry
+            entry.adjustedP = adjusted[offset]
+            return entry
+        }
+    }
+
+    private var yDomain: ClosedRange<Double> {
+        let values = entries.flatMap { $0.points.map(\.y) }
+        guard let low = values.min(), let high = values.max() else { return -1 ... 1 }
+        guard high > low else { return (low - 1) ... (high + 1) }
+        let padding = (high - low) * 0.08
+        return (low - padding) ... (high + padding)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ChartTitle(
+                text: "\(measure) across categories",
+                help: ChartHelpBadge(
+                    title: "Cross-category drift",
+                    what: "The same measure and y-scale repeated for every scored category. Each panel reports Spearman ρ and a Benjamini-Hochberg FDR-adjusted q across the visible categories.",
+                    read: "An orange panel survives q < .05 after accounting for the number of categories shown. Similar slopes across categories suggest a session-wide influence; one isolated slope suggests a condition-specific change.",
+                    caution: "The correction covers the visible category comparisons for this measure and axis. Changing the measure or switching trial order/elapsed time defines a new exploratory family."
+                )
+            )
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 220), spacing: 12)],
+                alignment: .leading,
+                spacing: 12
+            ) {
+                ForEach(Array(entries.enumerated()), id: \.element.id) { _, entry in
+                    categoryPanel(entry)
+                }
+            }
+            Text("BH-FDR family: \(entries.count) visible categories · orange means q < .05")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func categoryPanel(_ entry: Entry) -> some View {
+        let isSignificant = entry.adjustedP < 0.05
+        let smoothedValues = TrialDriftStatistics.runningMedian(
+            entry.points.map(\.y),
+            window: max(5, entry.points.count / 8)
+        )
+        let smoothed = zip(entry.points.map(\.x), smoothedValues).map { ($0, $1) }
+
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(entry.category).font(.caption.weight(.semibold)).lineLimit(1)
+                Spacer()
+                Text("ρ \(entry.rho, format: .number.precision(.fractionLength(2))) · q \(entry.adjustedP, format: .number.precision(.fractionLength(3)))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(isSignificant ? Color.orange : .secondary)
+            }
+            Chart {
+                ForEach(Array(smoothed.enumerated()), id: \.offset) { _, point in
+                    LineMark(
+                        x: .value("Order", point.0),
+                        y: .value(measure, point.1)
+                    )
+                    .foregroundStyle(isSignificant ? Color.orange : Color.secondary)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5))
+                }
+                ForEach(Array(entry.points.enumerated()), id: \.offset) { _, point in
+                    PointMark(
+                        x: .value("Order", point.x),
+                        y: .value(measure, point.y)
+                    )
+                    .foregroundStyle(isSignificant ? Color.orange.opacity(0.7) : Color.accentColor.opacity(0.65))
+                    .symbolSize(18)
+                }
+            }
+            .chartYScale(domain: yDomain)
+            .chartXAxisLabel(axis == .trialIndex ? "Trial" : "Seconds")
+            .frame(height: 125)
+        }
+        .padding(8)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isSignificant ? Color.orange.opacity(0.55) : Color.clear, lineWidth: 1)
         }
     }
 }
@@ -709,6 +918,126 @@ struct TrialConvergenceChart: View {
     }
 }
 
+// MARK: - Channel residual attribution
+
+/// Ranks the selected sensors by their share of one trial's multichannel
+/// leave-one-out residual. The trial strip uses the same selection binding as
+/// every other diagnostics panel, so a suspicious point can be followed here
+/// without hunting for its row again.
+struct TrialChannelResidualPanel: View {
+    let summary: TrialChannelResidualAnalyzer.Summary
+    @Binding var selectedTrial: Int?
+
+    private var activeResult: TrialChannelResidualAnalyzer.TrialResult? {
+        if let selectedTrial,
+           let selected = summary.trials.first(where: { $0.trialIndex == selectedTrial }) {
+            return selected
+        }
+        return summary.trials.max { $0.totalNormalizedResidualRMS < $1.totalNormalizedResidualRMS }
+    }
+
+    private func patternColor(_ pattern: TrialChannelResidualAnalyzer.Pattern) -> Color {
+        pattern == .localized ? .orange : .teal
+    }
+
+    var body: some View {
+        if summary.channelCount < 2 {
+            ContentUnavailableView(
+                "One channel cannot be localized",
+                systemImage: "sensor",
+                description: Text("Choose Channel Set (ROI average) above and score again to compare the sensors inside it.")
+            )
+        } else if let result = activeResult {
+            VStack(alignment: .leading, spacing: 12) {
+                ChartTitle(
+                    text: "Where this trial's residual comes from",
+                    help: ChartHelpBadge(
+                        title: "Channel residual contribution",
+                        what: "Each sensor is compared with its own leave-one-out category average inside the configured windows. Bars show its share of the trial's total squared normalized residual.",
+                        read: "One dominant bar points to a localized sensor problem. Similar bars across many sensors point to a trial-wide response or artifact.",
+                        caution: "This attributes mismatch; it does not prove a sensor is broken. A focal physiological source can also be spatially concentrated."
+                    )
+                )
+
+                ScrollView(.horizontal) {
+                    HStack(spacing: 5) {
+                        ForEach(summary.trials.sorted { $0.trialIndex < $1.trialIndex }) { trial in
+                            Button("T\(trial.trialIndex + 1)") {
+                                selectedTrial = trial.trialIndex
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption2.monospacedDigit())
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(
+                                patternColor(trial.pattern).opacity(
+                                    selectedTrial == trial.trialIndex ? 0.34 : 0.14
+                                ),
+                                in: RoundedRectangle(cornerRadius: 4)
+                            )
+                            .overlay {
+                                if selectedTrial == trial.trialIndex {
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .strokeBorder(patternColor(trial.pattern), lineWidth: 1)
+                                }
+                            }
+                            .help("Residual \(String(format: "%.2f", trial.totalNormalizedResidualRMS)); \(trial.pattern.rawValue)")
+                        }
+                    }
+                }
+
+                HStack(spacing: 18) {
+                    Label(
+                        result.pattern == .localized ? "Localized mismatch" : "Distributed mismatch",
+                        systemImage: result.pattern == .localized
+                            ? "scope"
+                            : "rectangle.3.group"
+                    )
+                    .foregroundStyle(patternColor(result.pattern))
+                    .font(.callout.weight(.semibold))
+                    metric("dominant share", result.dominantContributionFraction.formatted(.percent.precision(.fractionLength(0))))
+                    metric("effective channels", String(format: "%.1f / %d", result.effectiveChannelCount, summary.channelCount))
+                    metric("total residual", String(format: "%.2f", result.totalNormalizedResidualRMS))
+                }
+
+                let ranked = result.channels.sorted { $0.contributionFraction > $1.contributionFraction }
+                Chart(Array(ranked.prefix(16))) { channel in
+                    BarMark(
+                        x: .value("Contribution", channel.contributionFraction),
+                        y: .value("Channel", channel.channelName)
+                    )
+                    .foregroundStyle(
+                        channel.channelIndex == result.dominantChannelIndex
+                            ? patternColor(result.pattern)
+                            : Color.secondary.opacity(0.55)
+                    )
+                    .annotation(position: .trailing, alignment: .leading) {
+                        Text(channel.contributionFraction.formatted(.percent.precision(.fractionLength(0))))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .chartXScale(domain: 0 ... max(ranked.first?.contributionFraction ?? 0.01, 0.05))
+                .chartXAxisLabel("share of multichannel residual")
+                .frame(height: max(190, CGFloat(min(ranked.count, 16)) * 24))
+
+                Text(ranked.count > 16
+                     ? "Showing the 16 largest contributors. Contributions are computed across all \(ranked.count) selected channels."
+                     : "Orange means concentrated in one sensor; teal means spread across the selected channels.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func metric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.monospacedDigit())
+        }
+    }
+}
+
 // MARK: - Residual heatmap
 
 /// Trials down, time across, |residual| as intensity. Separates a trial that is
@@ -771,5 +1100,252 @@ struct TrialResidualHeatmap: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+// MARK: - Alignment
+
+/// Sliding leave-one-out correlation, with trials down and latency across.
+/// A local red patch distinguishes a component-specific mismatch from a trial
+/// that is unlike the category throughout its epoch.
+struct TrialTimeResolvedCorrelationHeatmap: View {
+    let summary: TrialAlignmentSummary
+    var selectedTrial: Binding<Int?> = .constant(nil)
+
+    private var orderedTrials: [TrialAlignmentSeries] {
+        summary.trials.sorted { $0.trialIndex < $1.trialIndex }
+    }
+
+    private var timeDomain: ClosedRange<Double> {
+        let times = summary.trials.flatMap { $0.timeResolvedCorrelation.map(\.centerMs) }
+        let low = times.min() ?? 0
+        let high = times.max() ?? 1
+        return low ... max(high, low + 1)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ChartTitle(
+                text: "Where each trial matches",
+                help: ChartHelpBadge(
+                    title: "Time-resolved correlation",
+                    what: "Each cell is the correlation inside a sliding window, comparing that trial with the average of the OTHER trials.",
+                    read: "Teal is a matching shape; red is an inverted shape; pale cells have little relationship. A vertical patch means many trials diverge at the same component. Click a row to select that trial throughout the dashboard.",
+                    caution: "The windows overlap, so adjacent cells are not independent tests. Treat this as a localization view, not a field of p-values."
+                )
+            )
+            Canvas { context, size in
+                guard !orderedTrials.isEmpty else { return }
+                let domain = timeDomain
+                let span = max(domain.upperBound - domain.lowerBound, 1)
+                let rowHeight = size.height / CGFloat(orderedTrials.count)
+
+                for (rowIndex, trial) in orderedTrials.enumerated() {
+                    let cellWidth = size.width / CGFloat(max(trial.timeResolvedCorrelation.count, 1)) + 0.75
+                    for point in trial.timeResolvedCorrelation {
+                        let x = CGFloat((point.centerMs - domain.lowerBound) / span) * size.width
+                        let rect = CGRect(
+                            x: max(0, x - cellWidth / 2),
+                            y: CGFloat(rowIndex) * rowHeight,
+                            width: cellWidth,
+                            height: rowHeight + 0.5
+                        )
+                        context.fill(Path(rect), with: .color(color(for: point.correlation)))
+                    }
+
+                    if selectedTrial.wrappedValue == trial.trialIndex {
+                        let rect = CGRect(
+                            x: 0,
+                            y: CGFloat(rowIndex) * rowHeight,
+                            width: size.width,
+                            height: rowHeight
+                        ).insetBy(dx: 0.5, dy: 0.5)
+                        context.stroke(Path(rect), with: .color(.accentColor), lineWidth: 2)
+                    }
+                }
+            }
+            .frame(height: max(140, min(Double(orderedTrials.count) * 8, 320)))
+            .background(Color(nsColor: .textBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: 3)
+                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+            )
+            .overlay {
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { location in
+                            guard !orderedTrials.isEmpty, geometry.size.height > 0 else { return }
+                            let fraction = min(max(location.y / geometry.size.height, 0), 0.999_999)
+                            let row = min(Int(fraction * CGFloat(orderedTrials.count)), orderedTrials.count - 1)
+                            let index = orderedTrials[row].trialIndex
+                            selectedTrial.wrappedValue = selectedTrial.wrappedValue == index ? nil : index
+                        }
+                }
+            }
+            HStack {
+                Text("\(format(timeDomain.lowerBound)) ms")
+                Spacer()
+                Text("\(format(timeDomain.upperBound)) ms")
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            Text("Rows are trials · red −1   pale 0   teal +1 · \(format(summary.correlationWindowMs)) ms window / \(format(summary.correlationStepMs)) ms step")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func color(for correlation: Double) -> Color {
+        let value = min(max(correlation, -1), 1)
+        let strength = 0.08 + 0.92 * abs(value)
+        return value >= 0 ? Color.teal.opacity(strength) : Color.red.opacity(strength)
+    }
+
+    private func format(_ value: Double) -> String {
+        String(format: "%.0f", value)
+    }
+}
+
+/// Best bounded affine+dilation fit for every trial. Position separates latency
+/// (x) from amplitude (y); the selected-trial readout keeps time scaling and the
+/// post-fit residual beside the deformation needed to obtain it.
+struct TrialAffineAlignmentPanel: View {
+    let summary: TrialAlignmentSummary
+    let rows: [TrialDiagnosticsRow]
+    var selectedTrial: Binding<Int?> = .constant(nil)
+
+    private var fits: [(series: TrialAlignmentSeries, fit: TrialAlignmentMetrics.AffineFit)] {
+        summary.trials.compactMap { series in
+            series.affineFit.map { (series, $0) }
+        }
+    }
+
+    private var selectedFit: TrialAlignmentMetrics.AffineFit? {
+        guard let selected = selectedTrial.wrappedValue else { return nil }
+        return fits.first { $0.series.trialIndex == selected }?.fit
+    }
+
+    private var gainDomain: ClosedRange<Double> {
+        let gains = fits.map(\.fit.gain)
+        return min(-0.1, (gains.min() ?? 0) - 0.15) ... max(1.15, (gains.max() ?? 1) + 0.15)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ChartTitle(
+                text: "Best bounded shift, gain, and dilation",
+                help: ChartHelpBadge(
+                    title: "Affine alignment with uniform dilation",
+                    what: "Each trial is fit as gain × other-trial average sampled at α-scaled time, shifted, plus offset. Dilation is anchored at stimulus onset and every search term is bounded.",
+                    read: "Near 0 ms and gain 1 means little shift or amplitude adjustment. α below 1 is a slower, stretched response; α above 1 is compressed. Select a point to see α, duration scale, remaining mismatch, and deformation.",
+                    caution: "A low residual is not automatically a good trial: dilation, shift, or gain may have worked hard to produce it. Read residual and deformation together."
+                )
+            )
+            Chart {
+                RuleMark(x: .value("No lag", 0))
+                    .lineStyle(StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
+                    .foregroundStyle(.secondary)
+                RuleMark(y: .value("Unit gain", 1))
+                    .lineStyle(StrokeStyle(lineWidth: 0.5, dash: [4, 3]))
+                    .foregroundStyle(.secondary)
+
+                ForEach(fits, id: \.series.trialIndex) { item in
+                    PointMark(
+                        x: .value("Lag", item.fit.lagMs),
+                        y: .value("Gain", item.fit.gain)
+                    )
+                    .foregroundStyle(color(for: item.series.trialIndex))
+                    .symbolSize(55)
+                }
+                if let selected = selectedTrial.wrappedValue,
+                   let item = fits.first(where: { $0.series.trialIndex == selected }) {
+                    PointMark(
+                        x: .value("Lag", item.fit.lagMs),
+                        y: .value("Gain", item.fit.gain)
+                    )
+                    .foregroundStyle(Color.accentColor)
+                    .symbolSize(250)
+                    .symbol(.circle.strokeBorder(lineWidth: 2))
+                }
+            }
+            .chartXScale(domain: -summary.maximumLagMs ... summary.maximumLagMs)
+            .chartYScale(domain: gainDomain)
+            .chartXAxisLabel("lag (ms; + = late)")
+            .chartYAxisLabel("gain")
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture { location in
+                            guard let index = nearestTrial(to: location, proxy: proxy, geometry: geometry) else {
+                                selectedTrial.wrappedValue = nil
+                                return
+                            }
+                            selectedTrial.wrappedValue = selectedTrial.wrappedValue == index ? nil : index
+                        }
+                }
+            }
+            .frame(height: 230)
+
+            if let index = selectedTrial.wrappedValue, let fit = selectedFit {
+                Text("Trial \(index + 1)")
+                    .font(.caption.weight(.semibold))
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 3),
+                    alignment: .leading,
+                    spacing: 4
+                ) {
+                    metric("lag", String(format: "%+.1f ms", fit.lagMs))
+                    metric("gain", String(format: "%.2f×", fit.gain))
+                    metric("offset", String(format: "%+.2f", fit.offset))
+                    metric("α time scale", String(format: "%.2f", fit.timeScale))
+                    metric("duration", String(format: "%.2f×", 1 / fit.timeScale))
+                    metric("shape left", String(format: "%.2f", fit.residualAfter))
+                    metric("explained", String(format: "%.0f%%", fit.explainedByAlignment * 100))
+                    metric("deformation", String(format: "%.2f", fit.deformation))
+                }
+            } else {
+                Text("Select a point or heatmap row to inspect its residual and deformation.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text("Lag limited to ±\(String(format: "%.0f", summary.maximumLagMs)) ms; α limited to \(String(format: "%.2f", 1 - summary.maximumTimeScaleDeviation))…\(String(format: "%.2f", 1 + summary.maximumTimeScaleDeviation)); overlap only, with no zero padding.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func color(for trialIndex: Int) -> Color {
+        rows.first { $0.trialIndex == trialIndex }?.classification.color ?? .secondary
+    }
+
+    private func metric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.monospacedDigit())
+        }
+    }
+
+    private func nearestTrial(
+        to location: CGPoint,
+        proxy: ChartProxy,
+        geometry: GeometryProxy
+    ) -> Int? {
+        guard let anchor = proxy.plotFrame else { return nil }
+        let plot = geometry[anchor]
+        var nearest: (index: Int, distance: CGFloat)?
+        for item in fits {
+            guard let x = proxy.position(forX: item.fit.lagMs),
+                  let y = proxy.position(forY: item.fit.gain) else { continue }
+            let point = CGPoint(x: plot.minX + x, y: plot.minY + y)
+            let distance = hypot(point.x - location.x, point.y - location.y)
+            if nearest == nil || distance < nearest!.distance {
+                nearest = (item.series.trialIndex, distance)
+            }
+        }
+        return nearest.flatMap { $0.distance <= 24 ? $0.index : nil }
     }
 }

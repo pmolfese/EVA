@@ -32,11 +32,11 @@ Across sections, the ordered spine is unchanged:
 | Order | Milestone | Section | Status |
 |---:|---|---|---|
 | 1 | **SI-4 — Adversarial evaluation** | [§2 Processing & Cleaning](#2-processing--cleaning) | MEASURED; run grades shipped for PCA-S, gradient, ICA, artifact clean; MAAC deferred |
-| 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | PLANNED 2026-09-26, parked for MRI-1 |
+| 2 | **PB-1 — Batch/replay completion** | [§11 Batch, Replay & Provenance](#11-batch-replay--provenance) | IN PROGRESS (Phases A–B + C1–C2 foundation complete 2026-10-08) |
 | 3 | **MRI-1 — FASTR reliability and motion semantics** | [§4 MRI / fMRI](#4-mri--fmri-artifact-correction) | IN PROGRESS (motion safety, coverage, provenance, PSA done 2026-09-26; engine defects + UI next) |
 | 4 | **SI-5 — Ocular MSEC/PCA-S** | [§2 Processing & Cleaning](#2-processing--cleaning) | NOT STARTED |
-| 5 | **TW-4 / TW-5 — Trial diagnostics and exclusions** | [§5 Trial-wise](#5-epoching-averaging--trial-wise) | IN PROGRESS |
-| 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§10 UI, Figures & Export](#10-ui-figures--export) | NOT STARTED |
+| 5 | **TW-4 — Trial diagnostics** | [§5 Trial-wise](#5-epoching-averaging--trial-wise) | COMPLETE (2026-10-08) |
+| 6 | **UI-1 / UX-1 — Display density, Figure Composer 2** | [§10 UI, Figures & Export](#10-ui-figures--export) | UI-1 COMPLETE; UX-1 DEFERRED (2026-10-08) |
 | 7 | **DEV-1 — Developer documentation** | [§13 Developer Documentation](#13-developer-documentation) | IN PROGRESS (DEV-1a, 1b done) |
 
 **SI-4 decided whether PCA-S is production-ready — and it now is (2026-09-12/13).**
@@ -410,35 +410,26 @@ and the simulator manual page:
 ### Later source-informed methods
 
 These remain grouped with the shared scientific rationale, but their execution
-slots are the ones in the milestone table: SI-5 follows MRI-1; SI-6 through SI-8
-follow the Trial-wise milestones.
+slots are the ones in the milestone table: SI-3a's highlighted-exemplar path has
+shipped; SI-5 follows MRI-1; SI-6 through SI-8 follow the Trial-wise milestones.
 
-#### SI-3a — Manual / by-eye BCG exemplar — **IN PROGRESS (highlighted path implemented 2026-09-29)**
+#### SI-3a.1 — Manual BCG anchor editing — **DEFERRED (low incremental value; no current slot)**
 
-A near-term addition to shipped PCA-S, and a prerequisite shape for SI-5's
-ocular calibration (user-provided exemplars → same engine). The highlighted path
-now starts in **Define Artifact**: choosing type BCG switches to a trajectory
-template with shift/stretch wiggle, EVA scans for matching complexes, and the
-reviewed matches become the exact PCA-S epochs in **Clean Artifacts**. This path
-does not require an ECG channel. The brain-basis and operator halves are unchanged;
-this is a discovery front-end onto the shipped PCA-S engine.
+SI-3a already meets its scientific and product exit through the highlighted
+exemplar workflow recorded in `ROADMAP_COMPLETE.md` § 2. Clicking individual BCG
+peaks would change only how the anchor times are supplied; it would reuse the
+same PCA-S topographies, brain basis, operator, grades, and replay path. It is
+therefore not expected to outperform the current trajectory-template method in
+ordinary use, while adding operator time and inter-rater variability.
 
-- [ ] **Hand-marked beats**: let the user click BCG peaks in the waveform view
-  and feed those times into the existing pipeline unchanged (smallest path).
-- [x] **Highlighted exemplar window**: let the user drag a selection over one
-  clear BCG complex and use that window as the template/correlation-search seed,
-  bypassing beat detection — the truest analogue to the paper's manual
-  representative-beat step. Add as a new `BCGArtifactPatternSearch` case
-  (`.reviewedExemplar`) alongside `.paper`/`.iterative`. Defaults: Pearson 0.60,
-  shift ±50 ms, stretch ±10%, GFP-weighted trajectory; all remain editable before
-  scanning.
-- [x] Record the manual provenance in `eva_artifacts.json`, `eva.xml`, and the
-  audit log: versioned exemplar/match parameters, exact event samples/anchors,
-  portable PCA-S settings, and fitted report. Replay uses the stored reviewed
-  events without silently thresholding them a second time.
+- [ ] If real recordings demonstrate a need, add a proper anchor editor that can
+  add, move, and delete exact BCG times in the waveform view. Do not ship a
+  click-only path that cannot correct mistakes.
 
-**Exit:** a recording with no usable ECG can be corrected from a user-defined
-BCG exemplar, with the manual selection recorded as replayable provenance.
+**Resume only with evidence:** tuned exemplar matching must be shown to miss or
+misidentify clinically recognizable complexes, and reviewed exact anchors must
+measurably improve correction coverage or signal preservation. Until then this
+is a much-later override workflow, not unfinished SI-3a work.
 
 #### SI-5 — Ocular MSEC/PCA-S — **NOT STARTED**
 
@@ -1134,38 +1125,40 @@ same pool is not called a mislabel. These are heuristics until validated on real
 behavioral/covariate data.
 
 
-### TW-4 — Complete multi-peak diagnostics — **IN PROGRESS**
+### TW-4 — Complete multi-peak diagnostics — **COMPLETE (2026-10-08)**
 
 The tested analyzer already provides named-window `r`/`β`/residual scores,
 time-resolved correlation, bounded-lag affine gain/offset fitting, and
 ridge-regularized multi-component regression. Draggable per-mode windows,
 per-window panels, and the two-column diagnostics dashboard are also complete.
 
-- [ ] Add panels for `timeResolvedCorrelation` and `affineFit`.
-- [ ] Add a bounded time-dilation term, `average(α·t − lag)`, for uniformly
-  slowed responses; report deformation beside residual, never instead of it.
-- [ ] Make Measurements and CWT consume their existing windows rather than only
+- [x] Add an Alignment tab with a trial-by-latency `timeResolvedCorrelation`
+  heatmap and a bounded-lag `affineFit` scatter/readout. Both use leave-one-out
+  references and share trial selection with the diagnostics rail.
+- [x] Add a stimulus-anchored, bounded time-dilation term,
+  `average(α·t − lag)`, for uniformly slowed responses. The diagnostics search
+  is limited to α = 0.90…1.10 and reports α/duration scale plus deformation
+  beside residual, never instead of it.
+- [x] Make Measurements and CWT consume their existing windows rather than only
   drawing the overlays.
-- [ ] Add per-channel residual contribution through a genuinely multichannel
+- [x] Add per-channel residual contribution through a genuinely multichannel
   analyzer path so missed channel problems are distinguishable from bad trials.
-- [ ] Decide whether to add cross-category small multiples and multiple-testing
-  correction for the displayed drift statistics.
+- [x] Add cross-category drift small multiples with a shared measure scale and
+  Benjamini-Hochberg FDR correction across the visible category family.
 
 **Exit:** multi-peak morphology, latency, amplitude, and channel-local failures
 are visible without letting unconstrained alignment explain every trial away.
 
 
-### TW-5 — Persist reviewed exclusions — **IN PROGRESS**
+### TW-5 — Persist reviewed exclusions — **COMPLETE (2026-10-08)**
 
-The engine is complete and tested — operation, `eva.xml` element, per-category
-merge, review state, commit control, re-average safety, restore-on-navigate.
-The record is in `ROADMAP_COMPLETE.md` § 5. Two verification items remain:
+The operation, `eva.xml` element, per-category merge, review state, commit
+control, re-average safety, restore-on-navigate, interactive/headless parity,
+and downstream reason-code consumers are complete and tested. The full record
+is in `ROADMAP_COMPLETE.md` § 5.
 
-- [ ] Paired *interactive* vs headless sample equality in
-  `PairedValidationTests`. Both paths now resolve inside the one
-  `buildAndPostProcess`, so they agree by construction; the comparison is still
-  owed, on the RW-1 item 4 principle that construction arguments are not
-  evidence.
+- [x] Paired *interactive* vs headless sample equality in
+  `PairedValidationTests` (`reviewedTrialExclusionParity`).
 - [x] History: committing forks a node, committing the identical set at the same
   parent deduplicates, review order and restorations do not move the node, and
   re-tuned thresholds fork even when the trial set matches.
@@ -1173,9 +1166,9 @@ The record is in `ROADMAP_COMPLETE.md` § 5. Two verification items remain:
   not walk the pointer forward onto the commit again
   (`steppingBackBeforeACommitStays`, driving the real tree the way the
   chain-signature observer does).
-- [ ] QuickLook summary and `RecordingCombiner` see the new reason code.
-  Structurally they must — both read `categoryRejections`, which now carries it
-  — but neither is asserted on directly.
+- [x] QuickLook summary and `RecordingCombiner` see the new `Low similarity`
+  reason code (`reviewedTrialExclusionReasonReachesQuickLook` and
+  `summarizeReportsReviewedTrialExclusions`).
 
 **Exit:** exclusions survive the file and remain attributable to both the rule
 and the human decision; previewing alone never removes a trial; and the same
@@ -3266,40 +3259,18 @@ RDM export as a step in the batch/replay path, so a study's 40 subjects produce
 
 # 10. UI, Figures & Export
 
-## UI-1 — Display density and montage control — **NOT STARTED**
-
-Build Phase A and B together. `channelIndices(in:)` is the membership/order
-choke point, while row height currently participates in sensitivity. A naive
-“show N channels” control would silently change µV/mm.
-
-### Phase A — how many channels
-
-- [ ] Make sensitivity (µV/mm) and row pitch independent user settings.
-- [ ] Define channels-per-screen from the available waveform viewport, excluding
-  event track and physio pane.
-- [ ] Preserve physical sensitivity while row pitch changes; overlap at dense
-  settings is expected.
-- [ ] Set a readable row-height floor. Do not pretend the labeled row renderer
-  can show 129 channels; treat a carpet/raster overview as a separate renderer.
-- [ ] Keep this display-only: no `eva.xml` or history-node changes.
-- [ ] Measure high-density scrolling before and after; do not reintroduce the
-  horizontal `LazyVStack` regression.
-
-### Phase B — which channels
-
-- [ ] Define one coherent relationship between montage membership and the
-  existing hidden-channel state.
-- [ ] Support saved named subsets with explicit ordering and net compatibility.
-- [ ] Keep uniform pitch unless group spacers justify changing hover arithmetic.
-
-Optional follow-ons: honest per-display calibration and a carpet/raster view.
-
-## UX-1 — Figure Composer Phase 2 — **NOT STARTED**
+## UX-1 — Figure Composer Phase 2 — **DEFERRED (owner, 2026-10-08)**
 
 Replace contact-sheet-only layout with a freeform publication canvas: drag,
 resize, multi-select, snapping/alignment guides, and multiple pages. Preserve
 vector PDF as the primary format; SVG remains out of scope unless a dependable
 writer is adopted.
+
+The existing vector-PDF basket, individual export, and automatic contact-sheet
+layout remain sufficient for current use. Resume when freeform publication
+layout becomes a current product priority; UX-1 blocks no processing, analysis,
+or existing export workflow. UI-1 is complete and recorded in
+`ROADMAP_COMPLETE.md` § 10.
 
 
 ### Averages and topography
@@ -3474,7 +3445,7 @@ Neither belongs inside the artifact-correction milestone.
 The batch/replay suite and the REWIND history graph are operational and hardened
 (RW-1 closed 2026-08-27). What remains are usability edges.
 
-## PB-1 — Processing and batch completion — **NOT STARTED (planned 2026-09-26)**
+## PB-1 — Processing and batch completion — **IN PROGRESS (Phases A–B + C1–C2 foundation completed 2026-10-08)**
 
 The suite is operational; these are deferred usability edges, not prerequisites
 for ordinary batch work. Planned 2026-09-26 and parked in favour of MRI-1; the
@@ -3492,7 +3463,7 @@ Windowed batch replays the *whole* script in each file's window, slow steps
 
 Items, in the order they should be built (smallest and most independent first):
 
-- [ ] **Setup compatibility preflight:** inspect chosen files before execution;
+- [x] **Setup compatibility preflight:** inspect chosen files before execution;
   runtime protection already exists in both batch paths.
   - Cheap per-file inspection off the main thread, re-run when the file list
     changes: channel count and sampling rate from the first `signal1.bin` header
@@ -3506,7 +3477,12 @@ Items, in the order they should be built (smallest and most independent first):
   - Fix found in passing: removing a file (✕ / Clear) does not call
     `reclassifySteps()`, so a "from this file's own record" label can go stale.
     Re-classify after each inspection instead.
-- [ ] **Skip all decisions:** optional per-file policy that drops unsupported
+  - Completed 2026-10-08: sample-free metadata inspection now runs off the main
+    thread; the setup sheet shows per-file checking/ready/warning states,
+    expandable step consequences, summary/removal actions, and one non-blocking
+    Start confirmation. Revision tokens reject stale results after file/script
+    changes, and file-derived replay classification is rebuilt after inspection.
+- [x] **Skip all decisions:** optional per-file policy that drops unsupported
   decision steps rather than making the entire script windowed.
   - Setup-sheet checkbox, shown only when the script has a decision step.
   - Evaluated per file with that file's own `ReplayPayloadAvailability`: a file
@@ -3517,6 +3493,11 @@ Items, in the order they should be built (smallest and most independent first):
   - Exempt: channel decisions (the setup tick is already the answer) and
     `trialExclusion` (`ProcessingCore` already applies only keys this file
     resolves and excludes nothing otherwise). One pure function owns the rule.
+  - Completed 2026-10-08: the setup option predicts drops per recording from
+    the preflight's payload/geometry/event inventory, keeps supported decisions,
+    and shows each planned omission in the file detail. The same pure policy is
+    used by headless and windowed execution; dropped steps are absent from the
+    output `eva.xml` and recorded with their reason in `log_eva_*.txt`.
 - [ ] **Partial-then-resume:** run a portable prefix headlessly, then load its
   partially processed signal into a fresh windowed session for decision steps.
   - Phase 1 (unattended): per file, run the leading ungated steps via
@@ -3540,6 +3521,16 @@ Items, in the order they should be built (smallest and most independent first):
     in the background first.
   - Tests: classification/policy, resume matching, preflight on light targets,
     and a byte-parity run of prefix-then-remainder against one full run.
+  - **C1–C2 foundation completed 2026-10-08:** one pure per-file planner now
+    applies the Phase B policy, admits only a contiguous gradient/PCA-S/file-local
+    ICA prefix, and returns an explicit reason at the first boundary. A versioned
+    `eva_batch_checkpoint.json` records the full-source fingerprint, canonical
+    prefix and policy identities, indexed payload digests, build, completed and
+    remaining steps, and prefix audit. Checkpoints publish from a validated
+    sibling staging directory, keep an existing valid partial until replacement
+    succeeds, and are reusable only when both the expected identity and the
+    package's actual `eva.xml`/ICA payload agree. The execution queue and
+    window handoff are intentionally still unwired; those are C3–C4.
   - **Open decisions (owner):** (1) two-phase (all prefixes, then all decisions —
     proposed) vs per-file interleaved vs pipelined background prefix; (2) keep
     partials (proposed — they are the resume point, roughly input-sized each) vs

@@ -551,7 +551,7 @@ extension WaveformView {
     /// part of `eva.xml` because Copy Processing should replay the portable
     /// settings, not this file's resulting channel/epoch decisions.
     func currentProcessingAuditLogLines() -> [String] {
-        ProcessingAuditLog.lines(
+        replay.batchPolicyAuditLogLines + ProcessingAuditLog.lines(
             gradient: gradient, bcg: bcg, epoching: epoching, channels: channels,
             cleaningVariance: recordingStore.cleaningVariance,
             artifacts: template.definedArtifacts

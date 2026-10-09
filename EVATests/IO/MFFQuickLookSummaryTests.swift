@@ -247,6 +247,38 @@ struct MFFQuickLookSummaryTests {
         #expect(abs(detail.retention - 21.0 / 130.0) < 0.001)
     }
 
+    /// TW-5: the reviewed exclusion is folded into the average step's ordinary
+    /// category-rejection record before export. Pin the consumer side directly
+    /// so Finder cannot silently lose the new reason while the producer tests
+    /// continue to pass.
+    @Test func reviewedTrialExclusionReasonReachesQuickLook() throws {
+        let source = Fixtures.url("example_1.mff")
+        let package = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reviewed-trial-quicklook-\(UUID().uuidString).mff")
+        try FileManager.default.copyItem(at: source, to: package)
+        defer { try? FileManager.default.removeItem(at: package) }
+
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(
+            operation: .average,
+            rejections: [
+                CategoryRejection(
+                    category: "ULRN",
+                    total: 10,
+                    included: 8,
+                    reasons: [TrialExclusionResolver.reasonLabel: 2]
+                )
+            ]
+        ))
+        try EVAProcessingScriptXML.write(script, toPackage: package)
+
+        let detail = try #require(MFFQuickLookSummary.read(from: package).segmentedDetail)
+        let condition = try #require(detail.conditions.first { $0.name == "ULRN" })
+        #expect(condition.kept == 8)
+        #expect(condition.rejected == 2)
+        #expect(detail.faultHistogram[TrialExclusionResolver.reasonLabel] == 2)
+    }
+
     @Test func thumbnailModelReflectsTheSummary() throws {
         let segmented = MFFThumbnailRenderer.Model(
             summary: try MFFQuickLookSummary.read(from: Fixtures.url("example_1.mff"), options: .thumbnail)

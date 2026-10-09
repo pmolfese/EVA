@@ -264,6 +264,31 @@ suite clears artifact-removal and brain-preservation gates in both the
 artifact-dominated and brain-dominated regimes
 (`BCGSurrogateCorrectionTests`).
 
+### SI-3a — Manual / by-eye BCG exemplar — completed 2026-09-29
+
+- Added the highlighted-exemplar path to **Define Artifact**. Selecting type BCG
+  configures a time-varying scalp-trajectory template with editable Pearson
+  threshold, ±50 ms shift, ±10% temporal stretch, and GFP weighting; no ECG
+  channel is required.
+- Users can remove unrepresentative trajectory frames, compare the waveform and
+  topography match sets, and choose the exact detected events that become the
+  BCG definition.
+- Added `BCGArtifactPatternSearch.reviewedExemplar`. PCA-S consumes every
+  supplied in-bounds reviewed epoch without silently applying a second match
+  threshold, while reusing the shipped brain basis, source-informed operator,
+  component-reliability gate, and run grade.
+- Recorded the versioned exemplar and matching definition, exact event samples
+  and anchors, portable PCA-S settings, and fitted result in artifact,
+  processing, and audit provenance. Replay restores the reviewed events and
+  settings, then refits rather than reusing a stale fitted operator.
+- Added regression coverage for no-rematch semantics, end-to-end cleaning,
+  broadband fitting, and artifact-payload round trips.
+
+**Exit met:** a recording with no usable ECG can be corrected from a
+user-defined BCG exemplar with replayable manual provenance. Direct per-beat
+anchor editing is a lower-value optional override and remains deferred in
+`ROADMAP.md` as SI-3a.1.
+
 ## SI-4 — Adversarial evaluation of PCA-S — measured 2026-09-12/13
 
 The 0.5%/0.9 gate above was "not yet evidence-based" when SI-3 shipped; SI-4
@@ -358,7 +383,7 @@ Nothing else in this subsystem is closed; MRI-1 remains open in `ROADMAP.md`.
 
 # 5. Epoching, Averaging & Trial-wise
 
-### C8. Trial-wise diagnostics foundation — Phases 1–3 and Phase 4 core complete
+### C8 / TW-4. Trial-wise diagnostics — completed 2026-10-08
 
 - Added `TrialSimilarityAnalyzer` with leave-one-out correlation, slope,
   normalized residual RMS, MAD-standardized robust distance, cross-category
@@ -377,19 +402,30 @@ Nothing else in this subsystem is closed; MRI-1 remains open in `ROADMAP.md`.
 - Replaced the long stacked view with `TrialDiagnosticsDashboard`, including a
   persistent context rail, tabbed plots, sortable trial table, shared selection,
   responsive narrow layout, and condition-aware Setup disclosure.
+- Added a shared-selection Alignment tab with time-resolved correlation,
+  bounded shift/gain/offset/dilation fits, and deformation reported beside the
+  remaining residual.
+- Made Measurements and CWT consume every selected analysis window, preserving
+  disjoint gaps, and added genuinely multichannel residual attribution that
+  distinguishes a globally poor trial from a localized sensor problem.
+- Added cross-category drift small multiples on a shared scale. Each visible
+  category reports Spearman rho and a Benjamini-Hochberg FDR-adjusted q-value;
+  only effects surviving q < .05 receive the orange significance treatment.
 
 Key retained decisions: use MAD rather than SD, apply metric floors, skip
 categories with fewer than two trials, use RMS rather than correlation alone for
 convergence, use running medians for trends, and show the limitations of
-uncorrected p-values and selection-on-the-outcome directly in the UI.
+uncorrected single-panel p-values and selection-on-the-outcome directly in the
+UI. The cross-category comparison labels its correction family as the visible
+categories for the selected measure and ordering axis.
 
 
-## C13-adjacent: TW-5 reviewed trial exclusions — engine completed 2026-08-27
+## C13-adjacent: TW-5 reviewed trial exclusions — completed 2026-10-08
 
 The `trialExclusion` operation, its `eva.xml` element, per-category merge,
-review state, commit control, re-average safety, and restore-on-navigate are all
-built and tested. Two verification items remain open and are carried in
-`ROADMAP.md` § Epoching, Averaging & Trial-wise.
+review state, commit control, re-average safety, restore-on-navigate,
+interactive/headless sample parity, and the QuickLook/RecordingCombiner
+reason-code consumers are all built and tested.
 
 #### Why this is not just another parameter step
 
@@ -582,11 +618,10 @@ Two properties of the existing machinery shape the sequence below:
   count-based tests cannot pass vacuously
   (`anExcludedTrialActuallyChangesTheAverage`), plus end-to-end application
   through `ProcessingCore` — the path a headless batch takes.
-- [ ] Paired *interactive* vs headless sample equality in
-  `PairedValidationTests`. Both paths now resolve inside the one
-  `buildAndPostProcess`, so they agree by construction; the comparison is still
-  owed, on the RW-1 item 4 principle that construction arguments are not
-  evidence.
+- [x] Paired *interactive* vs headless sample equality in
+  `PairedValidationTests` (`reviewedTrialExclusionParity`). The app-facing path
+  and a persisted `trialExclusion` + `segment` replay produce identical channel
+  samples and resolve the same source event.
 - [x] History: committing forks a node, committing the identical set at the same
   parent deduplicates, review order and restorations do not move the node, and
   re-tuned thresholds fork even when the trial set matches.
@@ -594,9 +629,9 @@ Two properties of the existing machinery shape the sequence below:
   not walk the pointer forward onto the commit again
   (`steppingBackBeforeACommitStays`, driving the real tree the way the
   chain-signature observer does).
-- [ ] QuickLook summary and `RecordingCombiner` see the new reason code.
-  Structurally they must — both read `categoryRejections`, which now carries it
-  — but neither is asserted on directly.
+- [x] QuickLook summary and `RecordingCombiner` see the new `Low similarity`
+  reason code directly (`reviewedTrialExclusionReasonReachesQuickLook` and
+  `summarizeReportsReviewedTrialExclusions`).
 
 **Exit:** exclusions survive the file and remain attributable to both the rule
 and the human decision; previewing alone never removes a trial; and the same
@@ -3835,6 +3870,34 @@ cluster statistics, and the figure/export basket — are recorded in
 - Added exact figure-scale calculation for vector PDF output.
 - Deferred per-display calibration and row-height-independent sensitivity to
   UI-1, where they belong.
+
+
+### UI-1. Display density and montage control — completed 2026-10-08
+
+- Separated physical sensitivity (µV/mm) from row pitch. The Display Scale
+  popover now offers Fit, fixed 1…64 channels-on-screen, and 16/32/64 shortcuts
+  while preserving sensitivity as density or window size changes. The Clinical
+  preset remains 7 µV/mm at 30 mm/s and deliberately leaves density unchanged.
+- Defined density from the available waveform viewport rather than the whole
+  window, kept a readable row-height floor, and retained the established Fit
+  geometry. Dense overlap is honest; a raster/carpet renderer was considered
+  and rejected for this milestone.
+- Added **Display Channels** to both the Channels menu and Display Scale popover.
+  Compatible named Channel Sets determine membership and explicit display order;
+  hidden-channel state remains independent. The editor supports drag reordering,
+  context-menu movement, and recording-order reset.
+- Kept the feature display-only: no `eva.xml` or history-node changes. Fixed
+  density retains its larger target when a temporarily selected set has fewer
+  channels.
+- Rechecked the historical horizontal-`LazyVStack` regression. Across two
+  64-row, 240-offset benchmark runs, the production eager `VStack` measured
+  11.13–11.28 ms versus 12.61–12.72 ms for the lazy baseline (stable 1.13×
+  lazy/eager ratio). `WaveformScrollingPerformanceTests` retains the comparison,
+  a broad smoke ceiling, and a structural CI guard that rejects a lazy stack in
+  the protected production region.
+
+Optional later work remains honest per-display calibration and a separate
+raster/carpet renderer.
 
 
 ### C7. Figure Composer Phase 1 — completed 2026-08-14

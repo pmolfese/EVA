@@ -298,6 +298,7 @@ extension FocusedValues {
 /// Menu-bar "Channels" commands, acting on the focused window's `ChannelModel`.
 struct ChannelsCommands: View {
     @FocusedValue(\.channelModel) private var model
+    @FocusedValue(\.displayChannelsControls) private var displayChannelsControls
     @FocusedValue(\.channelLabelMetricsExportRequest) private var labelMetricsExportRequest
     @FocusedValue(\.channelHealthViewControls) private var healthControls
     @Environment(\.openWindow) private var openWindow
@@ -306,6 +307,43 @@ struct ChannelsCommands: View {
         Button("Channels…") {
             openWindow(id: EVAApp.channelSetsWindowID)
         }
+
+        Menu("Display Channels") {
+            if let controls = displayChannelsControls {
+                displayChannelMenuButton(
+                    title: "All Channels",
+                    count: controls.channelCount,
+                    id: nil,
+                    controls: controls
+                )
+
+                let compatible = DisplayChannelsResolver.compatibleSets(
+                    from: ChannelSetStore.shared.allSets,
+                    channelCount: controls.channelCount,
+                    netType: controls.netType
+                )
+                if !compatible.isEmpty {
+                    Divider()
+                    ForEach(compatible) { set in
+                        displayChannelMenuButton(
+                            title: set.name,
+                            count: Set(set.channelIndices).count,
+                            id: set.id,
+                            controls: controls
+                        )
+                    }
+                }
+
+                Divider()
+                Button("Manage Channel Sets…") {
+                    ChannelsWindowModel.shared.present(tab: .channelSets)
+                    openWindow(id: EVAApp.channelSetsWindowID)
+                }
+            } else {
+                Text("No Recording Open")
+            }
+        }
+        .disabled(displayChannelsControls == nil)
 
         Divider()
 
@@ -342,8 +380,6 @@ struct ChannelsCommands: View {
 
             Divider()
 
-            Button("Show All Traces") { model.hidden.removeAll() }
-                .disabled(model.hidden.isEmpty)
             Button("Unmark All Bad") { model.bad.removeAll() }
                 .disabled(model.bad.isEmpty)
             Button("Remove All Interpolations") {
@@ -352,6 +388,9 @@ struct ChannelsCommands: View {
                 .disabled(model.interpolated.isEmpty)
 
             Divider()
+
+            Button("Show All Traces") { model.hidden.removeAll() }
+                .disabled(model.hidden.isEmpty)
 
             Menu("Hidden Traces") {
                 ForEach(model.hidden.sorted(), id: \.self) { index in
@@ -376,6 +415,24 @@ struct ChannelsCommands: View {
         } else {
             Button("No Recording Open") {}
                 .disabled(true)
+        }
+    }
+
+    @ViewBuilder
+    private func displayChannelMenuButton(
+        title: String,
+        count: Int,
+        id: ChannelSet.ID?,
+        controls: DisplayChannelsControls
+    ) -> some View {
+        Button {
+            controls.selectedSetID.wrappedValue = id
+        } label: {
+            if controls.selectedSetID.wrappedValue == id {
+                Label("\(title) (\(count))", systemImage: "checkmark")
+            } else {
+                Text("\(title) (\(count))")
+            }
         }
     }
 }

@@ -33,6 +33,29 @@ nonisolated enum TrialDriftStatistics {
         var isSignificant: Bool { p < 0.05 }
     }
 
+    /// Benjamini-Hochberg false-discovery-rate adjustment, returned in the
+    /// original order. Unlike testing every panel at p < .05, this keeps the
+    /// expected proportion of false discoveries bounded across the displayed
+    /// family while retaining more power than Bonferroni.
+    static func benjaminiHochbergAdjustedPValues(_ pValues: [Double]) -> [Double] {
+        guard !pValues.isEmpty else { return [] }
+        let sorted = pValues.enumerated().sorted { $0.element < $1.element }
+        let count = Double(sorted.count)
+        var adjustedSorted = [Double](repeating: 1, count: sorted.count)
+        var runningMinimum = 1.0
+        for rankOffset in sorted.indices.reversed() {
+            let rank = Double(rankOffset + 1)
+            let candidate = min(max(sorted[rankOffset].element, 0), 1) * count / rank
+            runningMinimum = min(runningMinimum, candidate)
+            adjustedSorted[rankOffset] = min(runningMinimum, 1)
+        }
+        var result = [Double](repeating: 1, count: pValues.count)
+        for (rankOffset, item) in sorted.enumerated() {
+            result[item.offset] = adjustedSorted[rankOffset]
+        }
+        return result
+    }
+
     /// Spearman rank correlation of `values` against `order`, with ties given
     /// average ranks.
     ///

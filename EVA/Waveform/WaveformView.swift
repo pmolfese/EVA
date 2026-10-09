@@ -239,6 +239,18 @@ struct WaveformView: View {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
     }
+    var waveformDensityMode: WaveformDensityMode {
+        get { recordingStore.waveformDensityMode }
+        nonmutating set { recordingStore.waveformDensityMode = newValue }
+    }
+    var displayedChannelSetID: ChannelSet.ID? {
+        get { recordingStore.displayedChannelSetID }
+        nonmutating set { recordingStore.displayedChannelSetID = newValue }
+    }
+    var verticalWaveformViewportHeight: CGFloat {
+        get { recordingStore.verticalWaveformViewportHeight }
+        nonmutating set { recordingStore.verticalWaveformViewportHeight = newValue }
+    }
     /// Read once per channel row in `waveformRow`, so it goes through the memo
     /// rather than decoding JSON per row per body pass. See
     /// `WaveformTimeMarkerStyleCache`.
@@ -596,7 +608,16 @@ struct WaveformView: View {
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
     private let referenceDisplaySampleRate = 1_000.0
     private let referenceDisplaySampleStride = 5
-    let channelRowHeight = WaveformScaleUnits.channelRowHeight
+    var waveformDensityGeometry: WaveformDensityGeometry {
+        WaveformDensityLayout.geometry(
+            mode: WaveformDensityLayout.effectiveMode(
+                waveformDensityMode,
+                availableChannelCount: displayedChannelCount
+            ),
+            viewportHeight: verticalWaveformViewportHeight
+        )
+    }
+    var channelRowHeight: CGFloat { waveformDensityGeometry.rowHeight }
     /// Headroom a trace may travel past its row before the canvas clips it.
     ///
     /// The *only* thing the overflow preference changes. Row chrome lives in
@@ -605,10 +626,12 @@ struct WaveformView: View {
     /// a previously-raised headroom behind, because the canvas is sized from
     /// this and nothing else.
     var channelOverflowHeight: CGFloat {
-        allowsTraceOverflow ? max(CGFloat(traceOverflowHeightPreference), 0) : 0
+        guard allowsTraceOverflow else { return 0 }
+        let baseline = max(WaveformScaleUnits.channelRowHeight, 1)
+        return max(CGFloat(traceOverflowHeightPreference), 0) * channelRowHeight / baseline
     }
     private let eventTrackHeight: CGFloat = 64
-    let rowSpacing: CGFloat = 12
+    var rowSpacing: CGFloat { waveformDensityGeometry.rowSpacing }
     let labelColumnWidth: CGFloat = 120
     private let geometryUpdateQuantum: CGFloat = 0.5
     private let jumpSliderUpdateQuantum = 0.0005
@@ -617,20 +640,38 @@ struct WaveformView: View {
     private let butterflyPanelWidth: CGFloat = 360
     private let overlaidCategoriesPanelWidth: CGFloat = 380
     private let amplitudeScaleBounds: ClosedRange<Double> = 1...5_000
+    private let sensitivityBounds: ClosedRange<Double> = 0.1...400
     let physioScaleOptions: [Double] = [8, 16, 32, 64]
     let physioScaleBounds: ClosedRange<Double> = 1...64
 
+    private var sensitivitySliderBounds: ClosedRange<Double> {
+        let physicallyReachableLower = WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScaleBounds.lowerBound,
+            rowHeight: channelRowHeight
+        )
+        let physicallyReachableUpper = WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScaleBounds.upperBound,
+            rowHeight: channelRowHeight
+        )
+        let lower = max(sensitivityBounds.lowerBound, physicallyReachableLower)
+        let upper = min(sensitivityBounds.upperBound, physicallyReachableUpper)
+        return lower...upper
+    }
+
     private var amplitudeScaleSliderBounds: ClosedRange<Double> {
-        log10(amplitudeScaleBounds.lowerBound)...log10(amplitudeScaleBounds.upperBound)
+        log10(sensitivitySliderBounds.lowerBound)...log10(sensitivitySliderBounds.upperBound)
     }
 
     private var amplitudeScaleSliderBinding: Binding<Double> {
         Binding(
             get: {
-                log10(min(max(amplitudeScale, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound))
+                log10(min(
+                    max(currentSensitivity, sensitivitySliderBounds.lowerBound),
+                    sensitivitySliderBounds.upperBound
+                ))
             },
             set: { value in
-                amplitudeScale = roundedAmplitudeScale(pow(10, value))
+                setSensitivity(pow(10, value))
             }
         )
     }
@@ -645,6 +686,14 @@ struct WaveformView: View {
                 set: { setArtifactCleaningEnabled($0) }
             ),
             appliedCorrectionAvailable: artifactVM.cleanedSignal != nil
+        )
+    }
+
+    private var displayChannelsControls: DisplayChannelsControls {
+        DisplayChannelsControls(
+            selectedSetID: displayChannelSetBinding,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
         )
     }
 
@@ -838,6 +887,7 @@ struct WaveformView: View {
         }
         .navigationTitle(recording.packageName)
         .focusedSceneValue(\.channelModel, channels)
+        .focusedSceneValue(\.displayChannelsControls, displayChannelsControls)
         .focusedSceneValue(\.channelLabelMetricsExportRequest, $channelLabelMetricsExportRequest)
         .focusedSceneValue(\.artifactMenuControls, artifactMenuControls)
         .focusedSceneValue(\.icaDebugReportRequest, $ica.debugReportRequest)
@@ -1217,12 +1267,7 @@ struct WaveformView: View {
     private func seedDisplayScaleDefaults() {
         guard !hasSeededDisplayScale else { return }
         hasSeededDisplayScale = true
-        amplitudeScale = clampedAmplitudeScale(
-            WaveformScaleUnits.amplitudeScale(
-                forMicrovoltsPerMillimeter: defaultSensitivityPreference,
-                rowHeight: channelRowHeight
-            )
-        )
+        setSensitivity(defaultSensitivityPreference)
         timeScale = clampedTimeScale(
             WaveformScaleUnits.timeScale(
                 forMillimetersPerSecond: defaultSweepPreference,
@@ -1693,17 +1738,6 @@ struct WaveformView: View {
         showsToolbarButtonLabels ? label : nil
     }
 
-    private func roundedAmplitudeScale(_ value: Double) -> Double {
-        let clamped = min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
-        if clamped < 100 {
-            return clamped.rounded()
-        }
-        if clamped < 1_000 {
-            return (clamped / 10).rounded() * 10
-        }
-        return (clamped / 100).rounded() * 100
-    }
-
     private func formatAmplitudeScale(_ value: Double) -> String {
         if value < 100 {
             return String(Int(value.rounded()))
@@ -2075,6 +2109,164 @@ struct WaveformView: View {
     /// so neither truncates and both share one left edge.
     private var scaleReadoutWidth: CGFloat { 80 }
 
+    private var currentSensitivity: Double {
+        WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScale,
+            rowHeight: channelRowHeight
+        )
+    }
+
+    private var displayChannelSignal: MFFSignalData? {
+        continuousProcessedSignal ?? recording.signal
+    }
+
+    private var displayChannelTotalCount: Int {
+        displayChannelSignal?.numberOfChannels ?? 0
+    }
+
+    private var displayChannelNetType: String? {
+        recording.sensorLayout?.name
+    }
+
+    private var compatibleDisplayChannelSets: [ChannelSet] {
+        DisplayChannelsResolver.compatibleSets(
+            from: ChannelSetStore.shared.allSets,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
+        )
+    }
+
+    private var activeDisplayChannelSet: ChannelSet? {
+        DisplayChannelsResolver.resolvedSet(
+            id: displayedChannelSetID,
+            sets: ChannelSetStore.shared.allSets,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
+        )
+    }
+
+    var displayedChannelCount: Int {
+        activeDisplayChannelSet?.channelIndices.reduce(into: Set<Int>()) { result, index in
+            if (0..<displayChannelTotalCount).contains(index) { result.insert(index) }
+        }.count ?? max(displayChannelTotalCount, 1)
+    }
+
+    private var displayChannelSetBinding: Binding<ChannelSet.ID?> {
+        Binding(
+            get: { activeDisplayChannelSet?.id },
+            set: { setDisplayedChannelSetID($0) }
+        )
+    }
+
+    private var displayChannelSetSummary: String {
+        "\(min(displayedChannelCount, displayChannelTotalCount)) of \(displayChannelTotalCount)"
+    }
+
+    private func setDisplayedChannelSetID(_ id: ChannelSet.ID?) {
+        let resolvedID = DisplayChannelsResolver.resolvedSet(
+            id: id,
+            sets: ChannelSetStore.shared.allSets,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
+        )?.id
+        guard resolvedID != displayedChannelSetID else { return }
+
+        let sensitivity = currentSensitivity
+        displayedChannelSetID = resolvedID
+        setSensitivity(sensitivity)
+        syncScaleUnitEntries()
+    }
+
+    private func manageChannelSets() {
+        ChannelsWindowModel.shared.present(tab: .channelSets)
+        openWindow(id: EVAApp.channelSetsWindowID)
+    }
+
+    private var densityMaximumCount: Int {
+        min(max(displayChannelTotalCount, 1), WaveformDensityLayout.maximumChannelsPerScreen)
+    }
+
+    private var densitySummary: String {
+        switch waveformDensityMode {
+        case .fit:
+            return "Fit · \(min(waveformDensityGeometry.channelsPerScreen, displayedChannelCount)) now"
+        case .fixed(let count):
+            let target = min(max(count, 1), densityMaximumCount)
+            let current = min(target, displayedChannelCount)
+            return current < target ? "\(current) now · target \(target)" : "\(current)"
+        }
+    }
+
+    private var densityModeBinding: Binding<WaveformDensityMode> {
+        Binding(
+            get: { waveformDensityMode },
+            set: { setDensityMode($0) }
+        )
+    }
+
+    private var densityCountBinding: Binding<Double> {
+        Binding(
+            get: {
+                switch waveformDensityMode {
+                case .fit:
+                    return Double(min(waveformDensityGeometry.channelsPerScreen, densityMaximumCount))
+                case .fixed(let count):
+                    return Double(min(count, densityMaximumCount))
+                }
+            },
+            set: { value in
+                setDensityMode(.fixed(Int(value.rounded())))
+            }
+        )
+    }
+
+    private func setDensityMode(_ mode: WaveformDensityMode) {
+        let bounded: WaveformDensityMode
+        switch mode {
+        case .fit:
+            bounded = .fit
+        case .fixed(let count):
+            bounded = .fixed(min(max(count, 1), densityMaximumCount))
+        }
+        guard bounded != waveformDensityMode else { return }
+
+        let sensitivity = currentSensitivity
+        waveformDensityMode = bounded
+        setSensitivity(sensitivity)
+        syncScaleUnitEntries()
+    }
+
+    private func updateVerticalWaveformViewportHeight(_ height: CGFloat) {
+        let bounded = max(height, 1)
+        guard abs(bounded - verticalWaveformViewportHeight) >= geometryUpdateQuantum else { return }
+
+        let sensitivity = currentSensitivity
+        verticalWaveformViewportHeight = bounded
+        // Fixed density derives row height from the viewport, so every accepted
+        // resize must re-derive amplitudeScale from the pre-resize sensitivity.
+        // Comparing only the latest row-height delta lets many small window
+        // changes accumulate into a visible sensitivity drift.
+        setSensitivity(sensitivity)
+        syncScaleUnitEntries()
+    }
+
+    private func setSensitivity(_ value: Double) {
+        let bounded = min(
+            max(value, sensitivitySliderBounds.lowerBound),
+            sensitivitySliderBounds.upperBound
+        )
+        amplitudeScale = clampedAmplitudeScale(
+            WaveformScaleUnits.amplitudeScale(
+                forMicrovoltsPerMillimeter: bounded,
+                rowHeight: channelRowHeight
+            )
+        )
+    }
+
+    private func formatRowPitch(_ value: CGFloat) -> String {
+        value >= 20 ? String(format: "%.0f", value) : String(format: "%.1f", value)
+    }
+
     /// Typed entry in physical units, plus the clinical preset.
     ///
     /// The units are **nominal** — 72 points to the inch — because the true size
@@ -2112,6 +2304,87 @@ struct WaveformView: View {
             }
             .textFieldStyle(.roundedBorder)
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Display Channels")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(displayChannelSetSummary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Picker("Display Channels", selection: displayChannelSetBinding) {
+                    Text("All Channels").tag(ChannelSet.ID?.none)
+                    if !compatibleDisplayChannelSets.isEmpty {
+                        Divider()
+                        ForEach(compatibleDisplayChannelSets) { set in
+                            Text("\(set.name) (\(Set(set.channelIndices).count))")
+                                .tag(ChannelSet.ID?.some(set.id))
+                        }
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button("Manage Channel Sets…", action: manageChannelSets)
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Channels on screen")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(densitySummary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Picker("Channels on screen", selection: densityModeBinding) {
+                    Text("Fit").tag(WaveformDensityMode.fit)
+                    Text("16")
+                        .tag(WaveformDensityMode.fixed(16))
+                        .disabled(densityMaximumCount < 16)
+                    Text("32")
+                        .tag(WaveformDensityMode.fixed(32))
+                        .disabled(densityMaximumCount < 32)
+                    Text("64")
+                        .tag(WaveformDensityMode.fixed(64))
+                        .disabled(densityMaximumCount < 64)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+
+                HStack(spacing: 8) {
+                    Text("1")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Slider(
+                        value: densityCountBinding,
+                        in: 1 ... Double(densityMaximumCount),
+                        step: 1
+                    )
+                    Text("\(densityMaximumCount)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Row pitch \(formatRowPitch(waveformDensityGeometry.rowPitch)) pt · sensitivity preserved")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Text("Fit follows the window; a fixed count stays fixed.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack(spacing: 8) {
                 Button("Apply") {
                     applySensitivityEntry()
@@ -2119,12 +2392,7 @@ struct WaveformView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 Button("Clinical") {
-                    amplitudeScale = clampedAmplitudeScale(
-                        WaveformScaleUnits.amplitudeScale(
-                            forMicrovoltsPerMillimeter: WaveformScaleUnits.clinicalMicrovoltsPerMillimeter,
-                            rowHeight: channelRowHeight
-                        )
-                    )
+                    setSensitivity(WaveformScaleUnits.clinicalMicrovoltsPerMillimeter)
                     timeScale = clampedTimeScale(
                         WaveformScaleUnits.timeScale(
                             forMillimetersPerSecond: WaveformScaleUnits.clinicalMillimetersPerSecond,
@@ -2133,7 +2401,7 @@ struct WaveformView: View {
                     )
                     syncScaleUnitEntries()
                 }
-                .help("7 µV/mm and 30 mm/s — the standard clinical review settings.")
+                .help("Sets sensitivity to 7 µV/mm and sweep speed to 30 mm/s. Channel density is unchanged.")
             }
 
             Divider()
@@ -2144,7 +2412,7 @@ struct WaveformView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: 240, alignment: .leading)
+                .frame(width: 300, alignment: .leading)
         }
         .padding(14)
         .onAppear(perform: syncScaleUnitEntries)
@@ -2176,11 +2444,7 @@ struct WaveformView: View {
             syncScaleUnitEntries()
             return
         }
-        amplitudeScale = clampedAmplitudeScale(
-            WaveformScaleUnits.amplitudeScale(
-                forMicrovoltsPerMillimeter: value, rowHeight: channelRowHeight
-            )
-        )
+        setSensitivity(value)
         syncScaleUnitEntries()
     }
 
@@ -2529,11 +2793,13 @@ struct WaveformView: View {
                         //
                         // The rows are `.equatable()`, so eagerly building them is cheap
                         // (`WaveformChannelRow` is 0.55% of the whole trace).
+                        // PERF-GUARD: horizontal-channel-stack-begin
                         VStack(alignment: .leading, spacing: rowSpacing) {
                             ForEach(channelIndices(in: signal), id: \.self) { index in
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
                         }
+                        // PERF-GUARD: horizontal-channel-stack-end
                         // With overflow on, row chrome is drawn here — one layer
                         // beneath every trace — instead of by each row. That is
                         // the whole point: a row's own opaque background sits
@@ -2587,9 +2853,17 @@ struct WaveformView: View {
                     )
                 }
                 .padding(.horizontal, 20)
-                .padding(.bottom, 16)
+                .padding(.bottom, waveformDensityMode == .fit ? 16 : 0)
             }
             .scrollPosition(id: binding(recordingStore.selection, \.scrollToChannelRequest), anchor: .center)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onChange(of: proxy.size.height, initial: true) { _, newHeight in
+                            updateVerticalWaveformViewportHeight(newHeight)
+                        }
+                }
+            }
 
             // Pinned physio (PNS) pane: always visible below the EEG channels
             // (separated by a gap), sharing the EEG time axis. Like the events

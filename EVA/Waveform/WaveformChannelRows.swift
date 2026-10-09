@@ -166,6 +166,12 @@ struct ChannelLabelRow: View, Equatable {
     let onExport1D: () -> Void
     let onExport1DWithEvents: () -> Void
 
+    private var labelFontSize: CGFloat {
+        min(13, max(6, rowHeight * 0.52))
+    }
+
+    private var showsHealthBadge: Bool { rowHeight >= 24 }
+
     static func == (lhs: ChannelLabelRow, rhs: ChannelLabelRow) -> Bool {
         lhs.index == rhs.index
             && lhs.label == rhs.label
@@ -182,41 +188,44 @@ struct ChannelLabelRow: View, Equatable {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            HStack(spacing: 4) {
+        HStack(spacing: rowHeight < 24 ? 2 : 6) {
+            HStack(spacing: rowHeight < 24 ? 1 : 4) {
                 Text(label)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.system(size: labelFontSize, design: .monospaced))
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if isHidden {
                     Image(systemName: "eye.slash")
-                        .font(.caption2)
+                        .font(.system(size: labelFontSize * 0.85))
                 } else if isInterpolated {
                     Image(systemName: "wand.and.stars")
-                        .font(.caption2)
+                        .font(.system(size: labelFontSize * 0.85))
                 } else if let interpolationLostReason {
                     // Distinct from a plain bad channel: this one was repaired
                     // in the record and is not repaired here.
                     Image(systemName: "wand.and.stars.inverse")
-                        .font(.caption2)
+                        .font(.system(size: labelFontSize * 0.85))
                         .foregroundStyle(.orange)
                         .help("Interpolation lost — \(interpolationLostReason)")
                 } else if isBad {
                     Image(systemName: "xmark.circle")
-                        .font(.caption2)
+                        .font(.system(size: labelFontSize * 0.85))
                 }
             }
             .foregroundStyle(color)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            ChannelHealthBadge(
-                result: healthResult,
-                isAnalyzing: isAnalyzingHealth,
-                onActivate: onActivateHealth
-            )
+            if showsHealthBadge {
+                ChannelHealthBadge(
+                    result: healthResult,
+                    isAnalyzing: isAnalyzingHealth,
+                    onActivate: onActivateHealth
+                )
+            }
         }
         .opacity(isHidden ? 0.4 : 1)
-        .frame(maxWidth: .infinity, minHeight: rowHeight, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: rowHeight, maxHeight: rowHeight, alignment: .leading)
+        .clipped()
         .contentShape(Rectangle())
         .onTapGesture(perform: onToggleHidden)
         .help("Click to show/hide the trace. Right-click for Mark Bad / Interpolate.")

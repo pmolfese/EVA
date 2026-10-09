@@ -150,6 +150,81 @@ struct PairedValidationTests {
         }
     }
 
+    // MARK: - Reviewed trial exclusion
+
+    /// The reviewed decision names the third `stim` event by its stable source
+    /// key. `recordedIndex` is the matching zero-based position within the
+    /// category, but is deliberately only a cross-check during resolution.
+    private func reviewedTrialExclusion() -> EVAProcessingStep {
+        EVAProcessingStep(
+            operation: .trialExclusion,
+            parameters: TrialExclusionResolver.parameters(for: .none),
+            excludedTrials: [
+                ExcludedTrial(
+                    category: "stim",
+                    sourceCode: "stim",
+                    sourceTimeSeconds: 6,
+                    recordedIndex: 2,
+                    reasons: ["r < 0.30"],
+                    origin: .rule
+                )
+            ]
+        )
+    }
+
+    /// TW-5's paired proof. The app-facing path and the script/headless path
+    /// both delegate the actual build to `buildAndPostProcess`, but that shared
+    /// implementation is an architectural argument, not evidence that their
+    /// surrounding setup supplies the same exclusion and post-processing state.
+    @Test("A reviewed exclusion produces the same interactive and headless average")
+    func reviewedTrialExclusionParity() async throws {
+        let signal = stimSignal()
+        let segmentParameters = [
+            "eventCodes": "stim",
+            "preStimulusMs": "40",
+            "postStimulusMs": "120",
+            "average": "true",
+            "interpolateBadChannelsPerEpoch": "false",
+        ]
+        let exclusion = reviewedTrialExclusion()
+
+        // Interactive: the configuration and entry point used by
+        // WaveformView.applyPSACore after the sheet has committed the review.
+        let live = Pipeline()
+        live.epoching.apply(parameters: segmentParameters)
+        live.epoching.averageReference = false
+        live.epoching.baselineCorrected = false
+        live.epoching.committedTrialExclusion = exclusion
+        let job = try #require(live.epoching.makeBuildJob(from: signal, events: signal.events))
+        let liveOutcome = try #require(await live.epoching.buildAndPostProcess(
+            job: job,
+            shouldAverage: true,
+            averageReference: false,
+            baselineCorrect: false,
+            badChannels: [],
+            excludedSegmentIndices: { _ in [] },
+            isCurrent: { true }
+        ))
+        #expect(liveOutcome.trialExclusion?.excludedIndices == [2])
+
+        // Headless: the persisted steps travel through ProcessingCore exactly
+        // as Copy Processing and batch replay run them.
+        let replayed = Pipeline()
+        var script = EVAProcessingScript()
+        script.append(exclusion)
+        script.append(EVAProcessingStep(operation: .segment, parameters: segmentParameters))
+        let result = await replayed.core().applyAutoSteps(script, to: signal)
+
+        #expect(result.remainingSteps.isEmpty)
+        #expect(replayed.epoching.trialExclusionResolution?.excludedIndices == [2])
+        let headless = try #require(result.signal)
+        expectSameSamples(
+            liveOutcome.finalResult.signal,
+            headless,
+            "average with a reviewed trial exclusion"
+        )
+    }
+
     // MARK: - markBad
 
     /// The ambient-application rule from ROADMAP RW-1 item 3, as a byte

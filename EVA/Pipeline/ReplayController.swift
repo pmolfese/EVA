@@ -96,6 +96,9 @@ final class ReplayController {
     /// Destination folder for replay output; filename suffix follows the final
     /// export kind (`processed`, `segmented`, or `average`).
     var outputFolder: URL?
+    /// Per-file Phase-B drops carried into the exported process log when a
+    /// review step keeps this batch on the windowed path.
+    var batchPolicyAuditLogLines: [String] = []
 
     private var continuation: CheckedContinuation<Resolution, Never>?
     private var pendingResolution: Resolution?
@@ -151,6 +154,7 @@ final class ReplayController {
         continuation = nil
         pendingResolution = nil
         cancellationRequested = false
+        batchPolicyAuditLogLines = []
         showsConfigPane = true
     }
 
@@ -176,6 +180,18 @@ final class ReplayController {
         for i in steps.indices where batch.stepTemplates.indices.contains(i) {
             steps[i].included = batch.stepTemplates[i].included && steps[i].compatibilityFlag == nil
             steps[i].pauseToReview = batch.stepTemplates[i].pauseToReview
+        }
+        let policy = BatchDecisionPolicy.apply(
+            to: script, availability: availability,
+            enabled: batch.skipsUnsupportedDecisions
+        )
+        if batch.skipsUnsupportedDecisions {
+            let selected = Set(batch.stepTemplates.filter(\.included).map(\.id))
+            let selectedDrops = policy.drops.filter { selected.contains($0.stepIndex) }
+            for drop in selectedDrops where steps.indices.contains(drop.stepIndex) {
+                steps[drop.stepIndex].included = false
+            }
+            batchPolicyAuditLogLines = selectedDrops.map(\.auditLogLine)
         }
         mode = batch.mode
         exportWhenFinished = true

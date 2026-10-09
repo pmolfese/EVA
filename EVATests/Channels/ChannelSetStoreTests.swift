@@ -41,6 +41,16 @@ final class ChannelSetStoreTests {
         (0..<count).map { SensorPosition(channelIndex: $0, x: Double($0), y: Double($0)) }
     }
 
+    @Test("A channel set's explicit display order survives persistence")
+    func channelDisplayOrderPersists() {
+        let first = makeStore()
+        first.save(ChannelSet(name: "Custom order", channelIndices: [7, 1, 5, 2]))
+
+        let second = makeStore()
+
+        #expect(second.userSets.first { $0.name == "Custom order" }?.channelIndices == [7, 1, 5, 2])
+    }
+
     // MARK: - Saving geometries
 
     @Test("Saving a geometry under a new name adds it; saving again under the same name updates it")

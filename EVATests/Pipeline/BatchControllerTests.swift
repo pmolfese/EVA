@@ -154,6 +154,35 @@ struct BatchControllerTests {
         #expect(c.summary?.done == 0)
     }
 
+    @Test func headlessSkipDecisionPolicyCompletesAndAuditsDroppedStep() async throws {
+        let folder = tempFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .icaClean, parameters: [:]))
+
+        let c = BatchController()
+        await c.startHeadless(
+            files: [Fixtures.url("example_2.mff")],
+            script: script,
+            sourceName: "src",
+            outputFolder: folder,
+            skipUnsupportedDecisions: true
+        )
+
+        #expect(c.jobs.first?.status == .done)
+        #expect(c.summary?.done == 1)
+        let output = try #require(c.jobs.first?.outputURL)
+        let writtenScript = try #require(EVAProcessingScriptXML.read(fromPackage: output))
+        #expect(!writtenScript.steps.contains { $0.operation == .icaClean })
+
+        let names = try FileManager.default.contentsOfDirectory(atPath: output.path)
+        let logName = try #require(names.first { $0.hasPrefix("log_eva_") && $0.hasSuffix(".txt") })
+        let log = try String(contentsOf: output.appendingPathComponent(logName), encoding: .utf8)
+        #expect(log.contains(
+            "dropped icaClean: this recording has no ICA replay payload (skip-decisions policy)"
+        ))
+    }
+
     @Test func headlessRunRecordsFailureForUnreadableFile() async throws {
         let folder = tempFolder()
         defer { try? FileManager.default.removeItem(at: folder) }
