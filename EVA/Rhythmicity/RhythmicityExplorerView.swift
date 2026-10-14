@@ -14,6 +14,37 @@ private enum RhythmicityBandsPresentation: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// Keeps a result canvas at least as large as its charts and controls require,
+/// while making every edge reachable when a sheet is constrained by the screen.
+/// Matching the content to the live viewport preserves the existing behavior in
+/// larger windows instead of collapsing charts to their minimum intrinsic size.
+private struct RhythmicityResultViewport<Content: View>: View {
+    let minimumContentSize: CGSize
+    let content: Content
+
+    init(
+        minimumContentSize: CGSize,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.minimumContentSize = minimumContentSize
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ScrollView([.horizontal, .vertical]) {
+                content
+                    .frame(
+                        minWidth: max(proxy.size.width, minimumContentSize.width),
+                        minHeight: max(proxy.size.height, minimumContentSize.height),
+                        alignment: .topLeading
+                    )
+            }
+        }
+        .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 struct RhythmicityExplorerView: View {
     @Bindable var viewModel: RhythmicityExplorerViewModel
 
@@ -31,6 +62,16 @@ struct RhythmicityExplorerView: View {
     @State private var bandsPresentation = RhythmicityBandsPresentation.spectrum
     @State private var showsHelp = false
     @State private var showsRunLog = false
+
+    private var hasDisplayedResult: Bool {
+        switch viewModel.mode {
+        case .bands: viewModel.laviResult != nil
+        case .eventRelated: viewModel.wtplResult != nil
+        case .bursts: viewModel.burstResult != nil
+        }
+    }
+
+    private var preferredMinimumHeight: CGFloat { hasDisplayedResult ? 850 : 720 }
 
     private var selectedRange: ClosedRange<Int>? { viewModel.store.selection.selectedSampleRange }
     private var eventConditions: [String] { Array(Set(epochSegments.map(\.category))).sorted() }
@@ -60,7 +101,16 @@ struct RhythmicityExplorerView: View {
             Divider()
             footer
         }
-        .frame(minWidth: 1_050, idealWidth: 1_260, minHeight: 720, idealHeight: 850)
+        .frame(
+            minWidth: 1_050,
+            idealWidth: 1_260,
+            minHeight: preferredMinimumHeight,
+            idealHeight: hasDisplayedResult ? 900 : 850
+        )
+        // Re-evaluate the attached sheet's fitted size when a completed result
+        // replaces the compact empty state. The scrollable result viewport below
+        // remains the fallback when the current display cannot fit that request.
+        .presentationSizing(.fitted)
         .onAppear { synchronizeContext() }
     }
 
@@ -146,8 +196,9 @@ struct RhythmicityExplorerView: View {
         HSplitView {
             inspector
                 .frame(minWidth: 280, idealWidth: 310, maxWidth: 360)
-            resultCanvas
-                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+            RhythmicityResultViewport(minimumContentSize: CGSize(width: 700, height: 610)) {
+                resultCanvas
+            }
         }
     }
 
@@ -155,8 +206,9 @@ struct RhythmicityExplorerView: View {
         HSplitView {
             eventInspector
                 .frame(minWidth: 300, idealWidth: 330, maxWidth: 390)
-            eventCanvas
-                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+            RhythmicityResultViewport(minimumContentSize: CGSize(width: 700, height: 540)) {
+                eventCanvas
+            }
         }
     }
 
@@ -164,8 +216,9 @@ struct RhythmicityExplorerView: View {
         HSplitView {
             burstInspector
                 .frame(minWidth: 300, idealWidth: 330, maxWidth: 390)
-            burstCanvas
-                .frame(minWidth: 700, maxWidth: .infinity, maxHeight: .infinity)
+            RhythmicityResultViewport(minimumContentSize: CGSize(width: 980, height: 760)) {
+                burstCanvas
+            }
         }
     }
 

@@ -28,6 +28,29 @@ ZIP_PATH="$EXPORT_DIR/$SCHEME.app.zip"
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
 
+# notarytool credentials only authorize uploads to Apple's notary service. The
+# export step separately requires a Developer ID Application certificate and
+# its private key in this user's keychain. Check that before spending time on
+# an archive that xcodebuild cannot export.
+SIGNING_IDENTITIES="$(security find-identity -v -p codesigning)"
+if ! awk -v team="$TEAM_ID" '
+    index($0, "Developer ID Application:") && index($0, "(" team ")") { found = 1 }
+    END { exit !found }
+' <<< "$SIGNING_IDENTITIES"; then
+    cat >&2 <<EOF
+error: no valid 'Developer ID Application' signing identity was found.
+
+In Xcode, open Settings > Accounts, sign in to the Apple ID for team
+$TEAM_ID, then choose Manage Certificates and create or download a
+'Developer ID Application' certificate. If the certificate was created on
+another Mac, import its .p12 file so the private key is included.
+
+Verify the repair with:
+  security find-identity -v -p codesigning
+EOF
+    exit 1
+fi
+
 if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
     echo "error: notarytool keychain profile '$NOTARY_PROFILE' not found." >&2
     echo "Run this once first:" >&2
