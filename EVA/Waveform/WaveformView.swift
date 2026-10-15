@@ -2782,7 +2782,12 @@ struct WaveformView: View {
 
             ScrollView(.vertical) {
                 HStack(alignment: .top, spacing: 12) {
-                    LazyVStack(alignment: .leading, spacing: rowSpacing) {
+                    // Match the eager trace stack. A lazy label stack retains
+                    // estimated positions for offscreen rows when density
+                    // changes at the bottom; an explicit outer height does
+                    // not invalidate those positions, so labels drift away
+                    // from their traces (including the final VREF row).
+                    VStack(alignment: .leading, spacing: rowSpacing) {
                         ForEach(displayedChannelIndices, id: \.self) { index in
                             channelLabel(index: index, signal: signal)
                                 .id(index)
