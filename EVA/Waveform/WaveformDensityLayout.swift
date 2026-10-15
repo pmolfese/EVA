@@ -48,6 +48,22 @@ nonisolated enum WaveformDensityLayout {
         return .fixed(min(max(availableChannelCount, 1), max(count, 1)))
     }
 
+    /// Exact height of a channel stack using `geometry` for every row.
+    ///
+    /// The label and trace columns live in separate SwiftUI stacks because the
+    /// traces also sit inside a horizontal `ScrollView`. Giving that nested
+    /// scroller this explicit height keeps its AppKit document view in lockstep
+    /// with the labels when density changes all row dimensions at once.
+    static func stackHeight(
+        rowCount: Int,
+        geometry: WaveformDensityGeometry
+    ) -> CGFloat {
+        let count = max(rowCount, 0)
+        guard count > 0 else { return 0 }
+        return CGFloat(count) * geometry.rowHeight
+            + CGFloat(count - 1) * geometry.rowSpacing
+    }
+
     /// Geometry for the vertically scrollable EEG viewport only. Its height is
     /// measured after the event track and pinned physio pane have taken space.
     static func geometry(

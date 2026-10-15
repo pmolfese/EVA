@@ -58,6 +58,7 @@ struct WaveformChannelRow: View, Equatable {
     let usesPixelAdaptiveRendering: Bool
     let showsTimeMarkers: Bool
     let timeMarkerStyle: WaveformTimeMarkerStyle
+    let zeroLineColor: WaveformZeroLineColor
     /// Whether a time selection exists, enabling "Define Artifact…".
     let canDefineArtifact: Bool
     /// Pre-resolved "Move <name> to Physio" menu title.
@@ -82,6 +83,7 @@ struct WaveformChannelRow: View, Equatable {
             && lhs.usesPixelAdaptiveRendering == rhs.usesPixelAdaptiveRendering
             && lhs.showsTimeMarkers == rhs.showsTimeMarkers
             && lhs.timeMarkerStyle == rhs.timeMarkerStyle
+            && lhs.zeroLineColor == rhs.zeroLineColor
             && lhs.canDefineArtifact == rhs.canDefineArtifact
             && lhs.moveToPhysioTitle == rhs.moveToPhysioTitle
     }
@@ -99,6 +101,7 @@ struct WaveformChannelRow: View, Equatable {
             usesPixelAdaptiveRendering: usesPixelAdaptiveRendering,
             showsTimeMarkers: showsTimeMarkers,
             timeMarkerStyle: timeMarkerStyle,
+            zeroLineColor: zeroLineColor,
             showsClipIndicators: showsClipIndicators
         )
         // Trace only — no background, no border. Row chrome is drawn once for

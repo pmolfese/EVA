@@ -109,4 +109,19 @@ struct WaveformDensityLayoutTests {
         #expect(requested == .fixed(64))
         #expect(WaveformDensityLayout.effectiveMode(.fit, availableChannelCount: 28) == .fit)
     }
+
+    @Test("Channel stack height exactly follows row geometry")
+    func channelStackHeightFollowsGeometry() {
+        let geometry = WaveformDensityLayout.geometry(
+            mode: .fixed(16),
+            viewportHeight: 1_056
+        )
+
+        #expect(WaveformDensityLayout.stackHeight(rowCount: 0, geometry: geometry) == 0)
+        #expect(
+            WaveformDensityLayout.stackHeight(rowCount: 129, geometry: geometry)
+                == CGFloat(129) * geometry.rowHeight
+                    + CGFloat(128) * geometry.rowSpacing
+        )
+    }
 }

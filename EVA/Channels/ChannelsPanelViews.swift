@@ -219,6 +219,7 @@ extension WaveformView {
             usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
             showsTimeMarkers: showsTimeMarkersAcrossTraces,
             timeMarkerStyle: waveformTimeMarkerStyle,
+            zeroLineColor: waveformZeroLineColor,
             canDefineArtifact: activeSelectionRange(in: signal) != nil,
             moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
             onDefineArtifact: { openArtifactTemplateSheet(for: signal, clickedChannel: index) },

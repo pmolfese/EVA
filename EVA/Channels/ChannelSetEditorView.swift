@@ -417,7 +417,11 @@ struct ChannelSetEditorView: View {
                 .frame(width: 11, height: 11)
                 .overlay(Circle().stroke(.blue, lineWidth: 1))
             Text("Included in set")
-            Text(isViewingBuiltIn ? "Built-in sets are read-only" : "Click electrodes to add or remove them")
+            Text(
+                isViewingBuiltIn
+                    ? "Built-in sets are read-only"
+                    : "Click to add or remove; drag outward to add a circular region"
+            )
                 .foregroundStyle(.secondary)
             Spacer()
             if !selectedChannelSummary.isEmpty {

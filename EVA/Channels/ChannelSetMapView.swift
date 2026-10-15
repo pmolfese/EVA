@@ -10,8 +10,9 @@
 //  may apply.
 //
 //  Interactive scalp map for defining channel sets. Tap any electrode to
-//  toggle its membership. Selected channels render as filled blue circles
-//  with their number visible; deselected channels render as open,
+//  toggle its membership, or drag outward from a point to add every electrode
+//  enclosed by the resulting circle. Selected channels render as filled blue
+//  circles with their number visible; deselected channels render as open,
 //  semi-transparent circles.
 //
 
@@ -26,6 +27,16 @@ struct ChannelSetMapView: View {
     /// its new membership state. Used to apply symmetry mirroring.
     var onToggle: ((Int, Bool) -> Void)? = nil
 
+    /// Live center-to-edge drag used to preview a circular batch selection.
+    /// It is intentionally transient: only the enclosed channel membership is
+    /// committed when the pointer is released.
+    @State private var selectionCircle: SelectionCircle?
+
+    private struct SelectionCircle {
+        let center: CGPoint
+        let radius: CGFloat
+    }
+
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width, geo.size.height)
@@ -37,6 +48,24 @@ struct ChannelSetMapView: View {
                     drawHead(in: &ctx, center: center, radius: radius)
                 }
                 .frame(width: side, height: side)
+
+                if let selectionCircle, interactive {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.10))
+                        .overlay {
+                            Circle()
+                                .stroke(
+                                    Color.accentColor.opacity(0.9),
+                                    style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])
+                                )
+                        }
+                        .frame(
+                            width: selectionCircle.radius * 2,
+                            height: selectionCircle.radius * 2
+                        )
+                        .position(selectionCircle.center)
+                        .allowsHitTesting(false)
+                }
 
                 ForEach(layout.positions) { sensor in
                     let pos = sensorPoint(sensor, center: center, radius: radius)
@@ -59,7 +88,65 @@ struct ChannelSetMapView: View {
                 }
             }
             .frame(width: side, height: side)
+            .contentShape(Rectangle())
+            .simultaneousGesture(circleSelectionGesture(center: center, headRadius: radius))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func circleSelectionGesture(center: CGPoint, headRadius: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 5, coordinateSpace: .local)
+            .onChanged { value in
+                guard interactive else { return }
+                selectionCircle = SelectionCircle(
+                    center: value.startLocation,
+                    radius: hypot(
+                        value.location.x - value.startLocation.x,
+                        value.location.y - value.startLocation.y
+                    )
+                )
+            }
+            .onEnded { value in
+                guard interactive else {
+                    selectionCircle = nil
+                    return
+                }
+                let circle = SelectionCircle(
+                    center: value.startLocation,
+                    radius: hypot(
+                        value.location.x - value.startLocation.x,
+                        value.location.y - value.startLocation.y
+                    )
+                )
+                addChannels(
+                    enclosedBy: circle,
+                    mapCenter: center,
+                    headRadius: headRadius
+                )
+                selectionCircle = nil
+            }
+    }
+
+    /// Circle drags are additive. Removal remains an explicit electrode click,
+    /// which makes repeated patches predictable and prevents an overlapping
+    /// circle from unexpectedly toggling an already-authored region off.
+    private func addChannels(
+        enclosedBy circle: SelectionCircle,
+        mapCenter: CGPoint,
+        headRadius: CGFloat
+    ) {
+        let enclosed = Set(layout.positions.compactMap { sensor -> Int? in
+            let point = sensorPoint(sensor, center: mapCenter, radius: headRadius)
+            return hypot(point.x - circle.center.x, point.y - circle.center.y) <= circle.radius
+                ? sensor.channelIndex
+                : nil
+        })
+        guard !enclosed.isEmpty else { return }
+
+        let additions = enclosed.subtracting(selectedIndices)
+        selectedIndices.formUnion(enclosed)
+        for channel in additions.sorted() {
+            onToggle?(channel, true)
         }
     }
 

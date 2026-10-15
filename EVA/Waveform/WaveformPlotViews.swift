@@ -306,6 +306,7 @@ struct WaveformPlot: View {
     var usesPixelAdaptiveRendering = true
     var showsTimeMarkers = false
     var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
+    var zeroLineColor = WaveformZeroLineColor.defaultValue
     /// Draw an edge bar wherever the trace left the drawable area, so a
     /// clipped excursion is visible as *something* rather than as a flat
     /// stretch that looks like real data. See
@@ -529,7 +530,13 @@ struct WaveformPlot: View {
         var baseline = Path()
         baseline.move(to: CGPoint(x: visibleRange.lowerBound, y: midY))
         baseline.addLine(to: CGPoint(x: visibleRange.upperBound, y: midY))
-        context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 0.75)
+        let color: Color
+        if let rgb = zeroLineColor.customRGB {
+            color = Color(red: rgb.red, green: rgb.green, blue: rgb.blue).opacity(0.3)
+        } else {
+            color = .secondary.opacity(0.3)
+        }
+        context.stroke(baseline, with: .color(color), lineWidth: 0.75)
     }
 
     private func yPosition(for value: Float, midY: CGFloat, pointsPerMicrovolt: CGFloat) -> CGFloat {

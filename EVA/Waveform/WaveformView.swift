@@ -225,6 +225,7 @@ struct WaveformView: View {
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) var showsTimeMarkersAcrossTraces = false
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
+    @AppStorage(EVAGeneralPreferences.waveformZeroLineColorKey) var waveformZeroLineColorData = WaveformZeroLineColor.defaultData
     @AppStorage(EVAGeneralPreferences.traceOverflowEnabledKey) var allowsTraceOverflow = false
     @AppStorage(EVAGeneralPreferences.traceOverflowHeightKey)
     var traceOverflowHeightPreference = EVAGeneralPreferences.defaultTraceOverflowHeight
@@ -256,6 +257,9 @@ struct WaveformView: View {
     /// `WaveformTimeMarkerStyleCache`.
     var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
         WaveformTimeMarkerStyleCache.style(for: waveformTimeMarkerStyleData)
+    }
+    var waveformZeroLineColor: WaveformZeroLineColor {
+        WaveformZeroLineColorCache.color(for: waveformZeroLineColorData)
     }
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
@@ -1565,7 +1569,10 @@ struct WaveformView: View {
                 controls(for: signal, base: base, wicaInput: wicaInput, waveletInput: waveletInput, continuousSignal: continuousSignal)
             }
 
-            Divider()
+            Rectangle()
+                .fill(Color.orange.opacity(0.85))
+                .frame(height: 1)
+                .accessibilityHidden(true)
 
             workspaceContent(
                 displayMode: displayMode,
@@ -2710,6 +2717,11 @@ struct WaveformView: View {
     private func waveformArea(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
         let plotWidth = plotWidth(for: signal)
         let displayStride = displaySampleStride(for: signal)
+        let displayedChannelIndices = channelIndices(in: signal)
+        let channelStackHeight = WaveformDensityLayout.stackHeight(
+            rowCount: displayedChannelIndices.count,
+            geometry: waveformDensityGeometry
+        )
 
         // Stagger events from different source XML files into vertical lanes so
         // overlapping markers/labels stay legible. Cap the lane count so the
@@ -2771,12 +2783,16 @@ struct WaveformView: View {
             ScrollView(.vertical) {
                 HStack(alignment: .top, spacing: 12) {
                     LazyVStack(alignment: .leading, spacing: rowSpacing) {
-                        ForEach(channelIndices(in: signal), id: \.self) { index in
+                        ForEach(displayedChannelIndices, id: \.self) { index in
                             channelLabel(index: index, signal: signal)
                                 .id(index)
                         }
                     }
-                    .frame(width: labelColumnWidth, alignment: .topLeading)
+                    .frame(
+                        width: labelColumnWidth,
+                        height: channelStackHeight,
+                        alignment: .topLeading
+                    )
 
                     ScrollView(.horizontal, showsIndicators: true) {
                         // Plain `VStack`, not `LazyVStack` — deliberate, and measured.
@@ -2795,10 +2811,11 @@ struct WaveformView: View {
                         // (`WaveformChannelRow` is 0.55% of the whole trace).
                         // PERF-GUARD: horizontal-channel-stack-begin
                         VStack(alignment: .leading, spacing: rowSpacing) {
-                            ForEach(channelIndices(in: signal), id: \.self) { index in
+                            ForEach(displayedChannelIndices, id: \.self) { index in
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
                         }
+                        .frame(height: channelStackHeight, alignment: .top)
                         // PERF-GUARD: horizontal-channel-stack-end
                         // With overflow on, row chrome is drawn here — one layer
                         // beneath every trace — instead of by each row. That is
@@ -2837,7 +2854,15 @@ struct WaveformView: View {
                         .gesture(waveformInteractionGesture(in: signal))
                         .padding(.trailing, 20)
                     }
+                    .frame(height: channelStackHeight, alignment: .top)
                     .scrollPosition(Binding(get: { horizontalScrollPosition }, set: { horizontalScrollPosition = $0 }))
+                    // This horizontal scroller lives inside the vertical channel
+                    // scroller, but its document height changes with density too.
+                    // Keep its unused cross-axis pinned to the top; otherwise a
+                    // bottom-of-record density change can preserve a stale
+                    // vertical clip origin and hide the entire trace stack while
+                    // the sibling label stack remains visible.
+                    .defaultScrollAnchor(.top, for: .sizeChanges)
                     .scrollIndicators(.visible, axes: .horizontal)
                     .onScrollGeometryChange(
                         for: HorizontalViewport.self,
@@ -2856,6 +2881,14 @@ struct WaveformView: View {
                 .padding(.bottom, waveformDensityMode == .fit ? 16 : 0)
             }
             .scrollPosition(id: binding(recordingStore.selection, \.scrollToChannelRequest), anchor: .center)
+            // Fixed density derives every row's pitch from this viewport. A
+            // transient accessory (most notably the Option-key Jump strip)
+            // therefore changes both the container height and, one layout pass
+            // later, the full channel stack's height. Keep the bottom edge as
+            // the size-change anchor so a view already scrolled to channels
+            // 129/257 follows that contraction instead of retaining an offset
+            // beyond the new end and exposing a large blank region.
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
             .background {
                 GeometryReader { proxy in
                     Color.clear
