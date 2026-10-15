@@ -291,8 +291,12 @@ struct ContentView: View {
 
             Spacer(minLength: 12)
 
-            idleStatusLog
-                .frame(width: 240)
+            HStack(spacing: 24) {
+                EVAWordmark()
+
+                idleStatusLog
+                    .frame(width: 240)
+            }
 
             Text("No recording open")
                 .font(.caption)

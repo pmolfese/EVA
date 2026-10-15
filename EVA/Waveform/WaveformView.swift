@@ -2517,6 +2517,9 @@ struct WaveformView: View {
 
     func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
         HStack(alignment: .center, spacing: 10) {
+            EVAWordmark()
+                .padding(.trailing, 14)
+
             VStack(alignment: .leading, spacing: 4) {
                 statusLog()
 

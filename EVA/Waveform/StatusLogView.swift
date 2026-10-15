@@ -33,6 +33,18 @@
 
 import SwiftUI
 
+/// A quiet wordmark beside the toolbar's status area, echoing the app icon.
+struct EVAWordmark: View {
+    var body: some View {
+        Text("EVA")
+            .font(.system(size: 26, weight: .bold, design: .rounded))
+            .tracking(-1)
+            .foregroundStyle(Color(red: 1, green: 0.4, blue: 0))
+            .fixedSize()
+            .accessibilityLabel("EVA")
+    }
+}
+
 /// A single line shown in the toolbar log area.
 struct StatusLogLine: Hashable {
     let source: String
