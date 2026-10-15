@@ -47,6 +47,26 @@ struct TrialAlignmentMetricsTests {
         }
     }
 
+    /// Samples the reference with the same stimulus-anchored affine time map
+    /// used by the fitter. α < 1 produces a uniformly slower/longer response.
+    private func timeScaled(
+        _ series: [Double],
+        alpha: Double,
+        lag: Int = 0,
+        anchor: Int
+    ) -> [Double] {
+        series.indices.map { index in
+            let source = Double(anchor)
+                + alpha * Double(index - anchor)
+                - Double(lag)
+            guard source >= 0, source <= Double(series.count - 1) else { return 0 }
+            let lower = Int(source.rounded(.down))
+            let upper = min(lower + 1, series.count - 1)
+            let fraction = source - Double(lower)
+            return series[lower] + fraction * (series[upper] - series[lower])
+        }
+    }
+
     private func noisy(_ series: [Double], scale: Double, seed: UInt64) -> [Double] {
         var generator = SeededGenerator(seed: seed)
         return series.map { value in
@@ -209,6 +229,149 @@ struct TrialAlignmentMetricsTests {
         )
         #expect(abs(fit.lagSamples) <= 3, "lag \(fit.lagSamples)")
         #expect(abs(fit.gain - 1) < 0.2)
+    }
+
+    @Test func boundedDilationRecoversAUniformlySlowedResponse() throws {
+        let reference = twoPeak()
+        let trial = timeScaled(reference, alpha: 0.90, lag: 6, anchor: offset)
+        let fit = try #require(
+            TrialAlignmentMetrics.affineFit(
+                trial: trial,
+                reference: reference,
+                maxLagSamples: 20,
+                samplingRate: rate,
+                maxTimeScaleDeviation: 0.10,
+                timeScaleStep: 0.01,
+                timeScaleAnchorSample: Double(offset)
+            )
+        )
+
+        #expect(abs(fit.timeScale - 0.90) < 0.011, "α \(fit.timeScale)")
+        #expect(abs(fit.lagSamples - 6) <= 1, "lag \(fit.lagSamples)")
+        #expect(fit.residualAfter < 0.03, "residualAfter \(fit.residualAfter)")
+        #expect(fit.deformation > 1, "dilation must remain visible as deformation")
+    }
+
+    @Test func dilationSearchDoesNotInventStretchForAnUndilatedTrial() throws {
+        let reference = twoPeak()
+        let fit = try #require(
+            TrialAlignmentMetrics.affineFit(
+                trial: reference,
+                reference: reference,
+                maxLagSamples: 20,
+                samplingRate: rate,
+                maxTimeScaleDeviation: 0.10,
+                timeScaleAnchorSample: Double(offset)
+            )
+        )
+        #expect(fit.timeScale == 1)
+        #expect(fit.lagSamples == 0)
+        #expect(fit.deformation < 1e-6)
+    }
+
+    @Test func dilationSearchCannotEscapeItsBound() throws {
+        let reference = twoPeak()
+        let trial = timeScaled(reference, alpha: 0.75, anchor: offset)
+        let fit = try #require(
+            TrialAlignmentMetrics.affineFit(
+                trial: trial,
+                reference: reference,
+                maxLagSamples: 5,
+                samplingRate: rate,
+                maxTimeScaleDeviation: 0.05,
+                timeScaleStep: 0.01,
+                timeScaleAnchorSample: Double(offset)
+            )
+        )
+
+        #expect(fit.timeScale >= 0.95 && fit.timeScale <= 1.05)
+        #expect(fit.residualAfter > 0.1, "a clipped dilation search must not claim a clean fit")
+    }
+
+    @Test func boundedDilationDoesNotRescueDifferentComponentWeights() throws {
+        let reference = twoPeak()
+        let trial = twoPeak(early: 0.1, late: 2.0)
+        let fit = try #require(
+            TrialAlignmentMetrics.affineFit(
+                trial: trial,
+                reference: reference,
+                maxLagSamples: 60,
+                samplingRate: rate,
+                maxTimeScaleDeviation: 0.10,
+                timeScaleAnchorSample: Double(offset)
+            )
+        )
+        #expect(fit.residualAfter > 0.2, "bounded dilation must leave genuine shape mismatch visible")
+    }
+
+    @Test func displaySummaryUsesLeaveOneOutReferencesForBothPanels() throws {
+        let base = twoPeak()
+        let trials = [
+            SingleTrialAnalyzer.TrialInput(
+                sourceTimeSeconds: 1,
+                stimulusOffsetSamples: offset,
+                samples: base.map(Float.init)
+            ),
+            SingleTrialAnalyzer.TrialInput(
+                sourceTimeSeconds: 2,
+                stimulusOffsetSamples: offset,
+                samples: shifted(base, by: 8).map(Float.init)
+            ),
+            SingleTrialAnalyzer.TrialInput(
+                sourceTimeSeconds: 3,
+                stimulusOffsetSamples: offset,
+                samples: base.map { Float($0 * 0.6) }
+            )
+        ]
+
+        let summary = try #require(
+            TrialAlignmentSummary.analyze(
+                trials: trials,
+                samplingRate: rate,
+                correlationWindowMs: 80,
+                correlationStepMs: 20,
+                maximumLagMs: 60
+            )
+        )
+        #expect(summary.trials.map(\.trialIndex) == [0, 1, 2])
+        #expect(summary.correlationWindowMs == 80)
+        #expect(summary.correlationStepMs == 20)
+        #expect(summary.maximumLagMs == 60)
+        #expect(summary.maximumTimeScaleDeviation == 0.10)
+
+        let otherTrialReference = try #require(
+            TrialSimilarityAnalyzer.average(Array(trials.dropFirst()), reference: .mean)
+        )
+        let expectedPoints = TrialAlignmentMetrics.timeResolvedCorrelation(
+            trial: trials[0].samples.map(Double.init),
+            reference: otherTrialReference,
+            windowSamples: 40,
+            stepSamples: 10,
+            stimulusOffsetSamples: offset,
+            samplingRate: rate
+        )
+        let expectedFit = TrialAlignmentMetrics.affineFit(
+            trial: trials[0].samples.map(Double.init),
+            reference: otherTrialReference,
+            maxLagSamples: 30,
+            samplingRate: rate,
+            maxTimeScaleDeviation: 0.10,
+            timeScaleAnchorSample: Double(offset),
+            lagToleranceSamples: 25
+        )
+
+        #expect(summary.trials[0].timeResolvedCorrelation == expectedPoints)
+        #expect(summary.trials[0].affineFit == expectedFit)
+    }
+
+    @Test func displaySummaryRequiresTwoTrialsAndAValidRate() {
+        let trial = SingleTrialAnalyzer.TrialInput(
+            sourceTimeSeconds: 1,
+            stimulusOffsetSamples: offset,
+            samples: twoPeak().map(Float.init)
+        )
+        #expect(TrialAlignmentSummary.analyze(trials: [trial], samplingRate: rate) == nil)
+        #expect(TrialAlignmentSummary.analyze(trials: [trial, trial], samplingRate: 0) == nil)
     }
 
     // MARK: - Component regression

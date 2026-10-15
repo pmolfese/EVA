@@ -3,7 +3,7 @@
 //  EVATests
 //
 //  The reference lead fields from Tools/forward-compare/make_forward_fixtures.py
-//  (EVA_RESOLVE2.md R3.5) are what the imported-BEM forward operator will be
+//  (ROADMAP.md Source & Forward Modeling, R3.5) are what the imported-BEM forward operator will be
 //  measured against. Before any of that exists, this asserts the fixtures are
 //  *consumable* by the readers we already ship — geometry, electrodes and trans
 //  all parse, agree with what MNE recorded, and are in the frames the README

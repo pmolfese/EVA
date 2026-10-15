@@ -20,7 +20,8 @@
 //     refers to a component instead of an epoch;
 //   * time-resolved r — a sliding correlation, which says WHERE a trial
 //     diverges without having to guess windows first;
-//   * affine alignment — fit `trial ≈ gain · average(t − lag) + offset`, then
+//   * affine alignment — fit
+//     `trial ≈ gain · average(α · (t − anchor) + anchor − lag) + offset`, then
 //     report what is LEFT OVER. Latency and amplitude become nuisance
 //     parameters rather than reasons to fail a trial, and the residual after
 //     the best fit is shape mismatch alone.
@@ -159,6 +160,10 @@ nonisolated enum TrialAlignmentMetrics {
         var gain: Double
         /// Additive offset — residual baseline the epoch's own correction left.
         var offset: Double
+        /// Uniform time scaling (α). Values below 1 stretch/slacken the
+        /// reference in the trial; values above 1 compress it. Scaling is
+        /// anchored at stimulus onset by the diagnostics caller.
+        var timeScale: Double
         /// Correlation at the best lag.
         var correlation: Double
         /// Normalised residual BEFORE any alignment: what plain similarity sees.
@@ -183,84 +188,148 @@ nonisolated enum TrialAlignmentMetrics {
         }
     }
 
-    /// Fits `trial ≈ gain · reference(t − lag) + offset` by scanning lags and
-    /// solving the two linear parameters in closed form at each.
+    /// Fits
+    /// `trial ≈ gain · reference(α · (t − anchor) + anchor − lag) + offset`
+    /// by scanning bounded lag/time-scale pairs and solving gain and offset in
+    /// closed form at each. Fractional reference samples use linear
+    /// interpolation; only real overlap is scored.
     ///
     /// - Parameters:
     ///   - maxLagSamples: the search range. Keep it physiological — an
     ///     unconstrained search will always find *some* lag that fits, and the
     ///     residual stops meaning anything.
-    ///   - lagToleranceSamples / gainTolerance: what counts as "no real
-    ///     deformation", used only to scale the reported `deformation`.
+    ///   - maxTimeScaleDeviation: symmetric bound around α = 1. A value of 0.1
+    ///     permits 0.9 ... 1.1. It is clamped to 0.25 so this diagnostic cannot
+    ///     become an unconstrained warper.
+    ///   - timeScaleAnchorSample: the fixed point for dilation. Pass stimulus
+    ///     onset so pre/post-stimulus time does not drift together.
+    ///   - lagToleranceSamples / gainTolerance / timeScaleTolerance: what
+    ///     counts as "no real deformation", used only to scale the reported
+    ///     `deformation`.
     static func affineFit(
         trial: [Double],
         reference: [Double],
         maxLagSamples: Int,
         samplingRate: Double,
+        maxTimeScaleDeviation: Double = 0,
+        timeScaleStep: Double = 0.01,
+        timeScaleAnchorSample: Double? = nil,
         lagToleranceSamples: Double = 25,
-        gainTolerance: Double = 0.5
+        gainTolerance: Double = 0.5,
+        timeScaleTolerance: Double = 0.05
     ) -> AffineFit? {
         let length = min(trial.count, reference.count)
         guard length > 4, samplingRate > 0 else { return nil }
         let limit = max(0, min(maxLagSamples, length / 3))
+        let dilationLimit = min(max(abs(maxTimeScaleDeviation), 0), 0.25)
+        let anchor = timeScaleAnchorSample ?? Double(length - 1) / 2
+        let timeScales = timeScaleCandidates(limit: dilationLimit, step: timeScaleStep)
 
         let unshifted = TrialSimilarityAnalyzer.normalizedResidualRMS(
             Array(trial[0 ..< length]),
             Array(reference[0 ..< length])
         )
 
-        var best: (lag: Int, gain: Double, offset: Double, correlation: Double, residual: Double)?
+        var best: (
+            lag: Int,
+            gain: Double,
+            offset: Double,
+            timeScale: Double,
+            correlation: Double,
+            residual: Double,
+            deformation: Double
+        )?
 
-        for lag in -limit ... limit {
-            // Overlap only: no padding, so a large lag is not rewarded with
-            // invented zeros that happen to match a flat baseline.
-            let trialStart = max(lag, 0)
-            let referenceStart = max(-lag, 0)
-            let overlap = length - abs(lag)
-            guard overlap > 4 else { continue }
+        for timeScale in timeScales {
+            for lag in -limit ... limit {
+                // Sufficient statistics avoid allocating a pair of arrays for
+                // every grid point. Samples outside the real reference are
+                // skipped: no padding, and therefore no invented agreement.
+                var count = 0
+                var sumReference = 0.0
+                var sumTrial = 0.0
+                var sumReferenceSquared = 0.0
+                var sumTrialSquared = 0.0
+                var sumCross = 0.0
 
-            let trialSlice = Array(trial[trialStart ..< (trialStart + overlap)])
-            let referenceSlice = Array(reference[referenceStart ..< (referenceStart + overlap)])
+                for trialIndex in 0 ..< length {
+                    let source = anchor
+                        + timeScale * (Double(trialIndex) - anchor)
+                        - Double(lag)
+                    guard source >= 0, source <= Double(length - 1) else { continue }
+                    let lower = Int(source.rounded(.down))
+                    let upper = min(lower + 1, length - 1)
+                    let fraction = source - Double(lower)
+                    let referenceValue = reference[lower]
+                        + fraction * (reference[upper] - reference[lower])
+                    let trialValue = trial[trialIndex]
 
-            let fit = TrialSimilarityAnalyzer.regression(of: trialSlice, on: referenceSlice)
-            guard fit.slope != 0 || fit.correlation != 0 else { continue }
+                    count += 1
+                    sumReference += referenceValue
+                    sumTrial += trialValue
+                    sumReferenceSquared += referenceValue * referenceValue
+                    sumTrialSquared += trialValue * trialValue
+                    sumCross += referenceValue * trialValue
+                }
 
-            let meanTrial = trialSlice.reduce(0, +) / Double(overlap)
-            let meanReference = referenceSlice.reduce(0, +) / Double(overlap)
-            let offset = meanTrial - fit.slope * meanReference
+                guard count > 4, sumTrialSquared > 1e-12 else { continue }
+                let n = Double(count)
+                let referenceVariance = sumReferenceSquared - sumReference * sumReference / n
+                let trialVariance = sumTrialSquared - sumTrial * sumTrial / n
+                let covariance = sumCross - sumReference * sumTrial / n
+                guard referenceVariance > 1e-12, trialVariance > 1e-12 else { continue }
 
-            // Residual of the FITTED model, not of the raw difference.
-            var residual = 0.0
-            var scale = 0.0
-            for index in 0 ..< overlap {
-                let predicted = fit.slope * referenceSlice[index] + offset
-                let d = trialSlice[index] - predicted
-                residual += d * d
-                scale += trialSlice[index] * trialSlice[index]
-            }
-            guard scale > 1e-12 else { continue }
-            let normalized = sqrt(residual / scale)
+                let gain = covariance / referenceVariance
+                let correlation = covariance / sqrt(referenceVariance * trialVariance)
+                let offset = sumTrial / n - gain * sumReference / n
+                let residualSum = max(trialVariance - covariance * covariance / referenceVariance, 0)
+                let normalized = sqrt(residualSum / sumTrialSquared)
 
-            if best == nil || normalized < best!.residual {
-                best = (lag, fit.slope, offset, fit.correlation, normalized)
+                let lagPenalty = abs(Double(lag)) / max(lagToleranceSamples, 1e-6)
+                let gainPenalty = abs(gain - 1) / max(gainTolerance, 1e-6)
+                let timeScalePenalty = abs(timeScale - 1) / max(timeScaleTolerance, 1e-6)
+                let deformation = sqrt(
+                    lagPenalty * lagPenalty
+                        + gainPenalty * gainPenalty
+                        + timeScalePenalty * timeScalePenalty
+                )
+
+                if best == nil
+                    || normalized < best!.residual - 1e-12
+                    || (abs(normalized - best!.residual) <= 1e-12 && deformation < best!.deformation) {
+                    best = (lag, gain, offset, timeScale, correlation, normalized, deformation)
+                }
             }
         }
 
         guard let best else { return nil }
-
-        let lagPenalty = abs(Double(best.lag)) / max(lagToleranceSamples, 1e-6)
-        let gainPenalty = abs(best.gain - 1) / max(gainTolerance, 1e-6)
 
         return AffineFit(
             lagSamples: best.lag,
             lagMs: Double(best.lag) / samplingRate * 1000,
             gain: best.gain,
             offset: best.offset,
+            timeScale: best.timeScale,
             correlation: best.correlation,
             residualBefore: unshifted,
             residualAfter: best.residual,
-            deformation: sqrt(lagPenalty * lagPenalty + gainPenalty * gainPenalty)
+            deformation: best.deformation
         )
+    }
+
+    /// Symmetric deterministic grid with both bounds and α = 1 represented
+    /// exactly, even when `step` does not divide the requested limit.
+    private static func timeScaleCandidates(limit: Double, step: Double) -> [Double] {
+        guard limit > 1e-12 else { return [1] }
+        let increment = min(max(abs(step), 0.001), limit)
+        var values = [1 - limit, 1, 1 + limit]
+        var offset = increment
+        while offset < limit - 1e-12 {
+            values.append(1 - offset)
+            values.append(1 + offset)
+            offset += increment
+        }
+        return Array(Set(values)).sorted()
     }
 
     // MARK: - Simultaneous component regression

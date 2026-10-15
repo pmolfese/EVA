@@ -25,7 +25,7 @@ import CoreGraphics
 
 struct WaveformScaleUnitsTests {
 
-    /// The main waveform's row height, from `WaveformView.channelRowHeight`.
+    /// The main waveform's historical row height, now also the Fit-mode height.
     private let rowHeight: CGFloat = 70
 
     // MARK: - Agreement with the renderers

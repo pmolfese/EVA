@@ -104,6 +104,194 @@ struct ReplayCompatibilityTests {
         #expect(ReplayCompatibility.check(step, against: signal()) == nil)
     }
 
+    @Test func lightTargetMatchesLoadedSignalCompatibility() {
+        let sig = signal(events: [event("TREV"), event("TAR")], numberOfChannels: 32)
+        let target = ReplayCompatibilityTarget(signal: sig)
+        let steps = [
+            EVAProcessingStep(operation: .mriGradientCorrection, parameters: ["trMarkerCode": "TREV"]),
+            EVAProcessingStep(operation: .segment, parameters: ["eventCodes": "STD,TAR"]),
+            EVAProcessingStep(operation: .bcgCorrection, parameters: ["beatEventCode": "R128"]),
+            EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "1.0"])
+        ]
+
+        for step in steps {
+            #expect(
+                ReplayCompatibility.check(step, against: target)
+                    == ReplayCompatibility.check(step, against: sig)
+            )
+        }
+    }
+
+    @Test func metadataInspectionMatchesFullSignalWithoutReadingSamplesIntoResult() throws {
+        let url = Fixtures.url("example_3.mff")
+        let reader = MFFReader()
+        let metadata = try reader.inspectSignalMetadata(from: url)
+        let signal = try reader.loadSignal(from: url)
+
+        #expect(metadata.signalURL == signal.signalURL)
+        #expect(metadata.signalType == signal.signalType)
+        #expect(metadata.numberOfChannels == signal.numberOfChannels)
+        #expect(metadata.samplingRate == signal.samplingRate)
+        #expect(metadata.events == signal.events)
+    }
+
+    @Test func preflightInspectorReportsTheFlaggedStep() throws {
+        let url = Fixtures.url("example_1.mff")
+        let step = EVAProcessingStep(
+            operation: .mriGradientCorrection,
+            parameters: ["trMarkerCode": "A_CODE_THAT_IS_NOT_PRESENT"]
+        )
+
+        let result = BatchPreflightInspector.inspect(url: url, steps: [step])
+
+        #expect(result.inspectionError == nil)
+        #expect(result.numberOfChannels != nil)
+        #expect(result.samplingRate != nil)
+        #expect(result.issues.count == 1)
+        #expect(result.issues.first?.stepIndex == 0)
+        #expect(result.issues.first?.operation == .mriGradientCorrection)
+    }
+
+    @Test func preflightStateRejectsStaleAndRemovedFileResults() {
+        let first = URL(fileURLWithPath: "/tmp/first.mff")
+        let second = URL(fileURLWithPath: "/tmp/second.mff")
+        let result = { (url: URL) in
+            BatchPreflightResult(
+                url: url,
+                numberOfChannels: 32,
+                samplingRate: 250,
+                eventCodes: [],
+                issues: [],
+                inspectionError: nil
+            )
+        }
+
+        var state = BatchPreflightState()
+        let staleRevision = state.begin(files: [first, second])
+        let currentRevision = state.begin(files: [second])
+
+        let rejectedStale = state.accept([result(first), result(second)], revision: staleRevision)
+        #expect(!rejectedStale)
+        #expect(state.results.isEmpty)
+        #expect(state.pendingFiles == [second])
+
+        let acceptedCurrent = state.accept([result(first), result(second)], revision: currentRevision)
+        #expect(acceptedCurrent)
+        #expect(Set(state.results.keys) == [second])
+        #expect(state.pendingFiles.isEmpty)
+    }
+
+    // MARK: - PB-1 Phase B decision policy
+
+    @Test func skipDecisionPolicyKeepsSupportedPCASAndDropsItOnlyForMissingEvidence() {
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(
+            operation: .bcgCorrection,
+            parameters: ["beatEventCode": "R128"]
+        ))
+        script.append(EVAProcessingStep(operation: .filter, parameters: ["highPassHz": "1.0"]))
+
+        let supported = BatchDecisionPolicy.apply(
+            to: script,
+            availability: ReplayPayloadAvailability(
+                hasElectrodeGeometry: true,
+                beatEventCodes: ["R128"]
+            ),
+            enabled: true
+        )
+        #expect(supported.drops.isEmpty)
+        #expect(supported.script.steps.map(\.operation) == [.bcgCorrection, .filter])
+
+        let unsupported = BatchDecisionPolicy.apply(
+            to: script,
+            availability: ReplayPayloadAvailability(),
+            enabled: true
+        )
+        #expect(unsupported.script.steps.map(\.operation) == [.filter])
+        #expect(unsupported.drops.count == 1)
+        #expect(unsupported.drops[0].stepIndex == 0)
+        #expect(unsupported.drops[0].operation == .bcgCorrection)
+        #expect(unsupported.drops[0].reason.contains("electrode coordinates"))
+        #expect(unsupported.drops[0].reason.contains("beat events named R128"))
+        #expect(unsupported.drops[0].auditLogLine ==
+            "dropped bcgCorrection: this recording is missing electrode coordinates and beat events named R128 (skip-decisions policy)")
+    }
+
+    @Test func skipDecisionPolicyIsIdentityWhenDisabled() {
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .icaClean))
+
+        let result = BatchDecisionPolicy.apply(
+            to: script, availability: .none, enabled: false
+        )
+
+        #expect(result.drops.isEmpty)
+        #expect(result.script.steps == script.steps)
+    }
+
+    @Test func skipDecisionPolicyExemptsChannelAndTrialDecisions() {
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(operation: .markBad, parameters: ["channels": "1,2"]))
+        script.append(EVAProcessingStep(operation: .interpolateChannels, parameters: ["channels": "3"]))
+        script.append(EVAProcessingStep(operation: .trialExclusion))
+
+        let result = BatchDecisionPolicy.apply(
+            to: script, availability: .none, enabled: true
+        )
+
+        #expect(result.drops.isEmpty)
+        #expect(result.script.steps == script.steps)
+    }
+
+    @MainActor
+    @Test func windowedBatchUsesTheSamePerFileDropAndAuditRule() {
+        let step = EVAProcessingStep(
+            operation: .bcgCorrection,
+            parameters: ["beatEventCode": "R128"]
+        )
+        var script = EVAProcessingScript()
+        script.append(step)
+        let batch = BatchController()
+        batch.start(
+            files: [URL(fileURLWithPath: "/tmp/windowed-policy.mff")],
+            script: script,
+            sourceName: "src",
+            steps: [.init(
+                id: 0, step: step, kind: .decision,
+                included: true, pauseToReview: false, compatibilityFlag: nil
+            )],
+            mode: .fullAuto,
+            outputFolder: URL(fileURLWithPath: "/tmp/out"),
+            skipUnsupportedDecisions: true
+        )
+        defer { batch.stop() }
+
+        let replay = ReplayController()
+        let target = signal(events: [event("R128", at: 1)])
+        replay.configure(
+            fromBatch: batch,
+            script: script,
+            signal: target,
+            availability: ReplayPayloadAvailability(beatEventCodes: ["R128"])
+        )
+        #expect(replay.plannedActions().isEmpty)
+        #expect(replay.batchPolicyAuditLogLines == [
+            "dropped bcgCorrection: this recording is missing electrode coordinates (skip-decisions policy)"
+        ])
+
+        replay.configure(
+            fromBatch: batch,
+            script: script,
+            signal: target,
+            availability: ReplayPayloadAvailability(
+                hasElectrodeGeometry: true,
+                beatEventCodes: ["R128"]
+            )
+        )
+        #expect(replay.plannedActions().map(\.operation) == [.bcgCorrection])
+        #expect(replay.batchPolicyAuditLogLines.isEmpty)
+    }
+
     // MARK: - ReplayController integration
 
     @MainActor

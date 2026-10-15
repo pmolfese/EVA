@@ -42,6 +42,12 @@ struct ChannelSetEditorView: View {
     @State private var netTypeTextEntry: String = ""
     @State private var showsNetTypeTextField = false
     @State private var selectedIndices: Set<Int> = []
+    /// Authoritative display order. `selectedIndices` remains the fast map
+    /// membership lookup, while this array is what is saved and rendered.
+    @State private var orderedIndices: [Int] = []
+    /// Once the operator reorders rows, newly selected channels append instead
+    /// of silently re-sorting the authored order.
+    @State private var hasCustomOrder = false
     /// True while editing a brand-new, not-yet-saved set (the detail pane is
     /// active even though nothing is selected in the sidebar).
     @State private var isCreatingNew = false
@@ -350,7 +356,7 @@ struct ChannelSetEditorView: View {
                     VStack(spacing: 10) {
                         ChannelSetMapView(
                             layout: layout,
-                            selectedIndices: $selectedIndices,
+                            selectedIndices: orderedSelectionBinding,
                             interactive: !isViewingBuiltIn,
                             channelLabel: channelDisplayLabel,
                             onToggle: forceSymmetry && !isViewingBuiltIn
@@ -390,12 +396,12 @@ struct ChannelSetEditorView: View {
             Spacer()
 
             Button("Select All") {
-                selectedIndices = allAvailableChannelIndices
+                selectAllChannelsInRecordingOrder()
                 if forceSymmetry, let layout { mirrorEntireSelection(layout: layout) }
             }
             .disabled(isViewingBuiltIn || allAvailableChannelIndices.isEmpty)
 
-            Button("Clear") { selectedIndices.removeAll() }
+            Button("Clear") { clearSelection() }
                 .disabled(isViewingBuiltIn || selectedIndices.isEmpty)
         }
         .padding(.horizontal, 16)
@@ -411,7 +417,11 @@ struct ChannelSetEditorView: View {
                 .frame(width: 11, height: 11)
                 .overlay(Circle().stroke(.blue, lineWidth: 1))
             Text("Included in set")
-            Text(isViewingBuiltIn ? "Built-in sets are read-only" : "Click electrodes to add or remove them")
+            Text(
+                isViewingBuiltIn
+                    ? "Built-in sets are read-only"
+                    : "Click to add or remove; drag outward to add a circular region"
+            )
                 .foregroundStyle(.secondary)
             Spacer()
             if !selectedChannelSummary.isEmpty {
@@ -523,6 +533,79 @@ struct ChannelSetEditorView: View {
                         .foregroundStyle(.secondary)
                         .padding(.leading, 20)
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Display order")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if !isViewingBuiltIn, orderedIndices != orderedIndices.sorted() {
+                        Button("Recording order") { sortByRecordingOrder() }
+                            .buttonStyle(.link)
+                            .font(.caption2)
+                    }
+                }
+
+                if orderedIndices.isEmpty {
+                    Text("Select channels on the map to build the ordered list.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    List {
+                        ForEach(orderedIndices, id: \.self) { index in
+                            displayOrderRow(index)
+                        }
+                        .onMove(perform: moveOrderedIndices)
+                        .moveDisabled(isViewingBuiltIn)
+                    }
+                    .listStyle(.inset(alternatesRowBackgrounds: true))
+                    .frame(height: min(max(CGFloat(orderedIndices.count) * 28, 72), 220))
+                }
+
+                Text(isViewingBuiltIn
+                     ? "Built-in order is read-only."
+                     : "Drag a numbered row to reorder it. New channels append after a custom reorder.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func displayOrderRow(_ index: Int) -> some View {
+        let position = (orderedIndices.firstIndex(of: index) ?? 0) + 1
+        return HStack(spacing: 7) {
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.tertiary)
+            Text("\(position)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 24, alignment: .trailing)
+                .draggable(String(index))
+            Text(channelDisplayLabel(index))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .dropDestination(for: String.self) { items, _ in
+            guard let sourceText = items.first, let source = Int(sourceText) else { return false }
+            return moveDraggedChannel(source, before: index)
+        }
+        .help(isViewingBuiltIn ? "Built-in display order" : "Drag this numbered row to change display order")
+        .contextMenu {
+            if !isViewingBuiltIn {
+                Button("Move Up") { moveChannel(index, by: -1) }
+                    .disabled(position <= 1)
+                Button("Move Down") { moveChannel(index, by: 1) }
+                    .disabled(position >= orderedIndices.count)
+                Divider()
+                Button("Move to Top") { moveChannelToEdge(index, top: true) }
+                    .disabled(position <= 1)
+                Button("Move to Bottom") { moveChannelToEdge(index, top: false) }
+                    .disabled(position >= orderedIndices.count)
             }
         }
     }
@@ -642,10 +725,10 @@ struct ChannelSetEditorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 let binding = Binding<String>(
-                    get: { selectedIndices.sorted().map { String($0 + 1) }.joined(separator: ", ") },
+                    get: { orderedIndices.map { String($0 + 1) }.joined(separator: ", ") },
                     set: { text in
                         let parsed = text.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)).map { $0 - 1 } }
-                        selectedIndices = Set(parsed.filter { $0 >= 0 })
+                        replaceSelection(Set(parsed.filter { $0 >= 0 }))
                     }
                 )
                 TextField("1, 52, 54, 226-252", text: binding)
@@ -688,11 +771,9 @@ struct ChannelSetEditorView: View {
 
         return Button {
             guard !isViewingBuiltIn else { return }
-            if selected {
-                selectedIndices.remove(index)
-            } else {
-                selectedIndices.insert(index)
-            }
+            var next = selectedIndices
+            if selected { next.remove(index) } else { next.insert(index) }
+            replaceSelection(next)
         } label: {
             Text(label)
                 .font(.caption)
@@ -724,15 +805,22 @@ struct ChannelSetEditorView: View {
         return []
     }
 
+    private var orderedSelectionBinding: Binding<Set<Int>> {
+        Binding(
+            get: { selectedIndices },
+            set: { replaceSelection($0) }
+        )
+    }
+
     private var hasUnsavedChanges: Bool {
         guard let set = editingSet else { return isCreatingNew }
         return editingName != set.name
             || editingNetType != set.netType
-            || selectedIndices != Set(set.channelIndices)
+            || orderedIndices != uniqueIndices(set.channelIndices)
     }
 
     private var selectedChannelSummary: String {
-        let labels = selectedIndices.sorted().map(channelDisplayLabel)
+        let labels = orderedIndices.map(channelDisplayLabel)
         guard !labels.isEmpty else { return "" }
         let visible = labels.prefix(24).joined(separator: ", ")
         let remaining = labels.count - 24
@@ -756,12 +844,90 @@ struct ChannelSetEditorView: View {
         return "\(index + 1)"
     }
 
+    private func uniqueIndices(_ indices: [Int]) -> [Int] {
+        var seen = Set<Int>()
+        return indices.filter { seen.insert($0).inserted }
+    }
+
+    /// Reconciles the map's unordered membership with the authoritative order.
+    /// Before a manual reorder, additions follow source (numeric) order. After
+    /// one, additions append so an existing authored sequence never jumps.
+    private func replaceSelection(_ next: Set<Int>) {
+        orderedIndices.removeAll { !next.contains($0) }
+        let alreadyOrdered = Set(orderedIndices)
+        orderedIndices.append(contentsOf: next.subtracting(alreadyOrdered).sorted())
+        if !hasCustomOrder {
+            orderedIndices.sort()
+        }
+        selectedIndices = next
+        if orderedIndices.isEmpty { hasCustomOrder = false }
+    }
+
+    private func selectAllChannelsInRecordingOrder() {
+        orderedIndices = allAvailableChannelIndices.sorted()
+        selectedIndices = Set(orderedIndices)
+        hasCustomOrder = false
+    }
+
+    private func clearSelection() {
+        orderedIndices.removeAll()
+        selectedIndices.removeAll()
+        hasCustomOrder = false
+    }
+
+    private func sortByRecordingOrder() {
+        orderedIndices.sort()
+        hasCustomOrder = false
+    }
+
+    private func moveOrderedIndices(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        guard !isViewingBuiltIn else { return }
+        orderedIndices.move(fromOffsets: offsets, toOffset: destination)
+        hasCustomOrder = true
+    }
+
+    private func moveChannel(_ index: Int, by delta: Int) {
+        guard !isViewingBuiltIn,
+              let source = orderedIndices.firstIndex(of: index) else { return }
+        let destination = source + delta
+        guard orderedIndices.indices.contains(destination) else { return }
+        orderedIndices.swapAt(source, destination)
+        hasCustomOrder = true
+    }
+
+    private func moveChannelToEdge(_ index: Int, top: Bool) {
+        guard !isViewingBuiltIn,
+              let source = orderedIndices.firstIndex(of: index) else { return }
+        let value = orderedIndices.remove(at: source)
+        if top {
+            orderedIndices.insert(value, at: 0)
+        } else {
+            orderedIndices.append(value)
+        }
+        hasCustomOrder = true
+    }
+
+    private func moveDraggedChannel(_ source: Int, before target: Int) -> Bool {
+        guard !isViewingBuiltIn,
+              source != target,
+              let sourceIndex = orderedIndices.firstIndex(of: source),
+              let originalTargetIndex = orderedIndices.firstIndex(of: target) else { return false }
+        let movingDown = sourceIndex < originalTargetIndex
+        let value = orderedIndices.remove(at: sourceIndex)
+        guard let targetIndex = orderedIndices.firstIndex(of: target) else { return false }
+        orderedIndices.insert(value, at: movingDown ? targetIndex + 1 : targetIndex)
+        hasCustomOrder = true
+        return true
+    }
+
     private func loadSet(_ set: ChannelSet) {
         editingSet = set
         editingName = set.name
         editingNetType = set.netType
         showsNetTypeTextField = false
-        selectedIndices = Set(set.channelIndices)
+        orderedIndices = uniqueIndices(set.channelIndices)
+        selectedIndices = Set(orderedIndices)
+        hasCustomOrder = orderedIndices != orderedIndices.sorted()
         isCreatingNew = false
     }
 
@@ -776,6 +942,8 @@ struct ChannelSetEditorView: View {
         editingNetType = layout?.name
         showsNetTypeTextField = false
         selectedIndices = []
+        orderedIndices = []
+        hasCustomOrder = false
         forceSymmetry = false
         isCreatingNew = true
     }
@@ -787,6 +955,8 @@ struct ChannelSetEditorView: View {
             editingName = ""
             editingNetType = layout?.name
             selectedIndices = []
+            orderedIndices = []
+            hasCustomOrder = false
         }
     }
 
@@ -796,7 +966,7 @@ struct ChannelSetEditorView: View {
         let newSet = ChannelSet(
             id: asNew ? UUID() : (editingSet?.id ?? UUID()),
             name: finalName,
-            channelIndices: selectedIndices.sorted(),
+            channelIndices: orderedIndices,
             netType: editingNetType
         )
         store.save(newSet)
@@ -814,6 +984,8 @@ struct ChannelSetEditorView: View {
         editingSet = nil
         editingName = ""
         selectedIndices = []
+        orderedIndices = []
+        hasCustomOrder = false
         isCreatingNew = false
     }
 
@@ -823,11 +995,9 @@ struct ChannelSetEditorView: View {
     /// state, so the selection stays left/right symmetric.
     private func applySymmetry(to channel: Int, nowSelected: Bool, layout: SensorLayout) {
         guard let partner = mirrorPartner(of: channel, layout: layout), partner != channel else { return }
-        if nowSelected {
-            selectedIndices.insert(partner)
-        } else {
-            selectedIndices.remove(partner)
-        }
+        var next = selectedIndices
+        if nowSelected { next.insert(partner) } else { next.remove(partner) }
+        replaceSelection(next)
     }
 
     /// Adds the mirror partner of every currently-selected channel.
@@ -838,7 +1008,7 @@ struct ChannelSetEditorView: View {
                 additions.insert(partner)
             }
         }
-        selectedIndices.formUnion(additions)
+        replaceSelection(selectedIndices.union(additions))
     }
 
     /// The electrode whose position most closely mirrors `channel` across the

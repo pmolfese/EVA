@@ -359,8 +359,18 @@ struct MotionConfigView: View {
 
     // MARK: - Motion plot
 
+    /// Per-volume magnitude under the *selected* metric, from the same function
+    /// the correction uses. The plot, the flagged count, and the slider range all
+    /// read this — they used to read all-six FD whatever the picker said, so the
+    /// sheet could promise a different set of volumes than correction excluded.
+    private func magnitudes(for parameters: MotionParameters) -> [Double] {
+        GradientDonorSelection.motionMagnitudes(
+            motion: parameters.samples, metric: motionMetric, radiusMm: radiusMm
+        )
+    }
+
     private func plotSection(for parameters: MotionParameters) -> some View {
-        let fd = parameters.framewiseDisplacement(radiusMm: radiusMm)
+        let fd = magnitudes(for: parameters)
 
         return VStack(alignment: .leading, spacing: 14) {
             // Rotations (degrees).
@@ -401,7 +411,7 @@ struct MotionConfigView: View {
 
             // Framewise displacement with the threshold rule.
             VStack(alignment: .leading, spacing: 4) {
-                Text("Framewise Displacement (mm)")
+                Text(motionMetric.seriesLabel)
                     .font(.caption.weight(.semibold))
                 Chart {
                     ForEach(Array(fd.enumerated()), id: \.offset) { index, value in
@@ -444,13 +454,14 @@ struct MotionConfigView: View {
     // MARK: - Threshold
 
     private func thresholdSection(for parameters: MotionParameters) -> some View {
-        let exceeding = parameters.volumesExceeding(threshold: fdThreshold, radiusMm: radiusMm)
-        let maxFD = parameters.framewiseDisplacement(radiusMm: radiusMm).max() ?? 0
+        let magnitudes = magnitudes(for: parameters)
+        let exceeding = magnitudes.indices.filter { magnitudes[$0] > fdThreshold }
+        let maxFD = magnitudes.max() ?? 0
 
         return VStack(alignment: .leading, spacing: 10) {
             Divider()
             HStack {
-                Text("Motion Threshold (FD)")
+                Text("Motion Threshold")
                     .font(.caption.weight(.semibold))
                 Spacer()
                 Text("\(exceeding.count) of \(parameters.count) volumes flagged")
@@ -481,7 +492,7 @@ struct MotionConfigView: View {
             }
 
             HStack(spacing: 12) {
-                Text("Moosmann RP-info")
+                Text("Motion metric")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Picker("Motion metric", selection: $motionMetric) {
@@ -490,7 +501,8 @@ struct MotionConfigView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 180)
+                .labelsHidden()
+                .frame(width: 330)
                 Text(motionMetric.help)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -498,7 +510,7 @@ struct MotionConfigView: View {
             }
 
             Label {
-                Text("At \(fdThreshold, specifier: "%.2f") mm, **\(exceeding.count)** of \(parameters.count) TRs (\(percentExceeding(exceeding.count, of: parameters.count))) would be excluded as template donors when “Exclude high-motion TRs” is enabled. Moosmann uses the same threshold with the RP-info metric above.")
+                Text("At \(fdThreshold, specifier: "%.2f") mm, **\(exceeding.count)** of \(parameters.count) TRs (\(percentExceeding(exceeding.count, of: parameters.count))) would be excluded as template donors when “Exclude high-motion TRs” is enabled. Moosmann uses the same threshold and metric to place its motion barriers.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

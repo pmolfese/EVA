@@ -452,10 +452,10 @@ struct GradientTemplateCorrectorTests {
     func epochsRunningPastTheRecordingAreLeftUncorrectedAndReported(backend: GradientComputeBackend) throws {
         guard supports(backend) else { return }
 
-        // No tail: the last epoch needs one sample more than the recording has.
-        // Alignment is disabled so the epoch cannot be rescued by shifting it
-        // back into bounds, which is what the aligner does when it can.
-        let recording = makeRecording(volumes: 20, period: 100, tailSamples: 0)
+        // The recording stops ten samples into what would be the last epoch's
+        // final stretch. Alignment is disabled so the epoch cannot be rescued by
+        // shifting it back into bounds, which is what the aligner does when it can.
+        let recording = makeRecording(volumes: 20, period: 100, tailSamples: -10)
         var config = defaultConfig(backend)
         config.alignmentEnabled = false
         let result = try GradientTemplateCorrector.correct(
@@ -467,6 +467,41 @@ struct GradientTemplateCorrectorTests {
         #expect(result.diagnostics.warnings.contains(.epochOutOfBounds(epoch: 19)))
         let last = try #require(result.diagnostics.epochs.first { $0.epoch == 19 })
         #expect(!last.corrected)
+    }
+
+    @Test(arguments: GradientComputeBackend.allCases)
+    func aFinalEpochShortOnlyOfItsClosingSampleIsCorrectedInPlace(backend: GradientComputeBackend) throws {
+        guard supports(backend) else { return }
+
+        // No tail: the recording stops exactly one period after the last
+        // trigger, so the last window lacks only its closing sample — the next
+        // epoch's trigger, which was never recorded. That epoch is still
+        // corrected, where it is, and nothing past the recording comes back.
+        let recording = makeRecording(volumes: 20, period: 100, tailSamples: 0)
+        for factor in [1, 3] {
+            var config = defaultConfig(backend)
+            config.upsampleFactor = factor
+            config.subSampleAlignment = true
+            let result = try GradientTemplateCorrector.correct(
+                channels: [recording.channel],
+                volumeTriggers: recording.triggers,
+                config: config,
+                samplingRate: Self.samplingRate
+            )
+            #expect(result.channels[0].count == recording.sampleCount)
+            #expect(!result.diagnostics.warnings.contains(.epochOutOfBounds(epoch: 19)))
+            let last = try #require(result.diagnostics.epochs.first { $0.epoch == 19 })
+            #expect(last.corrected, "factor \(factor)")
+            // Within one recorded sample of where it belongs. On the upsampled
+            // axis this smooth test artifact's correlation peak is broad enough
+            // that the repeated closing sample can nudge it by a fraction.
+            #expect(abs(last.integerShift) < factor, "factor \(factor): shifted by \(last.integerShift)")
+
+            let finalEpoch = (19 * 100)..<recording.sampleCount
+            let before = rootMeanSquareDifference(recording.channel, recording.physiology, over: finalEpoch)
+            let after = rootMeanSquareDifference(result.channels[0], recording.physiology, over: finalEpoch)
+            #expect(after < before * 0.1, "factor \(factor): residual \(after) vs \(before)")
+        }
     }
 
     @Test(arguments: GradientComputeBackend.allCases)

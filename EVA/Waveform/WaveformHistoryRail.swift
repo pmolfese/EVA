@@ -84,7 +84,7 @@ extension WaveformView {
             cleaningEnabled: artifactVM.cleaningIsEnabled,
             // Threshold detection produces no signal of its own, so it needs its
             // own terms or its step would appear and disappear unnoticed.
-            thresholdDetection: artifactVM.detectionMethod == .threshold,
+            thresholdDetection: detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts,
             detectsBlinks: detectsEyeBlinkArtifacts,
             detectsMovements: detectsEyeMovementArtifacts,
             thresholdConfigCommits: artifactVM.thresholdConfigCommits
@@ -105,6 +105,22 @@ extension WaveformView {
         // Snapshot *after* recording, so it files under the node this state
         // produced rather than the one we came from.
         historyModel.storeSnapshot(capturePipelineSnapshot())
+    }
+
+    /// Mints a recorded-refusal node for a PCA-S run that refused. A refusal
+    /// changes no signal, so `recordProcessingHistory`'s signature-keyed trigger
+    /// never fires for it — this has its own trigger (`surrogateRefusalToken`).
+    /// The pointer is already on the last successful node, so the refusal hangs
+    /// one step below it, inspectable but not navigable, and is pruned on the
+    /// next real commit.
+    func mintPendingRefusal() {
+        guard let refusal = bcg.surrogatePendingRefusal else { return }
+        bcg.surrogatePendingRefusal = nil
+        let historyModel = recordingStore.processingHistory
+        guard !historyModel.isNavigating else { return }
+        historyModel.recordRefusal(
+            EVAProcessingStep(operation: .bcgCorrection, parameters: refusal.parameters),
+            quality: refusal.quality)
     }
 
     func capturePipelineSnapshot() -> PipelineSnapshot {
@@ -167,7 +183,6 @@ extension WaveformView {
         let lights = ReplaySettingsRestore.settings(for: path.compactMap(\.step))
         detectsEyeBlinkArtifacts = lights.detectsBlinks
         detectsEyeMovementArtifacts = lights.detectsMovements
-        if lights.selectsThresholdMethod { artifactVM.detectionMethod = .threshold }
         filter.averageReference = lights.continuousReference != nil
         epoching.averageReference = lights.epochReference != nil
         epoching.baselineCorrected = lights.baselineCorrection

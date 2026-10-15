@@ -19,12 +19,114 @@ When defining an artifact, consider:
 
 EVA includes several cleaning approaches, including regression, OBS, SSP/PCA, and averaging-based methods. Preview the result before applying a cleaning step.
 
+Threshold detection and ICA are independent. **Eye Blink** and **Eye Movement**
+can remain enabled while you run or review **ICA…**; applying an ICA removal
+automatically reruns the enabled threshold detectors on the updated signal.
+
+## Movement Artifact PCA (MAAC-3)
+
+Choose **Artifacts > Movement Artifact (PCA)…** to open the MAAC-3 movement
+detection sheet. Choose **Analyze Movement** to run temporal PCA separately
+within each analysis range, apply an oblique Promax rotation, and identify
+factors whose channel back-projection exceeds the configured peak-to-peak
+threshold (200 µV by default). Review the affected ranges, then choose **Add
+Movement Markers**. EVA adds one duration-bearing `MOV` marker per affected
+range and creates a **MAAC Movement** definition for **Clean Artifacts**.
+
+The default **Automatic** boundary mode uses stored epoch boundaries when the
+recording contains them. For continuous recordings it falls back to
+non-overlapping one-second windows, including a shorter final window. The
+detection sheet can force either mode and change the window length, threshold,
+Promax power, and maximum factor count. These settings are saved with the
+definition so its markers and later correction use the same configuration.
+
+Adding markers closes the detection sheet; it does not open or run **Clean
+Artifacts**. When you are ready, open **Clean Artifacts** yourself. The **MAAC
+Movement** row is already set to **MAAC-3 Movement PCA**. Applying it reruns the
+saved analysis and subtracts the selected movement factors while leaving bad
+and unselected channels unchanged. MAAC-3 is intentionally unavailable for
+averaged data.
+
+## Muscle Artifact BSS-CCA (MAAC-4)
+
+Choose **Artifacts > Muscle Artifact (BSS-CCA)…** to open MAAC-4's detection
+and review sheet. EVA separates sources by canonical correlation between the
+multichannel signal and its one-sample-delayed copy. Muscle-like sources have
+relatively low temporal autocorrelation and relatively high high-frequency
+power; no samples are changed during this analysis step.
+
+Automatic range selection uses stored epoch boundaries when present. Otherwise
+it uses 10-second continuous windows with 50% overlap and crossfades the removed
+contributions at window boundaries. The CCA operator is estimated near 250 Hz
+for efficiency, then applied to the native-rate samples. Bad, already
+interpolated, and unselected EEG channels are unchanged, and PNS channels are
+not part of the EEG matrix.
+
+Choose **Analyze Muscle** to review the suggestions. The descriptive progress
+panel reports the current CCA/spectral stage, ranges and samples completed,
+flagged and skipped ranges, component counts, throughput, and estimated time
+remaining. The default classifier marks a component when its mean 15–30 Hz
+power divided by its mean 1–15 Hz power is at least 1/7, following De Vos et
+al. You can edit the bands, ratio, analysis rate, and windowing.
+
+Each affected range appears in the review list. Use its scope button or the
+**Previous**, **Next**, and **Show in Waveform** controls to center and highlight
+the full interval, then check or uncheck its components. Overrides are stored
+by range and component, so applying or replaying the same definition is
+deterministic. If upstream ICA/ICLabel results exist, the panel shows its Muscle
+labels as a QC cross-check only; ICLabel never prevents or forces BSS-CCA
+removal.
+
+**Add Muscle Markers** adds duration-bearing `EMG` markers and a **MAAC Muscle**
+definition, then closes the detection sheet. It does not open or run **Clean
+Artifacts**. Open that sheet yourself when you are ready to preview and apply
+the saved BSS-CCA decisions.
+
+MAAC-4 requires an unaveraged signal whose available sampling bandwidth covers
+the configured EMG band. EVA refuses insufficient Nyquist bandwidth and warns
+when an active low-pass has already attenuated part of that band. In standalone
+Clean Artifacts use, definitions run in the order shown. EVA's full-MAAC
+ordering mode instead guarantees that movement correction runs before muscle
+correction; the future one-click MAAC preset will select that mode across the
+complete pipeline.
+
 Check whether:
 
 - The artifact is reduced.
 - Neighboring neural signal remains plausible.
 - New edge artifacts or ringing have not been introduced.
 - The method behaves consistently across events or channels.
+
+## Saccadic Spike Potential
+
+Choose **Artifacts > Saccadic Spike Potential…** to detect and correct the brief,
+biphasic potential produced at saccade onset. This workflow is separate from
+blink correction: it works in the first-difference domain, rereferenced to Cz,
+and uses a spatial scalp template because these fast spikes are not reliably
+isolated by ICA.
+
+EVA proposes Cz, vertical EOG, lower vertical EOG, and horizontal EOG channel
+roles from channel names or the active sensor layout. Confirm those one-based
+channel numbers before detection, especially for a custom montage. Marked-bad
+and already-interpolated channels are omitted. If Cz is not present as a
+recorded or restored channel, restore the acquisition reference or select the
+correct Cz-equivalent channel before continuing.
+
+The default **Canonical** template maps the EP Toolkit's 33-channel canonical
+saccadic-spike topography onto the recording montage and normalizes it so the
+absolute Cz-to-lower-VEOG difference is one. **Session average** instead derives
+the map from preliminary candidates in the current recording; use it when the
+canonical map is visibly inappropriate, recognizing that it is more vulnerable
+to a poor candidate set. Raising the threshold makes detection more
+conservative.
+
+After detection, inspect the number of preliminary and confirmed events and the
+template topography. **Use Detected SPs** adds the result to Clean Artifacts with
+the dedicated **SP Spatial Filter** treatment. The cleaning preview shows the
+estimated **Subtracted SPs** beside the data **With SPs removed**. Look for a
+sharp ocular/parietal spike in the removed estimate without broader ERP-shaped
+activity; if the removed estimate looks neural, revise the channel roles or
+threshold before applying it.
 
 ## MRI Gradient Artifact Correction
 
@@ -66,6 +168,43 @@ All fMRI gradient-removal methods assume regularly spaced scanner markers and a 
 - Load motion parameters before using Moosmann or high-motion donor exclusion.
 - Record method settings in your analysis notes, especially donor windows, motion threshold, OBS, ANC, and template scaling.
 
+### Understanding The MR Correction Rating
+
+After an MRI gradient-correction step, the history rail shows a **Good**,
+**Watch**, or **Poor** pill. This is a rating of that correction run, not a
+general rating of the participant or the EEG. Open the pill to see the three
+measurements that produced it. The overall rating is the worst of the three:
+one Poor measurement makes the run Poor, and otherwise one Watch measurement
+makes it Watch.
+
+| Measurement | Good | Watch | Poor | What it means |
+| --- | ---: | ---: | ---: | --- |
+| Scanner-locked residue | Below 10% | 10% to below 30% | 30% or more | The share of the corrected signal's remaining broadband energy that still repeats at the scanner TR. EVA calculates this per channel and grades the 90th percentile, so residue in a minority of channels is not hidden by a clean median. |
+| Removed variance | 0.90 to below 1.05 | No Watch band | Below 0.90 or at least 1.05 | `var(input − output) / var(input)` over the scan. Too little means much of the scanner artifact was left behind; a value at or above 1.05 means the subtraction removed more variance than the input carried, consistent with a template being applied at the wrong times. |
+| Epoch coverage | 98% or more | 90% to below 98% | Below 90% | The fraction of correctable TR epochs the selected method actually corrected. A partial final epoch at the recording edge is excluded. Unreliable spans or run-level warnings can change an otherwise Good coverage result to Watch. |
+
+The residue breakdown also reports **Below 40 Hz**. That is the same
+scanner-lock check after a 40 Hz low-pass and estimates how much repeating
+residue reaches common EEG analysis bands. It is context only and does not
+change the rating; the broadband value is the graded measurement. For example,
+“Broadband: 100%” and “Below 40 Hz: 15%” means the run is Poor because nearly
+all remaining broadband energy repeats with the scanner, although much of that
+residue lies above 40 Hz.
+
+The rating does not use clean ground truth. In particular, it cannot prove that
+brain activity was preserved: an over-aggressive correction can remove brain
+along with the artifact and leave little scanner-locked residue. The residue
+measurement also follows the TR markers supplied to the correction, so badly
+misplaced or jittered markers can hide scanner locking; the removed-variance
+measurement catches many, but not every, such failure. Treat the pill as a
+quality-control warning and inspect the waveform, timing markers, slice count,
+and acquisition clock synchronization before accepting a Poor run.
+
+The thresholds were measured against EVA's simulated clean signal and gradient
+artifact, not a library of real scanner recordings. The derivation, validation
+counts, known blind spots, and retained raw campaign data are documented in
+[Run-Grade Calibration: Gradient](https://github.com/pmolfese/EVA/blob/main/docs/provenance/run-grade-calibration.md#gradient-gradientrungrade).
+
 ## Ballistocardiogram Correction
 
 The pulse artifact is corrected separately from the gradient artifact, in the BCG panel. EVA offers detection-plus-cleaning methods, carbon-wire-loop (CWL) regression, and surrogate-source separation (PCA-S).
@@ -97,6 +236,14 @@ The panel reports what each run fitted: how many beats were accepted, how many c
 **Channel count matters more than it appears.** The brain model is a tighter description of what brains can produce as electrode count rises, so the artifact block absorbs more of the slack at 20 channels than at 64. A low-density evaluation understates the method.
 
 ### References
+
+Dien, J. (2024). Multi-Algorithm Artifact Correction (MAAC) procedure part one: Algorithm and example. *Biological Psychology, 188*, 108775. https://doi.org/10.1016/j.biopsycho.2024.108775
+
+De Clercq, W., Vergult, A., Vanrumste, B., Van Paesschen, W., & Van Huffel, S. (2006). Canonical correlation analysis applied to remove muscle artifacts from the electroencephalogram. *IEEE Transactions on Biomedical Engineering, 53*(12), 2583-2587. https://doi.org/10.1109/TBME.2006.879459
+
+De Vos, M., Riès, S., Vanderperren, K., Vanrumste, B., Alario, F.-X., Van Huffel, S., & Burle, B. (2010). Removal of muscle artifacts from EEG recordings of spoken language production. *Neuroinformatics, 8*(2), 135-150. https://doi.org/10.1007/s12021-010-9071-0
+
+Semlitsch, H. V., Anderer, P., Schuster, P., & Presslich, O. (1986). A solution for reliable and valid reduction of ocular artifacts, applied to the P300 ERP. *Psychophysiology, 23*(6), 695-703. https://doi.org/10.1111/j.1469-8986.1986.tb00696.x
 
 Berg, P., & Scherg, M. (1994). A multiple source approach to the correction of eye artifacts. *Electroencephalography and Clinical Neurophysiology, 90*(3), 229-241. https://doi.org/10.1016/0013-4694(94)90094-9
 

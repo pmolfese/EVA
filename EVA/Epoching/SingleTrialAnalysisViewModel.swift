@@ -350,6 +350,7 @@ final class SingleTrialAnalysisViewModel {
 
     // MARK: Result / run state
     var result: SingleTrialAnalyzer.Result?
+    var measurementWindowResults: [SingleTrialAnalyzer.WindowResult] = []
     var woodyResult: WoodyAlignmentAnalyzer.Result?
     var woodyResultCategory: String?
     var woodyResultChannelIndices: [Int] = []
@@ -382,6 +383,7 @@ final class SingleTrialAnalysisViewModel {
         windowStartMs = nil
         windowEndMs = nil
         result = nil
+        measurementWindowResults = []
         woodyResult = nil
         woodyResultCategory = nil
         woodyResultChannelIndices = []

@@ -474,11 +474,325 @@ struct BCGSurrogateCorrectionTests {
         #expect(first.report == second.report)
     }
 
+    /// Define Artifact already performed the template match and the user
+    /// selected that event set. PCA-S must not silently run a second threshold
+    /// over it; even an impossible correlation threshold is ignored in this
+    /// mode and every in-bounds supplied epoch is retained.
+    @Test func reviewedExemplarUsesEverySuppliedEpochWithoutRematching() async throws {
+        let fixture = try makeFixture()
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        settings.correlationThreshold = 2.0
+
+        let components = try #require(await BCGSurrogateTopographies.components(
+            channels: fixture.noisy.map { $0.map(Double.init) },
+            samplingRate: samplingRate,
+            beatSeconds: fixture.beats,
+            settings: settings
+        ))
+
+        #expect(components.patternSearch == .reviewedExemplar)
+        #expect(components.candidateBeatCount == fixture.beats.count)
+        #expect(components.acceptedBeatCount == fixture.beats.count)
+        #expect(components.representativeBeatIndex == nil)
+    }
+
+    /// End-to-end contract for the route used by both the Clean Artifacts UI
+    /// and replay: a BCG definition hands its exact detected event centers to
+    /// PCA-S, receives a fitted report, and records a cleaning summary.
+    @MainActor
+    @Test func artifactCleaningExecutorRunsManualExemplarPCAS() async throws {
+        let fixture = try makeFixture()
+        let signal = SyntheticSignal.make(fixture.noisy, samplingRate: samplingRate)
+        let events = fixture.beats.enumerated().map { index, time in
+            MFFEvent(
+                id: "reviewed-bcg-\(index)",
+                code: "BCG",
+                beginTimeSeconds: time,
+                rawBeginTime: String(format: "%.6f", time),
+                sourceFile: "Trajectory 60%",
+                timeAnchor: .center
+            )
+        }
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        let artifact = DefinedArtifact(
+            type: .bcg,
+            name: "Reviewed BCG",
+            eventCode: "BCG",
+            events: events,
+            selectedChannelIndices: Array(0..<channelCount),
+            windowSizeSeconds: 0.7,
+            average: nil,
+            topography: nil,
+            cleaningMethod: .pcaS,
+            pcaSSettings: settings
+        )
+
+        let outcome = await ArtifactCleaningExecutor.cleanedSignal(
+            from: signal,
+            artifacts: [artifact],
+            excluding: [],
+            geometry: fixture.geometry
+        )
+
+        let report = try #require(outcome.pcaSReports[artifact.id])
+        #expect(outcome.failures.isEmpty)
+        #expect(outcome.summaries.count == 1)
+        #expect(outcome.summaries[0].method == .pcaS)
+        #expect(report.patternSearch == BCGArtifactPatternSearch.reviewedExemplar.rawValue)
+        #expect(report.acceptedBeatCount == events.count)
+        #expect(outcome.signal.data != signal.data)
+    }
+
+    /// Clean Artifacts can fit PCA-S from the broadband pre-filter signal while
+    /// applying the learned spatial operator to the current signal, and can use
+    /// real R-wave anchors only when the caller supplies them.
+    @MainActor
+    @Test func artifactCleaningExecutorSupportsBroadbandFitAndRWaveAnchors() async throws {
+        let fixture = try makeFixture()
+        let broadband = SyntheticSignal.make(fixture.noisy, samplingRate: samplingRate)
+        let currentData = fixture.noisy.map { channel in channel.map { $0 * 0.75 } }
+        let current = SyntheticSignal.make(currentData, samplingRate: samplingRate)
+
+        var settings = BCGSurrogateSettings.default
+        settings.inputSource = .broadband
+        settings.beatSource = .rWaves
+        settings.rWaveLagSeconds = 0.300
+        settings.patternSearch = .iterative
+        let artifact = DefinedArtifact(
+            type: .bcg,
+            name: "R-wave BCG",
+            eventCode: "BCG",
+            events: [],
+            selectedChannelIndices: Array(0..<channelCount),
+            windowSizeSeconds: 0.7,
+            average: nil,
+            topography: nil,
+            cleaningMethod: .pcaS,
+            pcaSSettings: settings
+        )
+
+        let outcome = await ArtifactCleaningExecutor.cleanedSignal(
+            from: current,
+            artifacts: [artifact],
+            excluding: [],
+            geometry: fixture.geometry,
+            broadbandSource: broadband,
+            rWaveTimes: fixture.beats.map { $0 - settings.rWaveLagSeconds }
+        )
+
+        let report = try #require(outcome.pcaSReports[artifact.id])
+        #expect(outcome.failures.isEmpty)
+        #expect(report.candidateBeatCount == fixture.beats.count)
+        #expect(outcome.signal.data.count == current.data.count)
+        #expect(outcome.signal.data.first?.count == current.data.first?.count)
+        #expect(outcome.signal.data != current.data)
+    }
+
+    /// A front/back reflection is not a harmless dipole-direction sign change:
+    /// it builds the surrogate basis in the wrong coordinate frame.  Keep this
+    /// sensitivity check beside the truth-backed fixture so a future importer,
+    /// coregistration path, or simulator convention cannot silently negate Y.
+    @Test func frontBackReflectedCorrectionGeometryIsDetectedAsMismatch() async throws {
+        let fixture = try makeFixture()
+        let rows = Array(0..<channelCount)
+        let matched = try await BCGSurrogateCorrection.correct(
+            data: fixture.noisy,
+            samplingRate: samplingRate,
+            correctedRows: rows,
+            geometry: fixture.geometry,
+            channelNames: nil,
+            beatSeconds: fixture.beats
+        )
+        let reflectedPositions = fixture.geometry.positions.mapValues { position in
+            SIMD3<Double>(position.x, -position.y, position.z)
+        }
+        let reflectedGeometry = ElectrodeGeometry(
+            name: "Synthetic cap (Y reflected)",
+            positions: reflectedPositions,
+            channelNames: fixture.geometry.channelNames
+        )
+        let reflected = try await BCGSurrogateCorrection.correct(
+            data: fixture.noisy,
+            samplingRate: samplingRate,
+            correctedRows: rows,
+            geometry: reflectedGeometry,
+            channelNames: nil,
+            beatSeconds: fixture.beats
+        )
+
+        let matchedSNR = broadbandSNR(clean: fixture.clean, corrected: matched.data)
+        let reflectedSNR = broadbandSNR(clean: fixture.clean, corrected: reflected.data)
+        let operatorDifference = zip(matched.operatorMatrix, reflected.operatorMatrix).reduce(0.0) {
+            partial, pair in
+            partial + zip(pair.0, pair.1).reduce(0.0) {
+                $0 + ($1.0 - $1.1) * ($1.0 - $1.1)
+            }
+        }.squareRoot()
+
+        print(String(format:
+            "PCA-S Y-reflection check: matched SNR %.3f, reflected SNR %.3f, operator difference %.3f",
+            matchedSNR, reflectedSNR, operatorDifference
+        ))
+
+        #expect(operatorDifference > 1e-3, "Y reflection left the fitted operator unchanged")
+        #expect(reflectedSNR < matchedSNR * 0.9,
+                "Y reflection was not detectably worse: matched \(matchedSNR), reflected \(reflectedSNR)")
+    }
+
+    // MARK: - Reliability-threshold measurement (SI-4 Track 3)
+
+    /// The three orthonormal spatial patterns the artifact is built from — the
+    /// true artifact subspace, so a component's overlap with it can be scored.
+    private func artifactSubspace() -> [[Double]] {
+        var patterns: [[Double]] = []
+        for component in 0..<3 {
+            var pattern = [Double](repeating: 0, count: channelCount)
+            for channel in 0..<channelCount {
+                let phase = Double(channel) / Double(channelCount) * 2 * .pi
+                pattern[channel] = cos(phase * Double(component + 1) + Double(component))
+            }
+            // Gram-Schmidt against what is already in the basis, then normalize,
+            // so the three directions are mutually orthonormal and the overlap
+            // below is a genuine energy fraction in [0, 1].
+            for existing in patterns {
+                let projection = zip(pattern, existing).reduce(0) { $0 + $1.0 * $1.1 }
+                for index in pattern.indices { pattern[index] -= projection * existing[index] }
+            }
+            let norm = pattern.reduce(0) { $0 + $1 * $1 }.squareRoot()
+            patterns.append(pattern.map { $0 / norm })
+        }
+        return patterns
+    }
+
+    /// Fraction of a unit-norm topography's energy that lies in the artifact
+    /// subspace. ~1 for a real artifact component, ~0 for leftover brain.
+    private func artifactOverlap(_ topography: [Double], subspace: [[Double]]) -> Double {
+        subspace.reduce(0.0) { sum, basis in
+            let dot = zip(topography, basis).reduce(0) { $0 + $1.0 * $1.1 }
+            return sum + dot * dot
+        }
+    }
+
+    /// A rank-3 beat-locked artifact whose per-beat spatial mixture is perturbed
+    /// by `shapeJitter`: at 0 every beat is identical (a real artifact repeats);
+    /// as it grows the mixture varies beat to beat, which is what a
+    /// split-half reliability test is supposed to punish.
+    private func jitteredArtifact(
+        _ beats: [Double], patterns: [[Double]], amplitude: Double, shapeJitter: Double, seed: UInt64
+    ) -> [[Double]] {
+        var state = seed &* 6_364_136_223_846_793_005 &+ 1
+        func nextUnit() -> Double {
+            state = state &* 6_364_136_223_846_793_005 &+ 1
+            return Double(state >> 33) / Double(UInt32.max) - 0.5
+        }
+        var artifact = [[Double]](
+            repeating: [Double](repeating: 0, count: sampleCount), count: channelCount
+        )
+        let windowSamples = Int(0.5 * samplingRate)
+        for (beatIndex, beat) in beats.enumerated() {
+            let start = Int(beat * samplingRate)
+            let scale = 1 + 0.08 * sin(Double(beatIndex) * 1.3)
+            let mixJitter = (0..<3).map { _ in 1 + shapeJitter * 2 * nextUnit() }
+            for offset in 0..<windowSamples {
+                let sample = start + offset
+                guard sample >= 0, sample < sampleCount else { continue }
+                let phase = Double(offset) / Double(windowSamples)
+                let shapes = [
+                    sin(2 * .pi * phase),
+                    sin(4 * .pi * phase) * exp(-3 * phase),
+                    sin(6 * .pi * phase) * exp(-5 * phase)
+                ]
+                for component in 0..<3 {
+                    let a = amplitude * scale * mixJitter[component] * shapes[component] / Double(component + 1)
+                    for channel in 0..<channelCount {
+                        artifact[channel][sample] += a * patterns[component][channel]
+                    }
+                }
+            }
+        }
+        return artifact
+    }
+
+    /// Measures where the split-half reliability gate sits relative to the truth,
+    /// so `minimumComponentReliability = 0.9` can be confirmed rather than
+    /// assumed. Runs the shipped component discovery with the gate opened to 0
+    /// (keep everything), then scores each component's reliability against its
+    /// overlap with the known artifact subspace, across beat-to-beat mixture
+    /// jitter. Prints a table for the provenance record and asserts the clean
+    /// case cleanly separates artifact (>0.9) from brain (<0.9).
+    @Test func reliabilityGateSeparatesArtifactFromBrain() async throws {
+        let subspace = artifactSubspace()
+        let beats = beatTimes()
+        let clean = try brainSignal(orderedElectrodes(geometry()))
+        var openGate = BCGSurrogateSettings.default
+        openGate.minimumComponentReliability = 0   // keep every component
+        openGate.patternSearch = .iterative         // the shipped default
+
+        // Pull the variance floor down so brain leakage shows up as its own
+        // low-variance components — the case the 0.9 gate has to reject. As the
+        // artifact weakens, more of the dictionary is brain, so this sweeps the
+        // regime from artifact-dominated to brain-dominated.
+        openGate.varianceThreshold = 0.0005
+
+        var lines = ["=== reliability-gate measurement (component reliability vs true artifact overlap) ==="]
+        func emit(_ s: String) { print(s); lines.append(s) }
+        var confirmed = false
+        for amplitude in [55.0, 15.0, 6.0] {
+            let artifact = jitteredArtifact(
+                beats, patterns: subspace, amplitude: amplitude, shapeJitter: 0, seed: 4242)
+            let noisy = (0..<channelCount).map { channel in
+                (0..<sampleCount).map { clean[channel][$0] + artifact[channel][$0] }
+            }
+            guard let components = await BCGSurrogateTopographies.components(
+                channels: noisy, samplingRate: samplingRate, beatSeconds: beats, settings: openGate
+            ) else {
+                emit(String(format: "  amplitude %.0f: no components", amplitude)); continue
+            }
+            var artifactReliabilities: [Double] = []   // overlap > 0.7 → true artifact
+            var brainReliabilities: [Double] = []      // overlap < 0.3 → brain leakage
+            var passing = 0
+            emit(String(format: "  --- artifact amplitude %.0f µV: %d components ---", amplitude, components.topographies.count))
+            for (index, topography) in components.topographies.enumerated() {
+                let overlap = artifactOverlap(topography, subspace: subspace)
+                let reliability = components.reliabilities[index]
+                if reliability >= 0.9 { passing += 1 }
+                if overlap > 0.7 { artifactReliabilities.append(reliability) }
+                if overlap < 0.3 { brainReliabilities.append(reliability) }
+                emit(String(format: "     comp %d  reliability %.3f  artifactOverlap %.3f  %@",
+                    index, reliability, overlap,
+                    overlap > 0.7 ? "artifact" : (overlap < 0.3 ? "brain" : "mixed")))
+            }
+            let artifactMin = artifactReliabilities.min() ?? .nan
+            let brainMax = brainReliabilities.max() ?? -.infinity
+            emit(String(format: "     summary: artifact-comp min reliability %.3f | brain-comp max reliability %.3f | pass-0.9 %d/%d",
+                artifactMin, brainMax, passing, components.topographies.count))
+
+            // The gate is confirmed wherever both kinds of component are present:
+            // 0.9 must sit in the gap between them (keep artifact, reject brain).
+            if !artifactReliabilities.isEmpty, !brainReliabilities.isEmpty {
+                confirmed = true
+                #expect(artifactMin > 0.9, "at amplitude \(amplitude) a true-artifact component scored \(artifactMin) — 0.9 would drop it")
+                #expect(brainMax < 0.9, "at amplitude \(amplitude) a brain-leakage component scored \(brainMax) — 0.9 would keep it")
+            }
+        }
+        #expect(confirmed, "no regime produced both artifact and brain components; the measurement did not exercise the gate")
+        // Swift Testing swallows stdout on a passing test, so write the table
+        // into the app-container tmp for the provenance record to be copied out.
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("eva-reliability-measurement.txt")
+        try? (lines.joined(separator: "\n") + "\n").write(to: out, atomically: true, encoding: .utf8)
+    }
+
     /// Portable settings round-trip through `eva.xml` parameters unchanged;
     /// this is what makes a recorded step replayable.
     @Test func settingsRoundTripThroughParameters() {
         var settings = BCGSurrogateSettings.default
         settings.patternSearch = .paper
+        settings.inputSource = .broadband
+        settings.beatSource = .rWaves
+        settings.rWaveLagSeconds = 0.275
         settings.brainRegularization = 0.035
         settings.regionalSourceCount = 21
         settings.correlationThreshold = 0.72

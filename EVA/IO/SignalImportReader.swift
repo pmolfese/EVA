@@ -144,7 +144,9 @@ nonisolated enum SignalImportReader {
             imported = ImportedRecording(
                 signal: signal,
                 layout: SensorLayout.load(fromPackageContaining: signal.signalURL),
-                geometry: ElectrodeGeometry.load(fromPackageContaining: signal.signalURL),
+                geometry: ElectrodeGeometry
+                    .load(fromPackageContaining: signal.signalURL)?
+                    .includingReference(forChannelCount: signal.numberOfChannels),
                 pnsSignal: pnsSignal,
                 antiAliasTimingCorrection: antiAliasTimingCorrection
             )

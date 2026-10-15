@@ -310,6 +310,37 @@ struct RecordingCombinerTests {
         #expect(summary.categories[0].goodTrials == 1)
     }
 
+    /// TW-5: combining recordings consumes the average step's rejection record,
+    /// including the reviewed-exclusion reason that was folded into it. This is
+    /// a direct consumer assertion rather than relying on the shared XML shape.
+    @Test func summarizeReportsReviewedTrialExclusions() throws {
+        let package = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reviewed-trial-combine-\(UUID().uuidString).mff")
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: package) }
+
+        var script = EVAProcessingScript()
+        script.append(EVAProcessingStep(
+            operation: .average,
+            rejections: [
+                CategoryRejection(
+                    category: "stim",
+                    total: 4,
+                    included: 3,
+                    reasons: [TrialExclusionResolver.reasonLabel: 1]
+                )
+            ]
+        ))
+        try EVAProcessingScriptXML.write(script, toPackage: package)
+
+        let input = makeInput(url: package, value: 1, sampleCount: 100)
+        let summary = RecordingCombiner.summarize(input)
+        let category = try #require(summary.categories.first { $0.name == "stim" })
+        #expect(category.totalTrials == 4)
+        #expect(category.goodTrials == 3)
+        #expect(category.exclusionReasons[TrialExclusionResolver.reasonLabel] == 1)
+    }
+
     @Test func appendRemapsChannelsByNameAndRepairsMetadata() throws {
         let base = makeInput(url: URL(fileURLWithPath: "/tmp/a.mff"), value: 1, sampleCount: 100)
         let otherBase = makeInput(

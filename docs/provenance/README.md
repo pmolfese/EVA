@@ -22,6 +22,7 @@ completed and the historical engines were deleted.
 | `README.md` | This document: process, separation rules, per-track status. |
 | `copyleft-plan.md` | The provenance/risk ledger: which components are copyleft-sensitive, which tracks are closed, which are open. |
 | `empirical-bayes-port.md` | The EbayesShrink port record — written from the paper and the GPL upstream's documented behavior, R-validated. |
+| `happe-wavelet-parity.md` | Measured-results record: EVA's wavelet reducer reproduces HAPPE's wavelet-thresholding step (all pipeline configs) on a real 256-ch EEG recording, using HAPPE's own outputs. Evidence, not a spec. |
 | `fastr-functional-spec.md` | The FASTR-family specification the clean implementation was written from. |
 | `fastr-audit-log.md` | What happened and why, including the 2026-08-09 validation and its limits. |
 | `fastr-gpu-port-plan.md` | The GPU port plan, with the measured profile and the parity argument. |
@@ -29,6 +30,9 @@ completed and the historical engines were deleted.
 | `simulation-forward-model.md` | Derivation record for `Tools/EVASimulate`, the ground-truth simulation harness the correction methods are measured against. |
 | `dirty-vs-clean-comparison.md` | Dirty-room audit note comparing the old and new implementations. Validation material, not implementation guidance. |
 | `method-comparison.md` | Design record and measured results for the method-comparison harness — what each correction method scores against simulated ground truth, and what those numbers do and do not support. |
+| `pca-s-adversarial-evaluation.md` | Measured results for the SI-4 Track-2 adversarial campaign against PCA-S BCG correction: per-axis operating envelope and breakpoints, the pattern-search default finding, and the Track-3 threshold implications. Raw CSVs in `data/pca-s-si4/`. |
+| `artifact-reduction-evaluation.md` | Design record for the method-agnostic cleaning-evaluation tools (`score-cleaning`, `evaluate-retention`, the non-Gaussian source model): what each measures, why removed variance alone cannot grade quality, and the ERP trial-retention framing. |
+| `run-grade-calibration.md` | Measured results behind the Good/Watch/Poor run grades for gradient correction, ICA removal, and drawn-artifact cleaning: the truth-free number each grades on, what it was checked against, where the band edges came from, and the engine defects the gradient campaign surfaced. Raw tables in `data/{gradient,ica,artifact-clean}-calibration/`. |
 
 `docs/dirty-room/` holds dirty-room notes that quote reference-toolbox internals.
 It is blocked by `.claude/hooks/block-dirty-room.sh` and must not be read during

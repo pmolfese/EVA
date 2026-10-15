@@ -38,6 +38,12 @@ nonisolated enum TimeFrequencyExport {
         var baselineMethod: TFBaselineMethod
         var bands: [EEGFrequencyBand]
         var windows: [Window]
+        var bandSource: TimeFrequencyBandSource = .userPreferences
+        var detectedBandSet: DetectedRhythmicityBandSet? = nil
+        var wtplShowsDelta: Bool = true
+        var wtplBaselineStartMs: Double = -1_000
+        var wtplBaselineEndMs: Double = -500
+        var wtplLagCycles: [Double] = [-1, 1]
     }
 
     /// Per-channel maps for one condition, plus the shared axes.
@@ -52,8 +58,82 @@ nonisolated enum TimeFrequencyExport {
         var ersp: [[[Double]]]
         /// `itpc[channel][freq][time]`.
         var itpc: [[[Double]]]
+        var wtpl: [[[Double]]]? = nil
+        var deltaWTPL: [[[Double]]]? = nil
+        var wtplValidTrialCounts: [[[Int]]]? = nil
         var frequenciesHz: [Double]
         var timesMs: [Double]
+    }
+
+    /// Shared WTPL path for the Time-Frequency shortcut. The numerical work is
+    /// delegated to `WTPLEngine`; this adapter only prepares channels/epochs.
+    static func wtplConditionMaps(
+        signal: MFFSignalData,
+        segments: [EpochSegment],
+        condition: String,
+        channelIndices: [Int],
+        channelNames: [String],
+        context: Context,
+        progress: (@Sendable (Double, String) -> Void)? = nil
+    ) -> ConditionMaps? {
+        let provider = AccelerateFFTComplexCoefficientProvider()
+        var channels: [Int] = []
+        var names: [String] = []
+        var raw: [[[Double]]] = []
+        var delta: [[[Double]]] = []
+        var counts: [[[Int]]] = []
+        var frequencies: [Double] = []
+        var times: [Double] = []
+        var allHaveDelta = true
+
+        for (order, channel) in channelIndices.enumerated() {
+            let stack = TimeFrequencyTrials.stack(
+                signal: signal, segments: segments, category: condition, channelIndices: [channel]
+            )
+            guard !stack.isEmpty else { continue }
+            let baseline = wtplBaselineSpec(stack: stack, context: context)
+            do {
+                let result = try WTPLEngine.analyze(
+                    trials: stack.trials,
+                    samplingRate: stack.samplingRate,
+                    plan: context.plan,
+                    lagCycles: context.wtplLagCycles,
+                    baseline: baseline,
+                    eventSampleIndex: stack.stimulusOffsetSamples,
+                    coefficientProvider: provider,
+                    edgePolicy: .validOnly,
+                    retainPerTrial: false
+                )
+                channels.append(channel)
+                names.append(channelNames.indices.contains(channel) ? channelNames[channel] : "Ch \(channel + 1)")
+                raw.append(result.meanWTPL)
+                if let deltaMap = result.deltaWTPL {
+                    delta.append(deltaMap)
+                } else {
+                    allHaveDelta = false
+                    delta.append(nanGridLike(result.meanWTPL))
+                }
+                counts.append(result.validTrialCounts)
+                frequencies = result.frequenciesHz
+                times = result.timesMs
+            } catch {
+                return nil
+            }
+            progress?(Double(order + 1) / Double(max(channelIndices.count, 1)), "WTPL channel \(order + 1)/\(channelIndices.count)")
+        }
+        guard !raw.isEmpty else { return nil }
+        return ConditionMaps(
+            condition: condition,
+            channelIndices: channels,
+            channelNames: names,
+            ersp: raw.map { nanGridLike($0) },
+            itpc: raw.map { nanGridLike($0) },
+            wtpl: raw,
+            deltaWTPL: allHaveDelta ? delta : nil,
+            wtplValidTrialCounts: counts,
+            frequenciesHz: frequencies,
+            timesMs: times
+        )
     }
 
     // MARK: Per-channel computation
@@ -149,6 +229,9 @@ nonisolated enum TimeFrequencyExport {
         return ConditionMaps(
             condition: label, channelIndices: a.channelIndices, channelNames: a.channelNames,
             ersp: subtract(a.ersp, b.ersp), itpc: subtract(a.itpc, b.itpc),
+            wtpl: optionalSubtract(a.wtpl, b.wtpl),
+            deltaWTPL: optionalSubtract(a.deltaWTPL, b.deltaWTPL),
+            wtplValidTrialCounts: optionalMinimum(a.wtplValidTrialCounts, b.wtplValidTrialCounts),
             frequenciesHz: a.frequenciesHz, timesMs: a.timesMs
         )
     }
@@ -164,6 +247,47 @@ nonisolated enum TimeFrequencyExport {
                 return (0..<count).map { leftTimes[$0] - rightTimes[$0] }
             }
         }
+    }
+
+    private static func optionalSubtract(
+        _ lhs: [[[Double]]]?,
+        _ rhs: [[[Double]]]?
+    ) -> [[[Double]]]? {
+        guard let lhs, let rhs else { return nil }
+        return subtract(lhs, rhs)
+    }
+
+    private static func optionalMinimum(
+        _ lhs: [[[Int]]]?,
+        _ rhs: [[[Int]]]?
+    ) -> [[[Int]]]? {
+        guard let lhs, let rhs, lhs.count == rhs.count else { return nil }
+        return lhs.indices.map { channel in
+            let leftFrequencies = lhs[channel]
+            let rightFrequencies = rhs[channel]
+            guard leftFrequencies.count == rightFrequencies.count else { return leftFrequencies }
+            return leftFrequencies.indices.map { frequency in
+                let leftTimes = leftFrequencies[frequency]
+                let rightTimes = rightFrequencies[frequency]
+                return zip(leftTimes, rightTimes).map { min($0.0, $0.1) }
+            }
+        }
+    }
+
+    private static func nanGridLike(_ grid: [[Double]]) -> [[Double]] {
+        grid.map { [Double](repeating: .nan, count: $0.count) }
+    }
+
+    private static func wtplBaselineSpec(
+        stack: TimeFrequencyTrials.Stack,
+        context: Context
+    ) -> WTPLBaselineSpec? {
+        let start = stack.stimulusOffsetSamples
+            + Int((context.wtplBaselineStartMs / 1_000 * stack.samplingRate).rounded())
+        let end = stack.stimulusOffsetSamples
+            + Int((context.wtplBaselineEndMs / 1_000 * stack.samplingRate).rounded())
+        guard start >= 0, end >= start, end < stack.timeCount else { return nil }
+        return WTPLBaselineSpec(startSample: start, endSample: end)
     }
 
     /// GPU path for the all-channel explorer.  The whole channel × trial stack
@@ -278,9 +402,22 @@ nonisolated enum TimeFrequencyExport {
 
     /// JSON sidecar with axes and parameters (NPY carries no metadata).
     static func sidecarJSON(_ maps: ConditionMaps, measure: EpochingViewModel.TFMeasure, context: Context) -> Data {
-        let object: [String: Any] = [
-            "measure": measure == .power ? "ersp" : "itpc",
-            "unit": measure == .power ? context.baselineMethod.rawValue : "itpc",
+        let measureName: String
+        let unit: String
+        switch measure {
+        case .power:
+            measureName = "ersp"
+            unit = context.baselineMethod.rawValue
+        case .itpc:
+            measureName = "itpc"
+            unit = "itpc"
+        case .wtpl:
+            measureName = context.wtplShowsDelta ? "delta_wtpl" : "wtpl"
+            unit = context.wtplShowsDelta ? "delta_wtpl" : "wtpl"
+        }
+        var object: [String: Any] = [
+            "measure": measureName,
+            "unit": unit,
             "condition": maps.condition,
             "method": context.method.rawValue,
             "powerMode": context.powerMode.rawValue,
@@ -293,6 +430,18 @@ nonisolated enum TimeFrequencyExport {
             "frequenciesHz": maps.frequenciesHz,
             "timesMs": maps.timesMs,
         ]
+        if measure == .wtpl {
+            object["wtpl"] = [
+                "methodVersion": WTPLEngine.methodVersion,
+                "definition": "Within-Trial Phase Locking",
+                "lagCycles": context.wtplLagCycles,
+                "baselineStartMs": context.wtplBaselineStartMs,
+                "baselineEndMs": context.wtplBaselineEndMs,
+                "baselineSubtracted": context.wtplShowsDelta,
+                "invalidValue": "NaN",
+            ]
+        }
+        object["bandSource"] = bandSourceJSON(context)
         return (try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])) ?? Data()
     }
 
@@ -318,6 +467,31 @@ nonisolated enum TimeFrequencyExport {
         summary("freq_min_hz", clean(context.plan.frequenciesHz.first ?? 0))
         summary("freq_max_hz", clean(context.plan.frequenciesHz.last ?? 0))
         summary("freq_bins", context.plan.frequenciesHz.count)
+        summary("band_source", context.bandSource.rawValue)
+        if conditions.contains(where: { $0.wtpl != nil }) {
+            summary("wtpl_method_version", WTPLEngine.methodVersion)
+            summary("wtpl_lag_cycles", context.wtplLagCycles.map(clean).joined(separator: ";"))
+            summary("wtpl_baseline_ms", "\(clean(context.wtplBaselineStartMs))...\(clean(context.wtplBaselineEndMs))")
+        }
+        if let set = context.detectedBandSet {
+            summary("band_source_recording", set.recordingDisplayName)
+            summary("band_source_revision", set.sourceRevision)
+            summary("band_source_channel", "\(set.sourceChannelName) [\(set.sourceChannelIndex + 1)]")
+            summary("band_source_scope", set.channelScope.rawValue)
+            summary("band_source_selection", set.dataSelection.dataSelection.rawValue)
+            summary("band_source_preset", set.configuration.presetID)
+            summary("band_source_method_version", set.methodVersion)
+            summary("band_source_created_at", set.createdAt.ISO8601Format())
+            for (index, band) in set.displayBands.enumerated() {
+                let prefix = "band_\(index + 1)"
+                summary("\(prefix)_name", band.name)
+                summary("\(prefix)_low_hz", clean(band.lowHz))
+                summary("\(prefix)_high_hz", clean(band.highHz))
+                summary("\(prefix)_peak_hz", clean(band.peakHz))
+                summary("\(prefix)_direction", band.direction.rawValue)
+                summary("\(prefix)_significant", band.isSignificant.map(String.init) ?? "not_computed")
+            }
+        }
 
         for maps in conditions {
             for band in context.bands {
@@ -327,13 +501,31 @@ nonisolated enum TimeFrequencyExport {
                     let timeIdx = maps.timesMs.indices.filter { maps.timesMs[$0] >= window.startMs && maps.timesMs[$0] <= window.endMs }
                     guard !timeIdx.isEmpty else { continue }
                     for ch in maps.channelNames.indices {
-                        let erspMean = meanOver(maps.ersp[ch], freqIdx: freqIdx, timeIdx: timeIdx)
-                        let itpcMean = meanOver(maps.itpc[ch], freqIdx: freqIdx, timeIdx: timeIdx)
-                        for (measure, value) in [("ersp", erspMean), ("itpc", itpcMean)] {
+                        if maps.wtpl == nil {
+                            let erspMean = meanOver(maps.ersp[ch], freqIdx: freqIdx, timeIdx: timeIdx)
+                            let itpcMean = meanOver(maps.itpc[ch], freqIdx: freqIdx, timeIdx: timeIdx)
+                            for (measure, value) in [("ersp", erspMean), ("itpc", itpcMean)] {
+                                rows.append([
+                                    "tf_scalar", "channel", maps.condition,
+                                    "\((maps.channelIndices.indices.contains(ch) ? maps.channelIndices[ch] : ch) + 1)", maps.channelNames[ch],
+                                    band.name, window.label, measure, clean(value),
+                                ])
+                            }
+                        }
+                        if let wtpl = maps.wtpl {
+                            let rawMean = meanOver(wtpl[ch], freqIdx: freqIdx, timeIdx: timeIdx)
                             rows.append([
                                 "tf_scalar", "channel", maps.condition,
-                                "\(ch + 1)", maps.channelNames[ch],
-                                band.name, window.label, measure, clean(value),
+                                "\((maps.channelIndices.indices.contains(ch) ? maps.channelIndices[ch] : ch) + 1)", maps.channelNames[ch],
+                                band.name, window.label, "wtpl", clean(rawMean),
+                            ])
+                        }
+                        if let delta = maps.deltaWTPL {
+                            let deltaMean = meanOver(delta[ch], freqIdx: freqIdx, timeIdx: timeIdx)
+                            rows.append([
+                                "tf_scalar", "channel", maps.condition,
+                                "\((maps.channelIndices.indices.contains(ch) ? maps.channelIndices[ch] : ch) + 1)", maps.channelNames[ch],
+                                band.name, window.label, "delta_wtpl", clean(deltaMean),
                             ])
                         }
                     }
@@ -354,7 +546,10 @@ nonisolated enum TimeFrequencyExport {
         var sum = 0.0, count = 0
         for fi in freqIdx where grid.indices.contains(fi) {
             let row = grid[fi]
-            for ti in timeIdx where row.indices.contains(ti) { sum += row[ti]; count += 1 }
+            for ti in timeIdx where row.indices.contains(ti) {
+                let value = row[ti]
+                if value.isFinite { sum += value; count += 1 }
+            }
         }
         return count > 0 ? sum / Double(count) : .nan
     }
@@ -370,6 +565,37 @@ nonisolated enum TimeFrequencyExport {
             return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
         }
         return field
+    }
+
+    private static func bandSourceJSON(_ context: Context) -> [String: Any] {
+        var object: [String: Any] = [
+            "source": context.bandSource.rawValue,
+            "bands": context.bands.map { ["name": $0.name, "lowHz": $0.lowHz, "highHz": $0.highHz] },
+        ]
+        if let set = context.detectedBandSet {
+            object["recordingIdentity"] = set.recordingIdentity
+            object["recordingDisplayName"] = set.recordingDisplayName
+            object["sourceRevision"] = set.sourceRevision
+            object["channelScope"] = set.channelScope.rawValue
+            object["sourceChannelIndex"] = set.sourceChannelIndex
+            object["sourceChannelName"] = set.sourceChannelName
+            object["dataSelection"] = set.dataSelection.dataSelection.rawValue
+            object["presetID"] = set.configuration.presetID
+            object["methodVersion"] = set.methodVersion
+            object["createdAt"] = ISO8601DateFormatter().string(from: set.createdAt)
+            object["abbaBands"] = set.displayBands.map { band -> [String: Any] in
+                var item: [String: Any] = [
+                    "name": band.name,
+                    "lowHz": band.lowHz,
+                    "highHz": band.highHz,
+                    "peakHz": band.peakHz,
+                    "direction": band.direction.rawValue,
+                ]
+                if let isSignificant = band.isSignificant { item["isSignificant"] = isSignificant }
+                return item
+            }
+        }
+        return object
     }
 
     /// Default ROI windows for the scalar CSV, clipped to the available range.

@@ -47,8 +47,17 @@
 
 import AppKit
 
-/// Quits when the last window closes.
+/// Quits when the last window closes, and clears stale temporary files at
+/// launch (see `TemporaryFileSweeper`).
 final class EVAAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Nothing is open yet, and the sweep only removes what is over a day
+        // old, so it is safe to run alongside whatever the user opens first.
+        Task.detached(priority: .utility) {
+            TemporaryFileSweeper.sweep()
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }

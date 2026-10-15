@@ -11,7 +11,7 @@
 //
 //  Single-sheet host for the recording window (ROADMAP Priority 1, B3).
 //
-//  `content(for:)` used to chain 18 separate `.sheet(isPresented:)` modifiers.
+//  `content(for:)` used to chain many separate `.sheet(isPresented:)` modifiers.
 //  Each one wraps the view in another `ModifiedContent<…>` layer, so the concrete
 //  return type of the body became an enormous nested generic — and the Swift
 //  runtime pays to instantiate that type's metadata and protocol witness tables
@@ -44,17 +44,23 @@ enum ActiveRecordingSheet: String, Identifiable, CaseIterable, Sendable {
     case psa
     case artifactTemplate
     case artifactCleaning
+    case saccadicSpike
+    case corneoRetinal
+    case movementPCA
+    case muscleBSSCCA
     case ecgDetection
     case eyeArtifactThreshold
     case bcgDetection
     case waveletExplorer
     case waveletReduction
+    case wica
     case ica
     case replayConfig
     case channelInspector
     case datasetInfo
     case physioImport
     case eegAnalysis
+    case rhythmicityExplorer
     case channelHealthDetails
     case channelGoodnessSettings
     case segmentHealthDetails
@@ -77,17 +83,23 @@ extension WaveformView {
         if epoching.showsSheet { return .psa }
         if template.showsSheet { return .artifactTemplate }
         if artifactVM.showsCleaningSheet { return .artifactCleaning }
+        if saccadicSpike.showsSheet { return .saccadicSpike }
+        if corneoRetinal.showsSheet { return .corneoRetinal }
+        if movementPCA.showsSheet { return .movementPCA }
+        if muscleBSSCCA.showsSheet { return .muscleBSSCCA }
         if ecg.showsSheet { return .ecgDetection }
         if artifactVM.showsThresholdSheet { return .eyeArtifactThreshold }
         if bcg.showsSheet { return .bcgDetection }
         if waveletExplorer.showsSheet { return .waveletExplorer }
         if wavelet.showsSheet { return .waveletReduction }
+        if wica.showsSheet { return .wica }
         if ica.showsSheet { return .ica }
         if replay.showsConfigPane { return .replayConfig }
         if showsChannelInspector { return .channelInspector }
         if showsDatasetInfo { return .datasetInfo }
         if showsPhysioImportSheet { return .physioImport }
         if eegAnalysis.showsSheet { return .eegAnalysis }
+        if rhythmicityExplorer.showsSheet { return .rhythmicityExplorer }
         if chanHealth.showsDetails { return .channelHealthDetails }
         if showsChannelGoodnessSettings { return .channelGoodnessSettings }
         if segHealth.showsDetails { return .segmentHealthDetails }
@@ -113,7 +125,7 @@ extension WaveformView {
 
     /// Clears the presentation flag for whichever sheet is showing.
     ///
-    /// Deliberately clears only the active one rather than resetting all 18: if a
+    /// Deliberately clears only the active one rather than resetting every sheet: if a
     /// second flag is also set, it should present next, matching how the chained
     /// modifiers behaved.
     func dismissActiveSheet() {
@@ -121,17 +133,33 @@ extension WaveformView {
         case .psa: epoching.showsSheet = false
         case .artifactTemplate: template.showsSheet = false
         case .artifactCleaning: artifactVM.showsCleaningSheet = false
+        case .saccadicSpike: saccadicSpike.showsSheet = false
+        case .corneoRetinal: corneoRetinal.showsSheet = false
+        case .movementPCA:
+            movementPCA.analysisTask?.cancel()
+            movementPCA.analysisTask = nil
+            movementPCA.isAnalyzing = false
+            movementPCA.showsSheet = false
+        case .muscleBSSCCA:
+            muscleBSSCCA.analysisTask?.cancel()
+            muscleBSSCCA.analysisTask = nil
+            muscleBSSCCA.isAnalyzing = false
+            muscleBSSCCA.showsSheet = false
         case .ecgDetection: ecg.showsSheet = false
         case .eyeArtifactThreshold: artifactVM.showsThresholdSheet = false
         case .bcgDetection: bcg.showsSheet = false
         case .waveletExplorer: waveletExplorer.showsSheet = false
         case .waveletReduction: wavelet.showsSheet = false
+        case .wica:
+            wica.cancel()
+            wica.showsSheet = false
         case .ica: ica.showsSheet = false
         case .replayConfig: replay.showsConfigPane = false
         case .channelInspector: showsChannelInspector = false
         case .datasetInfo: showsDatasetInfo = false
         case .physioImport: showsPhysioImportSheet = false
         case .eegAnalysis: eegAnalysis.showsSheet = false
+        case .rhythmicityExplorer: rhythmicityExplorer.showsSheet = false
         case .channelHealthDetails: chanHealth.showsDetails = false
         case .channelGoodnessSettings: showsChannelGoodnessSettings = false
         case .segmentHealthDetails: segHealth.showsDetails = false
@@ -155,6 +183,7 @@ extension WaveformView {
         _ sheet: ActiveRecordingSheet,
         base: MFFSignalData,
         cleaningBase: MFFSignalData,
+        wicaInput: MFFSignalData,
         waveletInput: MFFSignalData,
         continuousSignal: MFFSignalData
     ) -> some View {
@@ -166,7 +195,19 @@ extension WaveformView {
             artifactTemplateSheet(for: continuousSignal)
 
         case .artifactCleaning:
-            artifactCleaningSheet(for: cleaningBase)
+            artifactCleaningSheet(for: cleaningBase, broadbandSignal: base)
+
+        case .saccadicSpike:
+            saccadicSpikeSheet(for: continuousSignal)
+
+        case .corneoRetinal:
+            corneoRetinalSheet(for: continuousSignal)
+
+        case .movementPCA:
+            movementPCASheet(for: continuousSignal)
+
+        case .muscleBSSCCA:
+            muscleBSSCCASheet(for: continuousSignal)
 
         case .ecgDetection:
             ecgDetectionSheet(for: continuousSignal)
@@ -183,7 +224,16 @@ extension WaveformView {
             )
 
         case .bcgDetection:
-            bcgDetectionSheet(for: continuousSignal, selection: activeSelectionRange(in: continuousSignal))
+            // Detection follows what the user is viewing, but PCA-S is a base
+            // correction and must receive the pre-filter signal. Its private
+            // 1-20 Hz copy is only for fitting artifact topographies; the
+            // resulting spatial operator is applied broadband, after which the
+            // normal pipeline can rebuild the user's filter.
+            bcgDetectionSheet(
+                for: continuousSignal,
+                correctionSignal: base,
+                selection: activeSelectionRange(in: continuousSignal)
+            )
                 .onAppear {
                     autoSelectBCGProxySetIfEnabled(for: continuousSignal)
                     prepareCWLDefaults(pns: displayedPhysioSignal())
@@ -194,6 +244,9 @@ extension WaveformView {
 
         case .waveletReduction:
             waveletReductionSheet(input: waveletInput)
+
+        case .wica:
+            wicaSheet(for: wicaInput)
 
         case .ica:
             icaSheet(for: base)
@@ -236,6 +289,25 @@ extension WaveformView {
                 channelSets: ChannelSetStore.shared.allSets,
                 sensorLayout: recording.sensorLayout,
                 onClose: { eegAnalysis.showsSheet = false }
+            )
+
+        case .rhythmicityExplorer:
+            RhythmicityExplorerView(
+                viewModel: rhythmicityExplorer,
+                packageName: recording.packageName,
+                signal: continuousSignal,
+                eventSignal: epoching.segmentedEpochSignal ?? continuousSignal,
+                epochSegments: epoching.segmentedEpochSegments,
+                visibleSampleRange: rhythmicityVisibleSampleRange(in: continuousSignal),
+                channelSets: ChannelSetStore.shared.allSets,
+                artifactSources: eegArtifactRejectionSources(),
+                sensorLayout: recording.sensorLayout,
+                onUseInTimeFrequency: {
+                    epoching.tfBandSource = .rhythmicityExplorer
+                    epoching.averagedDisplayMode = .timeFrequency
+                    rhythmicityExplorer.showsSheet = false
+                },
+                onClose: { rhythmicityExplorer.showsSheet = false }
             )
 
         case .channelHealthDetails:
@@ -287,5 +359,12 @@ extension WaveformView {
                 }
             )
         }
+    }
+
+    private func rhythmicityVisibleSampleRange(in signal: MFFSignalData) -> ClosedRange<Int>? {
+        guard signal.data.first?.isEmpty == false else { return nil }
+        let lower = sampleIndex(forContentX: visibleHorizontalRange.lowerBound, in: signal)
+        let upper = sampleIndex(forContentX: visibleHorizontalRange.upperBound, in: signal)
+        return min(lower, upper)...max(lower, upper)
     }
 }

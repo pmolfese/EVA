@@ -212,10 +212,40 @@ final class RecordingHistoryModel {
         let id = history.currentID
         if snapshots[id] == nil { snapshotOrder.append(id) }
         snapshots[id] = snapshot
+        // Grade the step from the report it just produced and record it on the
+        // node, so the rail pill survives snapshot eviction and save/reload.
+        // Computed once, when the report is first in hand — the same shape as
+        // `recordComputeCost`.
+        if let node = history.node(id), node.quality == nil,
+           let quality = Self.quality(for: node.step, in: snapshot) {
+            history.setQuality(quality, for: id)
+        }
         evictSnapshotsBeyondBudget()
     }
 
     func snapshot(for id: EVAHistoryNodeID) -> PipelineSnapshot? { snapshots[id] }
+
+    /// The run grade for the step that produced a node, from the stage report
+    /// its snapshot carries.
+    ///
+    /// Keyed on the node's own operation, not on which reports happen to be
+    /// present: a snapshot carries every upstream stage's report, so a filter
+    /// applied after PCA-S still holds the PCA-S report and must not inherit
+    /// its grade.
+    static func quality(for step: EVAProcessingStep?, in snapshot: PipelineSnapshot) -> StepQuality? {
+        switch step?.operation {
+        case .bcgCorrection:
+            return snapshot.bcgSurrogateReport.map(PCASRunGrade.grade(from:))
+        case .mriGradientCorrection:
+            return snapshot.gradientRunMetrics.map(GradientRunGrade.grade(from:))
+        case .icaClean:
+            return snapshot.icaRunMetrics.map(ICARunGrade.grade(from:))
+        case .artifactClean:
+            return snapshot.artifactRunMetrics.map(ArtifactCleanRunGrade.grade(from:))
+        default:
+            return nil
+        }
+    }
 
     private func discardSnapshots(for removed: Set<EVAHistoryNodeID>) {
         guard !removed.isEmpty else { return }
@@ -330,6 +360,18 @@ final class RecordingHistoryModel {
     /// row shows no time at all until one exists (ROADMAP RW-1 item 7).
     func recordComputeCost(_ seconds: TimeInterval, for id: EVAHistoryNodeID) {
         history.recordComputeCost(seconds, for: id)
+    }
+
+    /// Hangs a recorded-refusal node one step below the current node without
+    /// moving the pointer. Session-only and pruned on the next commit.
+    func recordRefusal(_ step: EVAProcessingStep, quality: StepQuality) {
+        history.recordRefusal(step, quality: quality)
+    }
+
+    /// Dismisses a single recorded-refusal node — the right-click action. A
+    /// no-op on a real node, so it can never delete committed work.
+    func dismissNoOutput(_ id: EVAHistoryNodeID) {
+        history.dismissNoOutput(id)
     }
 
     func computeCost(for id: EVAHistoryNodeID) -> TimeInterval? {
@@ -549,7 +591,9 @@ final class RecordingHistoryModel {
                         .unavailableReason?.message,
                 rebuildSeconds: snapshots[node.id] == nil ? node.computeCost : nil,
                 depth: depth,
-                isOnCurrentPath: onPath.contains(node.id)
+                isOnCurrentPath: onPath.contains(node.id),
+                quality: node.quality,
+                isNoOutput: node.isNoOutput
             ))
             // Indent only at a fork. A linear history stays flat — indenting
             // every step would turn an ordinary session into a staircase.
@@ -665,4 +709,10 @@ nonisolated struct HistoryRailNode: Identifiable, Hashable, Sendable {
     /// nodes can occur in decoded legacy trees or explicit copied histories;
     /// ordinary recording-window replacement prunes an abandoned future.
     var isOnCurrentPath: Bool = true
+    /// Run-quality grade, when the step reports one. Drives the rail pill and the
+    /// status-popover breakdown. Nil for steps that do not grade themselves.
+    var quality: StepQuality?
+    /// A recorded refusal: inspectable, but not a place to stand. The rail dims
+    /// it, shows its Poor pill, and a click opens its breakdown without navigating.
+    var isNoOutput: Bool = false
 }

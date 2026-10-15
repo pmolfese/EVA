@@ -194,7 +194,6 @@ extension WaveformView {
                 }
                 Button("Detect QRS") {
                     ecg.isEnabled = true
-                    artifactVM.detectionMethod = .threshold
                     artifactVM.detectionRefreshToken += 1
                     ecg.showsSheet = false
                 }

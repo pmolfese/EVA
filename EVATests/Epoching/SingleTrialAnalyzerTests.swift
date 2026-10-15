@@ -190,4 +190,40 @@ struct SingleTrialAnalyzerTests {
         )
         #expect(invalidWindow == nil)
     }
+
+    @Test func namedWindowsAreAnalyzedIndependentlyWithoutIncludingTheirGap() throws {
+        let firstID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let secondID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        var average = [Float](repeating: 0, count: seriesLength)
+        average[230] = 4
+        average[300] = 20 // Strongest overall, but outside W1.
+        let trial = SingleTrialAnalyzer.TrialInput(
+            sourceTimeSeconds: 0,
+            stimulusOffsetSamples: stimulusOffsetSamples,
+            samples: average
+        )
+        let windows = [
+            TrialAlignmentMetrics.AnalysisWindow(id: firstID, name: "P1", startMs: 20, endMs: 40),
+            TrialAlignmentMetrics.AnalysisWindow(id: secondID, name: "P2", startMs: 90, endMs: 110)
+        ]
+
+        let results = SingleTrialAnalyzer.analyzeWindows(
+            averageSamples: average,
+            averageStimulusOffsetSamples: stimulusOffsetSamples,
+            samplingRate: samplingRate,
+            trials: [trial],
+            windows: windows,
+            adaptiveHalfWidthMs: 2,
+            splitCount: 1,
+            outlierThresholdSD: 3,
+            distributionChunkCount: 1
+        )
+
+        #expect(results.map(\.id) == [firstID, secondID])
+        #expect(results.map(\.window.name) == ["P1", "P2"])
+        #expect(abs((results[0].result.averagePeakLatencyPositiveMs ?? -1) - 30) < 1e-6)
+        #expect(abs((results[1].result.averagePeakLatencyPositiveMs ?? -1) - 100) < 1e-6)
+        #expect(results[0].result.trials[0].peakAmplitudeOwnLatencyPositive == 4)
+        #expect(results[1].result.trials[0].peakAmplitudeOwnLatencyPositive == 20)
+    }
 }

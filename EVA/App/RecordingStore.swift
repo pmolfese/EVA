@@ -79,6 +79,13 @@ final class RecordingStore {
     // MARK: Viewport
     var amplitudeScale: Double = 100
     var timeScale: Double = 1
+    /// Session-only display density. Fit preserves EVA's historical row
+    /// geometry; fixed counts derive row pitch from the live EEG viewport.
+    var waveformDensityMode: WaveformDensityMode = .fit
+    /// Session-only ordered subset shown in the waveform. `nil` means all
+    /// channels. Hidden traces remain independent and retain their row.
+    var displayedChannelSetID: ChannelSet.ID?
+    var verticalWaveformViewportHeight: CGFloat = 1
     var horizontalOffset: CGFloat = 0
     var horizontalViewportWidth: CGFloat = 1
     var horizontalScrollPosition = ScrollPosition(idType: Int.self, x: 0)

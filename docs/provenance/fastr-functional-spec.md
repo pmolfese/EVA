@@ -54,7 +54,7 @@ Historical toolboxes to cite, but not inspect during clean implementation:
 - Do not reproduce an old MATLAB toolbox user interface.
 - Do not emulate random behavior unless explicitly requested by an option.
 - Do not require slice triggers in the file; EVA may synthesize slice epochs by
-  subdividing volume intervals when the number of slices is known.
+  subdividing volume intervals when the number of acquisition groups is known.
 - Do not implement arbitrary BERGEN weighting-matrix editing in EVA Core for the
   first clean implementation.
 
@@ -68,7 +68,10 @@ The implementation receives:
 - `samplingRate`: samples per second before any internal upsampling.
 - `config`:
   - `upsampleFactor`: integer >= 1.
-  - `numberOfSlices`: integer >= 1. A value of 1 means volume-level epochs.
+  - `acquisitionSchedule`: optional uniform acquisition-group count, offsets as
+    fractions of TR, or offsets in seconds. When absent, `numberOfSlices`
+    remains the backward-compatible uniform group count; 1 means volume-level
+    epochs. Anatomical slice count is not the group count in multiband imaging.
   - `relativeTriggerPosition`: fraction in [0, 1] locating the trigger within
     an artifact epoch.
   - `averagingWindowBefore` and `averagingWindowAfter`, or a symmetric window
@@ -101,10 +104,17 @@ outputs, even if the first implementation returns only corrected data:
 
 1. Sort volume triggers.
 2. Reject input with fewer than two volume triggers.
-3. If `numberOfSlices > 1`, divide each volume interval into equal slice
-   intervals and create synthetic slice-epoch triggers. Do not create triggers
-   beyond the data length.
-4. Upsample internally by `upsampleFactor`.
+3. Resolve the schedule of distinct acquisition groups within each volume.
+   Uniform timing may be supplied directly as a group count or derived as
+   `ceil(totalSlices / multibandFactor)`. Explicit JSON offsets may be fractions
+   of TR or seconds after the volume trigger. A standalone JSON sidecar may also
+   use `SliceTiming` and `MultibandAccelerationFactor`; a surrounding BIDS
+   dataset is not required, and duplicate simultaneous slice times collapse to
+   distinct acquisition groups.
+4. Project the volume anchor and group offsets onto the internally upsampled
+   axis, and round only once there. Never round group positions on the native
+   EEG grid and then multiply by `upsampleFactor`. Do not create triggers beyond
+   the data length.
 5. Compute the median interval between adjacent epoch triggers on the upsampled
    axis. Use this interval as the nominal artifact period.
 6. Define each artifact epoch as a fixed-length window around its trigger:
@@ -120,6 +130,11 @@ The implementation should support two alignment stages:
   improves similarity to a reference artifact shape.
 - Optional fractional-sample alignment: apply a sub-sample phase shift to reduce
   residual timing mismatch after integer alignment.
+
+The default scanner-slaved profile uses only a ±1-sample search on the internal
+grid and disables fractional alignment. A separate independent-clock profile
+enables the adaptive integer search and fractional refinement; replayed older
+parameter blocks with explicit alignment booleans map to a custom profile.
 
 Clean-room implementation guidance:
 
@@ -189,13 +204,32 @@ Inputs:
 
 Behavior:
 
-1. If no motion is supplied, return no motion-informed donors and let the caller
-   fall back to temporal neighbors.
+1. If no motion is supplied, return no motion-informed donors. At the engine
+   level the caller falls back to temporal neighbors; at the application level
+   (`GradientViewModel.missingRequiredMotion`, ROADMAP MRI-1, 2026-09-26) a
+   Moosmann run — or any run with "Exclude high-motion TRs" on — refuses to
+   start without a motion file, and replay/batch stop at that step. The
+   operator supplies the 1D file; EVA does not search for one.
 2. If motion has fewer rows than volumes because dummy scans were dropped,
    front-pad with zero-motion rows so rows align to volume indices.
-3. Compute a per-volume motion magnitude. EVA supports:
-   - translation-only displacement
-   - all-parameter displacement with rotations scaled by a configurable radius
+3. Compute a per-volume motion magnitude — always the volume-to-volume change,
+   volume 0 defined as 0. EVA supports three metrics, named explicitly because
+   at one threshold they flag different volumes:
+   - `translationSpeed` — the published RP-informed definition (Moosmann et
+     al. 2009, Eq. 5): d_j = √(Δx² + Δy² + Δz²) over the translations only. The
+     paper thresholded it at d₀ = 0.3 mm.
+   - `translationOnly` — EVA's earlier translation metric: |Δx| + |Δy| + |Δz|
+     (L1). Never smaller than `translationSpeed`, up to √3× larger for a
+     diagonal move. Remains the default so existing scripts keep flagging the
+     volumes they did.
+   - `allParameters` — framewise displacement over all six terms (Power et al.
+     2012), rotations as arc length on a sphere of configurable radius.
+
+   Known difference from the paper, not adopted: when two supra-threshold
+   events are closer together than the donor count, the paper keeps only the
+   larger as a barrier; EVA treats every flagged volume as a barrier and, when a
+   segment is too short, takes donors across it and records
+   `donorsCrossedMotionBarrier` (an `MRI_GRAD_UNRELIABLE` span — see Coverage).
 4. Mark volumes whose motion magnitude exceeds the threshold as high-motion.
 5. High-motion volumes are corrected but excluded as donors.
 6. For each target volume, select low-motion donor volumes near the target while
@@ -354,6 +388,37 @@ Requirements:
   the user-facing scientific intent.
 - Diagnostics should be designed from the start, even if not all are exposed in
   the first UI.
+
+## Coverage and Unreliable Spans
+
+Added 2026-09-26 (ROADMAP MRI-1). Built by `GradientCoverage` from the
+diagnostics every engine already returns, so it adds no engine decision and no
+CPU/GPU parity question. Each epoch gets one status:
+
+| Status | Meaning | Source |
+|---|---|---|
+| corrected | template subtracted from normal donors | — |
+| edge | window runs past the recording; uncorrected by construction | `epochOutOfBounds`, local `outsideRecording` |
+| watch | corrected through a benign documented fallback | `templateScaleRejected`, `correlationDonorsFellBack` |
+| unreliable | corrected, but from donors taken across a motion event | `donorsCrossedMotionBarrier` |
+| failed | uncorrected for a reason other than the edge | `noEligibleDonors`, `degenerateTemplate`, local `insufficientDonors` / `noTemplateSamples` / `noCorrelatedDonors` |
+
+Volumes trimmed with skip-start/skip-end are reported separately; like edges,
+they are normal and never flagged. A volume's status is the worst of its slice
+epochs.
+
+Unreliable and failed epochs whose windows touch merge into spans. By default
+(`unreliableEvents = mark`) each span is written onto the corrected signal as
+an onset-anchored `MRI_GRAD_UNRELIABLE` event carrying its duration and
+reasons; `report` keeps them in the audit log only. A re-run replaces the
+previous run's spans. PSA rejects epochs that overlap a span when
+`skipUnreliableMRI` is on (default on; absent from a pre-2026-09-26 `segment`
+step means off, so older scripts rebuild the same epochs).
+
+The run grade excludes edge epochs from the coverage denominator and grades any
+unreliable span, or a run-level note (a motion file front-padded or truncated to
+fit, a Moosmann run that found no supra-threshold motion), Watch — never Poor on
+its own, since no band for it has been measured.
 
 ## Edge Cases
 

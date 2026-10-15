@@ -39,7 +39,6 @@ final class ProcessingDefaults {
         static let icaComponentCount = "icaComponentCount"
         static let bcgAutoSelectProxySet = "bcgAutoSelectProxySet"
         static let bcgDefaultMethodRaw = "bcgDefaultMethodRaw"
-        static let artifactDetectionDefaultMethodRaw = "artifactDetectionDefaultMethodRaw"
         static let ocularBlinkThresholdConfig = "ocularBlinkThresholdConfig"
         static let ocularMovementThresholdConfig = "ocularMovementThresholdConfig"
         static let ocularTopologyDefaultMigrationV2 = "ocularTopologyDefaultMigrationV2"
@@ -49,6 +48,7 @@ final class ProcessingDefaults {
         static let gradientComputeBackendRaw = "gradientComputeBackendRaw"
         static let waveletUsesGPU = "waveletUsesGPU"
         static let timeFrequencyUsesGPU = "timeFrequencyUsesGPU"
+        static let rhythmicityUsesGPU = "rhythmicityUsesGPU"
         static let timeFrequencyBands = "timeFrequencyBands.v1"
         static let interpolatedHealthFromNeighbors = "interpolatedHealthFromNeighbors"
         static let autoRunSegmentHealthAfterSegmentation = "autoRunSegmentHealthAfterSegmentation"
@@ -69,7 +69,6 @@ final class ProcessingDefaults {
         static let icaComponentCount = 20
         static let bcgAutoSelectProxySet = false
         static let bcgDefaultMethodRaw = "spatialPCA"
-        static let artifactDetectionDefaultMethodRaw = ArtifactDetectionMethod.threshold.rawValue
         static let ocularBlinkThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .blink)
         static let ocularMovementThresholdConfig = EyeArtifactThresholdConfiguration.defaults(for: .movement)
         static let gradientDefaultCategoryRaw = MRIGradientCategory.template.rawValue
@@ -78,6 +77,7 @@ final class ProcessingDefaults {
         static let gradientComputeBackendRaw = GradientComputeBackend.cpu.rawValue
         static let waveletUsesGPU = true
         static let timeFrequencyUsesGPU = true
+        static let rhythmicityUsesGPU = true
         static let timeFrequencyBands = EEGFrequencyBand.restingDefaults
         static let interpolatedHealthFromNeighbors = true
         static let autoRunSegmentHealthAfterSegmentation = true
@@ -139,7 +139,10 @@ final class ProcessingDefaults {
     }
     /// Typed convenience over `bcgDefaultMethodRaw`, for binding directly to a `Picker`.
     var bcgDefaultMethod: BCGDetectionMethod {
-        get { BCGDetectionMethod(rawValue: bcgDefaultMethodRaw) ?? .spatialPCA }
+        get {
+            let method = BCGDetectionMethod(rawValue: bcgDefaultMethodRaw) ?? .spatialPCA
+            return method == .surrogatePCAS ? .spatialPCA : method
+        }
         set { bcgDefaultMethodRaw = newValue.rawValue }
     }
 
@@ -172,7 +175,7 @@ final class ProcessingDefaults {
         }
     }
 
-    /// Preferred method within the FASTR family.
+    /// Preferred method within the Slice-Based family.
     var gradientDefaultFASTRMethod: MRIGradientMethod {
         get {
             let stored = UserDefaults.standard.string(forKey: Keys.gradientDefaultFASTRMethodRaw)
@@ -231,6 +234,14 @@ final class ProcessingDefaults {
         set { UserDefaults.standard.set(newValue, forKey: Keys.timeFrequencyUsesGPU) }
     }
 
+    /// Whether new Rhythmicity Explorer runs automatically use the Metal
+    /// Morlet path when profiling says the workload is large enough. Unsupported
+    /// devices, shapes, and allocations fall back to bounded Accelerate FFT.
+    var rhythmicityUsesGPU: Bool {
+        get { UserDefaults.standard.bool(forKey: Keys.rhythmicityUsesGPU) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.rhythmicityUsesGPU) }
+    }
+
     /// Named bands shared by the time-frequency explorer.  Values are kept in
     /// preferences rather than hard-coded so a lab can add, for example, a
     /// narrow beta or gamma band without changing analysis code.
@@ -261,16 +272,6 @@ final class ProcessingDefaults {
     }
 
     // MARK: Artifact-detection defaults
-    var artifactDetectionDefaultMethodRaw: String {
-        get { UserDefaults.standard.string(forKey: Keys.artifactDetectionDefaultMethodRaw) ?? Defaults.artifactDetectionDefaultMethodRaw }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.artifactDetectionDefaultMethodRaw) }
-    }
-    /// Typed convenience over `artifactDetectionDefaultMethodRaw`, for binding directly to a `Picker`.
-    var artifactDetectionDefaultMethod: ArtifactDetectionMethod {
-        get { ArtifactDetectionMethod(rawValue: artifactDetectionDefaultMethodRaw) ?? .threshold }
-        set { artifactDetectionDefaultMethodRaw = newValue.rawValue }
-    }
-
     var ocularBlinkThresholdConfig: EyeArtifactThresholdConfiguration {
         get {
             ocularThresholdConfig(
@@ -344,9 +345,9 @@ final class ProcessingDefaults {
             Keys.gradientComputeBackendRaw: Defaults.gradientComputeBackendRaw,
             Keys.waveletUsesGPU: Defaults.waveletUsesGPU,
             Keys.timeFrequencyUsesGPU: Defaults.timeFrequencyUsesGPU,
+            Keys.rhythmicityUsesGPU: Defaults.rhythmicityUsesGPU,
             Keys.timeFrequencyBands: (try? JSONEncoder().encode(Defaults.timeFrequencyBands)) ?? Data(),
             Keys.bcgDefaultMethodRaw: Defaults.bcgDefaultMethodRaw,
-            Keys.artifactDetectionDefaultMethodRaw: Defaults.artifactDetectionDefaultMethodRaw,
             Keys.ocularBlinkThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularBlinkThresholdConfig),
             Keys.ocularMovementThresholdConfig: Self.encodedOcularThresholdConfig(Defaults.ocularMovementThresholdConfig),
             Keys.interpolatedHealthFromNeighbors: Defaults.interpolatedHealthFromNeighbors,
@@ -403,13 +404,13 @@ final class ProcessingDefaults {
         icaComponentCount = Defaults.icaComponentCount
         bcgAutoSelectProxySet = Defaults.bcgAutoSelectProxySet
         bcgDefaultMethodRaw = Defaults.bcgDefaultMethodRaw
-        artifactDetectionDefaultMethodRaw = Defaults.artifactDetectionDefaultMethodRaw
         ocularBlinkThresholdConfig = Defaults.ocularBlinkThresholdConfig
         ocularMovementThresholdConfig = Defaults.ocularMovementThresholdConfig
         interpolatedHealthFromNeighbors = Defaults.interpolatedHealthFromNeighbors
         autoRunSegmentHealthAfterSegmentation = Defaults.autoRunSegmentHealthAfterSegmentation
         autoSaveNewNetGeometries = Defaults.autoSaveNewNetGeometries
         autoSaveNewNetGeometriesFromNonMFF = Defaults.autoSaveNewNetGeometriesFromNonMFF
+        rhythmicityUsesGPU = Defaults.rhythmicityUsesGPU
     }
 
     private func ocularThresholdConfig(

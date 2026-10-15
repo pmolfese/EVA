@@ -10,12 +10,12 @@
 //  may apply.
 //
 //  Phase 2 of the batch roadmap (ROADMAP.md): processes one file with NO window
-//  at all — load → ProcessingCore.applyAutoSteps → write output. Used when a
-//  batch's configured script has no decision steps (ICA / drawn artifact
-//  cleaning), so there's nothing a human needs to see. Builds a fresh
-//  RecordingStore + VM set per file (mirroring WaveformView's own
-//  construction) purely as ProcessingCore's collaborators — nothing here is
-//  ever attached to a live view.
+//  at all — load → ProcessingCore.applyAutoSteps → write output. Used when no
+//  included step needs a human, including PB-1 Phase B runs where the operator
+//  opts to drop decisions a particular file cannot resolve. Builds a fresh
+//  RecordingStore + VM set per file (mirroring WaveformView's own construction)
+//  purely as ProcessingCore's collaborators — nothing here is ever attached to
+//  a live view.
 //
 
 import Foundation
@@ -25,8 +25,8 @@ enum HeadlessBatchProcessor {
         /// Fully processed and written to `url`.
         case completed(URL)
         /// The script wasn't fully headless-capable for this file (shouldn't
-        /// happen if the caller pre-checked with `EVAProcessingScript.isFullyHeadlessCapable`,
-        /// but a per-file event count/layout mismatch can still surface here) —
+        /// happen after the caller's setup checks, but a runtime incompatibility
+        /// or a decision left outside the skip policy can still surface here) —
         /// caller should route this file to windowed Phase-1 batch instead.
         case needsInput
     }
@@ -38,6 +38,7 @@ enum HeadlessBatchProcessor {
         url: URL,
         script: EVAProcessingScript,
         outputFolder: URL,
+        skipUnsupportedDecisions: Bool = false,
         progress: ((ProcessingCore.ProgressUpdate) -> Void)? = nil
     ) async throws -> Outcome {
         let (signal, pnsSignal, geometry) = try await Task.detached(priority: .userInitiated) {
@@ -78,8 +79,20 @@ enum HeadlessBatchProcessor {
         // plausible and wrong.
         let artifactPayload = ArtifactReplayPayload.read(fromPackage: url)
 
+        let availability = ReplayPayloadAvailability(
+            hasICAPayload: icaPayload != nil,
+            hasArtifactPayload: artifactPayload != nil,
+            hasElectrodeGeometry: !(geometry?.positions.isEmpty ?? true),
+            beatEventCodes: Set(signal.events.map(\.code))
+        )
+        let policy = BatchDecisionPolicy.apply(
+            to: script,
+            availability: availability,
+            enabled: skipUnsupportedDecisions
+        )
+
         let result = await core.applyAutoSteps(
-            script, to: signal, pnsSignal: pnsSignal,
+            policy.script, to: signal, pnsSignal: pnsSignal,
             icaPayload: icaPayload, artifactPayload: artifactPayload, progress: progress
         )
         guard result.remainingSteps.isEmpty, let output = result.signal else {
@@ -103,12 +116,13 @@ enum HeadlessBatchProcessor {
         // Same provenance the interactive export writes. Omitting it here meant a
         // batch-produced package silently lacked every "result" line — bad
         // channels, escalated/interpolated channels, per-category SNR.
-        let auditLogLines = ProcessingAuditLog.lines(
+        let auditLogLines = policy.drops.map(\.auditLogLine) + ProcessingAuditLog.lines(
             gradient: core.gradient,
             bcg: core.bcg,
             epoching: core.epoching,
             channels: store.channels,
-            cleaningVariance: store.cleaningVariance
+            cleaningVariance: store.cleaningVariance,
+            artifacts: core.template.definedArtifacts
         )
         // The script written out is the one handed in *plus* the channel
         // decisions this run made — PSA's globally-bad escalation can mark and
@@ -116,7 +130,7 @@ enum HeadlessBatchProcessor {
         // input script verbatim would describe a run that did not happen. Same
         // shared definition the interactive path uses.
         let outgoingScript = ChannelDecisionSteps.inserted(
-            into: script,
+            into: policy.script,
             badChannels: store.channels.bad,
             interpolatedChannels: Set(store.channels.interpolated.keys)
         )

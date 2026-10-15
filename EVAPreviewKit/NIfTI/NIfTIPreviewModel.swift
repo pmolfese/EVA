@@ -68,11 +68,70 @@ nonisolated struct NIfTIIntensityWindow: Sendable {
     }
 }
 
+nonisolated enum NIfTIDisplayMode: Sendable, Equatable {
+    case intensity
+    case labels(labelCount: Int, inferred: Bool)
+
+    var isLabelMap: Bool {
+        if case .labels = self { return true }
+        return false
+    }
+
+    var labelCount: Int? {
+        if case .labels(let count, _) = self { return count }
+        return nil
+    }
+
+    var wasInferred: Bool {
+        if case .labels(_, let inferred) = self { return inferred }
+        return false
+    }
+
+    static func make(url: URL, header: NIfTIHeader, slices: [NIfTISlice]) -> NIfTIDisplayMode {
+        let finite = slices.flatMap(\.values).filter(\.isFinite)
+        guard !finite.isEmpty else { return .intensity }
+
+        // Label maps are sometimes stored as floating point, so judge the
+        // scaled samples rather than relying on the storage datatype alone.
+        let tolerance = 1e-6
+        guard finite.allSatisfy({
+            abs($0) < 9e18 && abs($0 - $0.rounded()) <= tolerance
+        }) else {
+            return .intensity
+        }
+        let labels = Set(finite.map { Int64($0.rounded()) })
+        let foregroundCount = labels.subtracting([0]).count
+
+        // NIFTI_INTENT_LABEL is authoritative even when only one label crosses
+        // the three center planes retained by Quick Look.
+        if header.intentCode == 1002 {
+            return .labels(labelCount: foregroundCount, inferred: false)
+        }
+
+        guard foregroundCount > 0, labels.count <= 256 else { return .intensity }
+        let lowerName = url.deletingPathExtension().lastPathComponent.lowercased()
+        let labelNameHints = [
+            "atlas", "label", "labels", "roi", "dseg", "segmentation",
+            "parcellation", "parcellated", "aparc", "aseg", "mask"
+        ]
+        let nameSuggestsLabels = labelNameHints.contains { lowerName.contains($0) }
+
+        // A small discrete set with background is a useful conservative
+        // fallback for tools that omit intent metadata. Larger atlases require
+        // a label-like filename to avoid mistaking quantized anatomy for ROIs.
+        if nameSuggestsLabels || (labels.contains(0) && foregroundCount <= 32) {
+            return .labels(labelCount: foregroundCount, inferred: true)
+        }
+        return .intensity
+    }
+}
+
 nonisolated struct NIfTIPreviewModel: Sendable {
     let url: URL
     let header: NIfTIHeader
     let slices: [NIfTISlice]
     let intensityWindow: NIfTIIntensityWindow
+    let displayMode: NIfTIDisplayMode
     let byteSize: Int64
     let isCompressed: Bool
 

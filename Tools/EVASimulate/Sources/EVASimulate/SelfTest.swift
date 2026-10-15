@@ -118,15 +118,29 @@ nonisolated enum SelfTest {
             // exactly on the trigger cannot subtract that part, and the leftover
             // puts a floor under the residual that has nothing to do with the
             // clock drift this check is measuring. Real correctors pad for the
-            // same reason.
-            let padSeconds = 0.004
+            // same reason. The pad is the template's own anti-alias margin: the
+            // band-limited slice rings for that long on either side (ROADMAP
+            // MRI-1, 2026-09-26; it was 4 ms while the filter ran on the bare
+            // window and cut the ringing off).
+            let padSeconds = GradientArtifactModel.antiAliasMarginSeconds
             let corrected = averageArtifactSubtraction(
                 channels: noisy,
                 onsetsSeconds: injection.volumeOnsetsSeconds.map { $0 - padSeconds },
                 epochSamples: epochSamples,
                 samplingRate: config.samplingRate
             )
-            return (eeg.channels, corrected, config)
+            // Scored over the interior volumes only. The first volume has no
+            // predecessor ringing into it and the last no successor, so their
+            // epochs differ from every other one by a few tens of ms of ringing
+            // — which, at 7000 µV against ~11 µV of EEG, is enough to swamp the
+            // clock-drift effect this check measures. Same reason as the
+            // pre-scan above.
+            let onsets = injection.volumeOnsetsSeconds
+            guard onsets.count >= 4 else { return (eeg.channels, corrected, config) }
+            let lower = Int(((onsets[1] - padSeconds) * config.samplingRate).rounded(.down))
+            let upper = Int(((onsets[onsets.count - 1] - padSeconds) * config.samplingRate).rounded(.down))
+            let interior = max(0, lower)..<min(upper, eeg.channels[0].count)
+            return (eeg.channels.map { Array($0[interior]) }, corrected.map { Array($0[interior]) }, config)
         }
 
         let locked = gradientOnlyRun(clockOffset: 0)
@@ -137,7 +151,9 @@ nonisolated enum SelfTest {
             samplingRate: locked.config.samplingRate
         )
         // With the artifact cancelling exactly, the only residual is the EEG the
-        // template averaged in: std(EEG)/sqrt(N), so SNR should sit at sqrt(N).
+        // template averaged in: std(EEG)/sqrt(N), so SNR should sit at sqrt(N) —
+        // N being every volume, since all of them built the template even though
+        // only the interior ones are scored.
         let ceiling = Double(locked.config.volumeCount).squareRoot()
         outcomes.append(Outcome(
             name: "Locked clocks: template subtraction cancels the artifact exactly",
@@ -220,7 +236,12 @@ nonisolated enum SelfTest {
         let templates: [(String, HighRateTemplate)] = [
             ("BCG", BCGArtifactModel.waveformTemplate(config: templateConfig)),
             ("blink", OcularArtifactModel.blinkTemplate(config: templateConfig)),
-            ("gradient slice", GradientArtifactModel.syntheticTemplate(config: templateConfig))
+            ("gradient slice", GradientArtifactModel.syntheticTemplate(config: templateConfig)),
+            // What is actually injected. The raw slice passed this check while
+            // the anti-aliased one — filtered on its bare window — started and
+            // ended at a third of its peak-to-peak (ROADMAP MRI-1, 2026-09-26).
+            ("anti-aliased gradient slice", GradientArtifactModel.antiAliasedTemplate(
+                GradientArtifactModel.syntheticTemplate(config: templateConfig), config: templateConfig))
         ]
         for (name, template) in templates {
             outcomes.append(Outcome(
@@ -3206,6 +3227,88 @@ nonisolated enum SelfTest {
                 snr: .infinity, passed: false,
                 expectation: "evaluateSurrogateCore ran (\(error.localizedDescription))"
             ))
+        }
+
+        // score-cleaning calibration triangle: the two exact corners pin the math.
+        do {
+            let clean = [[1.0, -2, 3, -1, 2], [0.5, 1, -1, 0.5, -0.5]]
+            let noisy = clean.indices.map { c in clean[c].enumerated().map { $0.element + (Double($0.offset) - 2) } }
+            // corrected == clean: nothing left wrong, all artifact removed.
+            let perfect = scoreCleaningCore(label: "perfect", clean: clean, noisy: noisy, corrected: clean, rate: 100, names: nil)
+            // corrected == noisy: removed nothing, reduced no artifact.
+            let noop = scoreCleaningCore(label: "noop", clean: clean, noisy: noisy, corrected: noisy, rate: 100, names: nil)
+            let passed = perfect.residualErrorFraction < 1e-9
+                && abs(perfect.artifactReductionFraction - 1) < 1e-9
+                && noop.removedVarianceFraction < 1e-9
+                && abs(noop.artifactReductionFraction) < 1e-9
+            outcomes.append(Outcome(
+                name: "score-cleaning triangle: perfect removes all artifact, no-op removes none",
+                snr: perfect.artifactReductionFraction, passed: passed,
+                expectation: "perfect: residual 0, reduction 1; no-op: removed 0, reduction 0"))
+        }
+
+        // Non-Gaussian source shaping: raises kurtosis, preserves RMS, and is a
+        // no-op at burstiness 0 (so the default Gaussian model is untouched).
+        do {
+            var noise = GaussianSource(seed: 7)
+            let base = SpectralNoise.bandLimited(
+                sampleCount: 4096, samplingRate: 250, lowHz: 8, highHz: 12, source: &noise)
+            func rms(_ x: [Double]) -> Double { (x.reduce(0) { $0 + $1 * $1 } / Double(x.count)).squareRoot() }
+            let baseKurtosis = NonGaussianSourceModel.excessKurtosis(base)
+
+            var identity = base
+            NonGaussianSourceModel.shape(&identity, model: NonGaussianSourceModel(burstiness: 0), samplingRate: 250, seed: 1)
+            let isIdentity = zip(identity, base).allSatisfy { abs($0 - $1) < 1e-12 }
+
+            var bursty = base
+            NonGaussianSourceModel.shape(&bursty, model: NonGaussianSourceModel(burstiness: 0.8, burstSeconds: 0.5), samplingRate: 250, seed: 1)
+            let burstyKurtosis = NonGaussianSourceModel.excessKurtosis(bursty)
+            let rmsPreserved = abs(rms(bursty) - rms(base)) / max(rms(base), 1e-12) < 0.02
+
+            let passed = isIdentity && rmsPreserved && burstyKurtosis > baseKurtosis + 0.5
+            outcomes.append(Outcome(
+                name: "non-Gaussian shaping raises kurtosis, preserves RMS, identity at 0",
+                snr: burstyKurtosis, passed: passed,
+                expectation: "burstiness 0 is identity; 0.8 raises excess kurtosis and holds RMS within 2%"))
+        }
+
+        // Amari index: 0 for a permutation-scaling (perfect separation), positive
+        // when sources leak into each other.
+        do {
+            let identity = [[1.0, 0, 0], [0, 1, 0], [0, 0, 1]]
+            let perfect = amariIndex(mixing: identity, unmixing: identity)
+            let leaky = amariIndex(
+                mixing: identity, unmixing: [[1.0, 1, 0], [0, 1, 0], [0, 0, 1]])
+            let passed = perfect < 1e-9 && leaky > 0.3
+            outcomes.append(Outcome(
+                name: "Amari index: 0 for perfect separation, positive for source leakage",
+                snr: leaky, passed: passed,
+                expectation: "identity unmixing scores 0; a leaking row scores > 0.3"))
+        }
+
+        // EMG carrier coloring: raises lag-1 autocorrelation, preserves variance,
+        // and is the identity when nil (so the default EMG is unchanged).
+        do {
+            var noise = GaussianSource(seed: 11)
+            let raw = SpectralNoise.bandLimited(
+                sampleCount: 4096, samplingRate: 500, lowHz: 20, highHz: 200, source: &noise)
+            func std(_ x: [Double]) -> Double { let m = x.reduce(0,+)/Double(x.count); return (x.reduce(0){$0+($1-m)*($1-m)}/Double(x.count)).squareRoot() }
+            func lag1(_ x: [Double]) -> Double {
+                let m = x.reduce(0,+)/Double(x.count)
+                var num = 0.0, den = 0.0
+                for i in x.indices { den += (x[i]-m)*(x[i]-m) }
+                for i in 1..<x.count { num += (x[i]-m)*(x[i-1]-m) }
+                return den > 1e-12 ? num/den : 0
+            }
+            let identity = EMGArtifactModel.colored(raw, rho: nil)
+            let colored = EMGArtifactModel.colored(raw, rho: 0.9)
+            let isIdentity = zip(identity, raw).allSatisfy { abs($0 - $1) < 1e-12 }
+            let varPreserved = abs(std(colored) - std(raw)) / max(std(raw), 1e-12) < 0.02
+            let passed = isIdentity && varPreserved && lag1(colored) > lag1(raw) + 0.2
+            outcomes.append(Outcome(
+                name: "EMG carrier coloring raises autocorrelation, preserves variance, identity at nil",
+                snr: lag1(colored), passed: passed,
+                expectation: "nil is identity; ρ=0.9 raises lag-1 autocorrelation and holds variance"))
         }
 
         outcomes.append(contentsOf: SI0ContractFixtures.run())

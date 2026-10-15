@@ -27,6 +27,9 @@ struct GradientViewModelTests {
         vm.trMarkerCode = "TREV"
         vm.donorVolumes = 5
         vm.slicesPerVolume = 32
+        vm.multibandFactor = 4
+        vm.acquisitionTimingMode = .slicesAndMultiband
+        vm.synchronizationProfile = .scannerSlaved
         vm.ancSliceHighPass = true
         vm.ancEnabled = true
         vm.computeBackend = .metal
@@ -36,6 +39,11 @@ struct GradientViewModelTests {
         #expect(p["trMarkerCode"] == "TREV")
         #expect(p["donorVolumes"] == "5")
         #expect(p["slices"] == "32")
+        #expect(p["multibandFactor"] == "4")
+        #expect(p["acquisitionTimingMode"] == "slicesAndMultiband")
+        #expect(p["synchronizationProfile"] == "scannerSlaved")
+        #expect(p["alignment"] == "true")
+        #expect(p["subSample"] == "false")
         #expect(p["ancSliceHighPass"] == "true")
         #expect(p["backend"] == "metal")
 
@@ -43,8 +51,72 @@ struct GradientViewModelTests {
         restored.apply(parameters: p)
         #expect(restored.method == .fastr)
         #expect(restored.slicesPerVolume == 32)
+        #expect(restored.multibandFactor == 4)
+        #expect(restored.effectiveAcquisitionGroupCount == 8)
+        #expect(restored.synchronizationProfile == .scannerSlaved)
         #expect(restored.ancSliceHighPass)
         #expect(restored.computeBackend == .metal)
+    }
+
+    @MainActor
+    @Test func timingJSONCanProvideExplicitFractionalOffsets() throws {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .fastr
+        let data = Data("""
+        {
+          "totalSlices": 40,
+          "multibandFactor": 4,
+          "acquisitionGroupOffsetsFractionOfTR": [0.0, 0.1, 0.4, 0.8]
+        }
+        """.utf8)
+
+        try vm.applyAcquisitionTimingJSON(data: data, sourceName: "scan.json")
+
+        #expect(vm.acquisitionTimingMode == .jsonSidecar)
+        #expect(vm.slicesPerVolume == 40)
+        #expect(vm.multibandFactor == 4)
+        #expect(vm.effectiveAcquisitionSchedule == .offsetsFractionOfTR([0, 0.1, 0.4, 0.8]))
+        #expect(vm.acquisitionTimingValidationMessage == nil)
+
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: vm.parameters)
+        #expect(restored.acquisitionTimingMode == .jsonSidecar)
+        #expect(restored.effectiveAcquisitionSchedule == vm.effectiveAcquisitionSchedule)
+        #expect(restored.acquisitionTimingSourceName == "scan.json")
+    }
+
+    @MainActor
+    @Test func oldAlignmentParametersRestoreAsCustomProfile() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.apply(parameters: [
+            "engine": "cleanroom-1",
+            "method": "FASTR",
+            "alignment": "false",
+            "subSample": "false"
+        ])
+
+        #expect(vm.synchronizationProfile == .custom)
+        #expect(!vm.alignmentEnabled)
+        #expect(!vm.subSampleAlignment)
+    }
+
+    @MainActor
+    @Test func standardSliceTimingJSONCollapsesSimultaneousSlicesIntoGroups() throws {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .fastr
+        let data = Data("""
+        {
+          "SliceTiming": [0.5, 0.0, 0.5, 0.0],
+          "MultibandAccelerationFactor": 2
+        }
+        """.utf8)
+
+        try vm.applyAcquisitionTimingJSON(data: data, sourceName: "sidecar.json")
+
+        #expect(vm.slicesPerVolume == 4)
+        #expect(vm.multibandFactor == 2)
+        #expect(vm.effectiveAcquisitionSchedule == .offsetsSeconds([0, 0.5]))
+        #expect(vm.effectiveAcquisitionGroupCount == 2)
     }
 
     @MainActor
@@ -190,6 +262,12 @@ struct GradientViewModelTests {
         #expect(MRIGradientMethod.waas.weightsDonorsByDistance)
         #expect(MRIGradientMethod.waar.fitsTemplateScale)
         #expect(!MRIGradientMethod.mas.weightsDonorsByDistance)
+    }
+
+    @Test func gradientFamiliesUseDescriptiveUILabelsWithoutChangingPersistenceKeys() {
+        #expect(MRIGradientCategory.template.label == "Template")
+        #expect(MRIGradientCategory.fastr.label == "Slice-Based")
+        #expect(MRIGradientCategory.fastr.rawValue == "FASTR")
     }
 
     // MARK: - Run reports

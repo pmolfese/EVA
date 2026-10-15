@@ -91,6 +91,44 @@ nonisolated enum SingleTrialAnalyzer {
         var distribution: [TimeChunkCount]
     }
 
+    /// One independently computed result for one named analysis window.
+    /// Keeping the window beside its result prevents a multi-peak setup from
+    /// silently collapsing into the envelope between the first and last peak.
+    struct WindowResult: Identifiable, Sendable {
+        var id: UUID { window.id }
+        var window: TrialAlignmentMetrics.AnalysisWindow
+        var result: Result
+    }
+
+    static func analyzeWindows(
+        averageSamples: [Float],
+        averageStimulusOffsetSamples: Int,
+        samplingRate: Double,
+        trials: [TrialInput],
+        windows: [TrialAlignmentMetrics.AnalysisWindow],
+        adaptiveHalfWidthMs: Double,
+        splitCount: Int,
+        outlierThresholdSD: Double,
+        distributionChunkCount: Int
+    ) -> [WindowResult] {
+        windows.compactMap { window in
+            guard window.endMs > window.startMs,
+                  let result = analyze(
+                    averageSamples: averageSamples,
+                    averageStimulusOffsetSamples: averageStimulusOffsetSamples,
+                    samplingRate: samplingRate,
+                    trials: trials,
+                    windowStartMs: window.startMs,
+                    windowEndMs: window.endMs,
+                    adaptiveHalfWidthMs: adaptiveHalfWidthMs,
+                    splitCount: splitCount,
+                    outlierThresholdSD: outlierThresholdSD,
+                    distributionChunkCount: distributionChunkCount
+                  ) else { return nil }
+            return WindowResult(window: window, result: result)
+        }
+    }
+
     /// - Parameters:
     ///   - averageSamples: the grand-average trace (already channel-resolved)
     ///     for the category being analyzed, used only to locate the shared

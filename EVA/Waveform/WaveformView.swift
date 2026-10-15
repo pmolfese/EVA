@@ -58,7 +58,7 @@ enum MRIGradientEngine {
 }
 
 /// The top-level split the MRI sheet presents: whole-epoch template methods on
-/// one side, slice-epoch FASTR-family methods on the other.
+/// one side, slice-based methods on the other.
 ///
 /// This is a user-facing grouping, not an engine boundary — the Template tab
 /// spans two engines — because the distinction that matters when choosing is
@@ -66,9 +66,17 @@ enum MRIGradientEngine {
 /// residual".
 enum MRIGradientCategory: String, CaseIterable, Identifiable {
     case template = "Template"
+    // Keep the persisted raw value stable; `label` is the user-facing name.
     case fastr = "FASTR"
 
     var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .template: return "Template"
+        case .fastr: return "Slice-Based"
+        }
+    }
 
     /// Methods offered in the picker: everything in this family that is not
     /// retired. A retired method still exists and still runs — a replay file
@@ -217,6 +225,7 @@ struct WaveformView: View {
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) var usesPixelAdaptiveWaveformRendering = true
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) var showsTimeMarkersAcrossTraces = false
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
+    @AppStorage(EVAGeneralPreferences.waveformZeroLineColorKey) var waveformZeroLineColorData = WaveformZeroLineColor.defaultData
     @AppStorage(EVAGeneralPreferences.traceOverflowEnabledKey) var allowsTraceOverflow = false
     @AppStorage(EVAGeneralPreferences.traceOverflowHeightKey)
     var traceOverflowHeightPreference = EVAGeneralPreferences.defaultTraceOverflowHeight
@@ -231,11 +240,26 @@ struct WaveformView: View {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
     }
+    var waveformDensityMode: WaveformDensityMode {
+        get { recordingStore.waveformDensityMode }
+        nonmutating set { recordingStore.waveformDensityMode = newValue }
+    }
+    var displayedChannelSetID: ChannelSet.ID? {
+        get { recordingStore.displayedChannelSetID }
+        nonmutating set { recordingStore.displayedChannelSetID = newValue }
+    }
+    var verticalWaveformViewportHeight: CGFloat {
+        get { recordingStore.verticalWaveformViewportHeight }
+        nonmutating set { recordingStore.verticalWaveformViewportHeight = newValue }
+    }
     /// Read once per channel row in `waveformRow`, so it goes through the memo
     /// rather than decoding JSON per row per body pass. See
     /// `WaveformTimeMarkerStyleCache`.
     var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
         WaveformTimeMarkerStyleCache.style(for: waveformTimeMarkerStyleData)
+    }
+    var waveformZeroLineColor: WaveformZeroLineColor {
+        WaveformZeroLineColorCache.color(for: waveformZeroLineColorData)
     }
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
@@ -352,6 +376,14 @@ struct WaveformView: View {
     // "Define Artifact" template-detection domain, extracted into an L4 store
     // (REFACTOR.md — analysis-domain slice).
     @State var template: ArtifactTemplateViewModel
+    // Dedicated MAAC saccadic-spike detection / canonical-template workflow.
+    @State var saccadicSpike: SaccadicSpikeViewModel
+    // Dedicated MAAC-2 continuous corneo-retinal dipole workflow.
+    @State var corneoRetinal: CorneoRetinalViewModel
+    // Dedicated MAAC-3 movement detection and marker-review workflow.
+    @State var movementPCA: MovementPCAViewModel
+    // Dedicated MAAC-4 muscle BSS-CCA detection and component-review workflow.
+    @State var muscleBSSCCA: MuscleBSSCCAViewModel
     // Wavelet artifact explorer domain, extracted into an L4 store.
     @State var waveletExplorer: WaveletArtifactExplorerViewModel
     // ICA decomposition + component removal, extracted into an L4 store. See
@@ -375,6 +407,7 @@ struct WaveformView: View {
     // not epoching's averaged output.
     @State var singleTrial: SingleTrialAnalysisViewModel
     @State var eegAnalysis: EEGAnalysisViewModel
+    @State var rhythmicityExplorer: RhythmicityExplorerViewModel
 
     // Band-pass / notch filtering (applied to the active base signal).
     /// Filtering domain (band-pass / line-noise / average-reference), extracted
@@ -386,6 +419,9 @@ struct WaveformView: View {
     // Wavelet artifact reduction pipeline stage.
     // Wavelet-reduction domain, extracted into an L4 store. See REFACTOR.md slice 3.
     @State var wavelet: WaveletReductionViewModel
+    // Experimental component-space wavelet stage. Kept distinct from ordinary
+    // ICA removal because W-ICA thresholds activations instead of rejecting ICs.
+    @State var wica: WICAViewModel
     // B4: status and physio display state now live on `recordingStore.status` /
     // `recordingStore.physio`.
     var channelStatusIsError: Bool {
@@ -576,7 +612,16 @@ struct WaveformView: View {
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
     private let referenceDisplaySampleRate = 1_000.0
     private let referenceDisplaySampleStride = 5
-    let channelRowHeight = WaveformScaleUnits.channelRowHeight
+    var waveformDensityGeometry: WaveformDensityGeometry {
+        WaveformDensityLayout.geometry(
+            mode: WaveformDensityLayout.effectiveMode(
+                waveformDensityMode,
+                availableChannelCount: displayedChannelCount
+            ),
+            viewportHeight: verticalWaveformViewportHeight
+        )
+    }
+    var channelRowHeight: CGFloat { waveformDensityGeometry.rowHeight }
     /// Headroom a trace may travel past its row before the canvas clips it.
     ///
     /// The *only* thing the overflow preference changes. Row chrome lives in
@@ -585,10 +630,12 @@ struct WaveformView: View {
     /// a previously-raised headroom behind, because the canvas is sized from
     /// this and nothing else.
     var channelOverflowHeight: CGFloat {
-        allowsTraceOverflow ? max(CGFloat(traceOverflowHeightPreference), 0) : 0
+        guard allowsTraceOverflow else { return 0 }
+        let baseline = max(WaveformScaleUnits.channelRowHeight, 1)
+        return max(CGFloat(traceOverflowHeightPreference), 0) * channelRowHeight / baseline
     }
     private let eventTrackHeight: CGFloat = 64
-    let rowSpacing: CGFloat = 12
+    var rowSpacing: CGFloat { waveformDensityGeometry.rowSpacing }
     let labelColumnWidth: CGFloat = 120
     private let geometryUpdateQuantum: CGFloat = 0.5
     private let jumpSliderUpdateQuantum = 0.0005
@@ -597,20 +644,38 @@ struct WaveformView: View {
     private let butterflyPanelWidth: CGFloat = 360
     private let overlaidCategoriesPanelWidth: CGFloat = 380
     private let amplitudeScaleBounds: ClosedRange<Double> = 1...5_000
+    private let sensitivityBounds: ClosedRange<Double> = 0.1...400
     let physioScaleOptions: [Double] = [8, 16, 32, 64]
     let physioScaleBounds: ClosedRange<Double> = 1...64
 
+    private var sensitivitySliderBounds: ClosedRange<Double> {
+        let physicallyReachableLower = WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScaleBounds.lowerBound,
+            rowHeight: channelRowHeight
+        )
+        let physicallyReachableUpper = WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScaleBounds.upperBound,
+            rowHeight: channelRowHeight
+        )
+        let lower = max(sensitivityBounds.lowerBound, physicallyReachableLower)
+        let upper = min(sensitivityBounds.upperBound, physicallyReachableUpper)
+        return lower...upper
+    }
+
     private var amplitudeScaleSliderBounds: ClosedRange<Double> {
-        log10(amplitudeScaleBounds.lowerBound)...log10(amplitudeScaleBounds.upperBound)
+        log10(sensitivitySliderBounds.lowerBound)...log10(sensitivitySliderBounds.upperBound)
     }
 
     private var amplitudeScaleSliderBinding: Binding<Double> {
         Binding(
             get: {
-                log10(min(max(amplitudeScale, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound))
+                log10(min(
+                    max(currentSensitivity, sensitivitySliderBounds.lowerBound),
+                    sensitivitySliderBounds.upperBound
+                ))
             },
             set: { value in
-                amplitudeScale = roundedAmplitudeScale(pow(10, value))
+                setSensitivity(pow(10, value))
             }
         )
     }
@@ -625,6 +690,14 @@ struct WaveformView: View {
                 set: { setArtifactCleaningEnabled($0) }
             ),
             appliedCorrectionAvailable: artifactVM.cleanedSignal != nil
+        )
+    }
+
+    private var displayChannelsControls: DisplayChannelsControls {
+        DisplayChannelsControls(
+            selectedSetID: displayChannelSetBinding,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
         )
     }
 
@@ -703,12 +776,18 @@ struct WaveformView: View {
         _bcg = State(wrappedValue: BCGDetectionViewModel(store: store))
         _artifactVM = State(wrappedValue: ArtifactViewModel(store: store))
         _template = State(wrappedValue: ArtifactTemplateViewModel(store: store))
+        _saccadicSpike = State(wrappedValue: SaccadicSpikeViewModel(store: store))
+        _corneoRetinal = State(wrappedValue: CorneoRetinalViewModel(store: store))
+        _movementPCA = State(wrappedValue: MovementPCAViewModel(store: store))
+        _muscleBSSCCA = State(wrappedValue: MuscleBSSCCAViewModel(store: store))
         _ica = State(wrappedValue: ICAViewModel(store: store))
         _epoching = State(wrappedValue: EpochingViewModel(store: store))
         _singleTrial = State(wrappedValue: SingleTrialAnalysisViewModel(store: store))
         _eegAnalysis = State(wrappedValue: EEGAnalysisViewModel(store: store))
+        _rhythmicityExplorer = State(wrappedValue: RhythmicityExplorerViewModel(store: store))
         _filter = State(wrappedValue: FilterViewModel(store: store))
         _wavelet = State(wrappedValue: WaveletReductionViewModel(store: store))
+        _wica = State(wrappedValue: WICAViewModel())
         _gradient = State(wrappedValue: GradientViewModel(store: store))
         _chanHealth = State(wrappedValue: ChannelHealthViewModel(store: store))
         _segHealth = State(wrappedValue: SegmentHealthViewModel(store: store))
@@ -758,7 +837,10 @@ struct WaveformView: View {
                 let processed = artifactVM.cleaningIsEnabled ? (artifactVM.cleanedSignal ?? preArtifact) : preArtifact
                 // Wavelet reduction stage: computed from `processed`, applied
                 // before interpolation. Toggleable and revertible like cleaning.
-                let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? processed) : processed
+                let wicaStage = wica.isEnabled && wica.outputInputRevision == processed.dataRevision
+                    ? (wica.cleanedSignal ?? processed)
+                    : processed
+                let waveletStage = wavelet.isEnabled ? (wavelet.reducedSignal ?? wicaStage) : wicaStage
                 // `content(...)` is called from exactly ONE call site — not
                 // branched on `interpolationSnapshot.isEmpty` — because an
                 // if/else here would be a structural-identity change the
@@ -786,7 +868,8 @@ struct WaveformView: View {
                     for: epoching.epochedSignal ?? continuousSignal,
                     base: base,
                     cleaningBase: preArtifact,
-                    waveletInput: processed,
+                    wicaInput: processed,
+                    waveletInput: wicaStage,
                     continuousSignal: continuousSignal
                 )
                 .task(id: resolutionKey) {
@@ -808,6 +891,7 @@ struct WaveformView: View {
         }
         .navigationTitle(recording.packageName)
         .focusedSceneValue(\.channelModel, channels)
+        .focusedSceneValue(\.displayChannelsControls, displayChannelsControls)
         .focusedSceneValue(\.channelLabelMetricsExportRequest, $channelLabelMetricsExportRequest)
         .focusedSceneValue(\.artifactMenuControls, artifactMenuControls)
         .focusedSceneValue(\.icaDebugReportRequest, $ica.debugReportRequest)
@@ -1187,12 +1271,7 @@ struct WaveformView: View {
     private func seedDisplayScaleDefaults() {
         guard !hasSeededDisplayScale else { return }
         hasSeededDisplayScale = true
-        amplitudeScale = clampedAmplitudeScale(
-            WaveformScaleUnits.amplitudeScale(
-                forMicrovoltsPerMillimeter: defaultSensitivityPreference,
-                rowHeight: channelRowHeight
-            )
-        )
+        setSensitivity(defaultSensitivityPreference)
         timeScale = clampedTimeScale(
             WaveformScaleUnits.timeScale(
                 forMillimetersPerSecond: defaultSweepPreference,
@@ -1341,11 +1420,19 @@ struct WaveformView: View {
             signalType: signal.signalType,
             signalEvents: EventTrackEventSignature(events: signal.events),
             userMarkers: userMarkers,
-            artifactEvents: EventTrackEventSignature(events: artifactVM.events),
+            artifactEvents: EventTrackEventSignature(
+                events: artifactVM.events
+                    + (corneoRetinal.result?.blinkEvents ?? [])
+                    + muscleBSSCCA.detectedEvents
+            ),
             definedArtifacts: template.definedArtifacts.map {
                 WaveformDefinedArtifactSignature(
                     id: $0.id,
-                    events: EventTrackEventSignature(events: $0.events)
+                    events: EventTrackEventSignature(
+                        events: $0.isCorneoRetinalDefinition
+                            ? ($0.corneoRetinalBlinkEvents ?? [])
+                            : $0.events
+                    )
                 )
             },
             epochSegments: WaveformEpochSegmentSignature(segments: epoching.epochSegments),
@@ -1380,7 +1467,13 @@ struct WaveformView: View {
 
         guard includeArtifactOverlays else { return events }
 
-        for event in definedArtifactEventList() where seenIDs.insert(event.id).inserted {
+        for event in definedArtifactDisplayEventList() where seenIDs.insert(event.id).inserted {
+            events.append(event)
+        }
+        for event in corneoRetinal.result?.blinkEvents ?? [] where seenIDs.insert(event.id).inserted {
+            events.append(event)
+        }
+        for event in muscleBSSCCA.detectedEvents where seenIDs.insert(event.id).inserted {
             events.append(event)
         }
         for event in artifactVM.events where seenIDs.insert(event.id).inserted {
@@ -1420,9 +1513,20 @@ struct WaveformView: View {
     private func overlayWindowSeconds(for event: MFFEvent) -> Double? {
         let defaultWindowSeconds = 0.25
         if let artifact = template.definedArtifacts.first(where: { artifact in
-            artifact.events.contains { $0.id == event.id }
+            let events = artifact.isCorneoRetinalDefinition
+                ? (artifact.corneoRetinalBlinkEvents ?? [])
+                : artifact.events
+            return events.contains { $0.id == event.id }
         }) {
-            return max(artifact.windowSizeSeconds, defaultWindowSeconds)
+            return artifact.isCorneoRetinalDefinition
+                ? max(event.durationSeconds ?? 0, defaultWindowSeconds)
+                : max(artifact.windowSizeSeconds, defaultWindowSeconds)
+        }
+        if corneoRetinal.result?.blinkEvents.contains(where: { $0.id == event.id }) == true {
+            return max(event.durationSeconds ?? 0, defaultWindowSeconds)
+        }
+        if muscleBSSCCA.detectedEvents.contains(where: { $0.id == event.id }) {
+            return max(event.durationSeconds ?? 0, defaultWindowSeconds)
         }
         if artifactVM.events.contains(where: { $0.id == event.id }) {
             return defaultWindowSeconds
@@ -1435,6 +1539,7 @@ struct WaveformView: View {
         for signal: MFFSignalData,
         base: MFFSignalData,
         cleaningBase: MFFSignalData,
+        wicaInput: MFFSignalData,
         waveletInput: MFFSignalData,
         continuousSignal: MFFSignalData
     ) -> some View {
@@ -1461,10 +1566,13 @@ struct WaveformView: View {
             if displayMode == .averages {
                 averagesToolbar(for: signal)
             } else {
-                controls(for: signal, base: base, waveletInput: waveletInput, continuousSignal: continuousSignal)
+                controls(for: signal, base: base, wicaInput: wicaInput, waveletInput: waveletInput, continuousSignal: continuousSignal)
             }
 
-            Divider()
+            Rectangle()
+                .fill(Color.orange.opacity(0.85))
+                .frame(height: 1)
+                .accessibilityHidden(true)
 
             workspaceContent(
                 displayMode: displayMode,
@@ -1499,6 +1607,11 @@ struct WaveformView: View {
         .onChange(of: processingChainSignature, initial: true) { _, _ in
             recordProcessingHistory()
         }
+        // A PCA-S refusal changes no signal, so the signature above stays put.
+        // Its own trigger mints the recorded-refusal node one step back.
+        .onChange(of: bcg.surrogateRefusalToken) { _, _ in
+            mintPendingRefusal()
+        }
         // B3: one `.sheet(item:)` in place of 18 chained `.sheet(isPresented:)`.
         // Presentation is still driven by the same per-VM booleans — they are
         // derived into `activeSheet` rather than each owning a modifier. See
@@ -1508,19 +1621,13 @@ struct WaveformView: View {
                 sheet,
                 base: base,
                 cleaningBase: cleaningBase,
+                wicaInput: wicaInput,
                 waveletInput: waveletInput,
                 continuousSignal: continuousSignal
             )
         }
         .overlay(alignment: .top) { replayBanner() }
         .overlay(alignment: .top) { reDerivingBanner }
-        .onChange(of: artifactVM.detectionMethod) { _, method in
-            if method == .ica {
-                DispatchQueue.main.async {
-                    openICASheet(for: base)
-                }
-            }
-        }
         .task(id: artifactDetectionRequestID(for: continuousSignal)) {
             await updateArtifactEvents(for: continuousSignal)
         }
@@ -1638,17 +1745,6 @@ struct WaveformView: View {
         showsToolbarButtonLabels ? label : nil
     }
 
-    private func roundedAmplitudeScale(_ value: Double) -> Double {
-        let clamped = min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
-        if clamped < 100 {
-            return clamped.rounded()
-        }
-        if clamped < 1_000 {
-            return (clamped / 10).rounded() * 10
-        }
-        return (clamped / 100).rounded() * 100
-    }
-
     private func formatAmplitudeScale(_ value: Double) -> String {
         if value < 100 {
             return String(Int(value.rounded()))
@@ -1659,7 +1755,7 @@ struct WaveformView: View {
         return String(Int((value / 100).rounded() * 100))
     }
 
-    private func controls(for signal: MFFSignalData, base: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
+    private func controls(for signal: MFFSignalData, base: MFFSignalData, wicaInput: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
             toolbarScaleControls()
 
@@ -1715,33 +1811,6 @@ struct WaveformView: View {
                 }
                 .disabled(template.definedArtifacts.isEmpty)
 
-                Divider()
-
-                Button("Wavelet Artifact Explorer…") {
-                    openWaveletArtifactExplorer(for: continuousSignal)
-                }
-                .disabled(waveletExplorer.isRunning)
-
-                Button("Wavelet Reduction…") {
-                    openWaveletReductionSheet(input: waveletInput)
-                }
-
-                Toggle("Show Wavelet Reduction", isOn: Binding(
-                    get: { wavelet.isEnabled },
-                    set: { setWaveletReductionEnabled($0) }
-                ))
-                .disabled(wavelet.reducedSignal == nil)
-                .help(wavelet.reducedSignal == nil
-                    ? "Run wavelet reduction before toggling the reduced signal."
-                    : "Switch between the wavelet-reduced signal and the input signal.")
-
-                Button("Revert Wavelet Reduction") {
-                    revertWaveletReduction()
-                }
-                .disabled(wavelet.reducedSignal == nil)
-
-                Divider()
-
                 Toggle("Show Applied Correction", isOn: Binding(
                     get: { artifactVM.cleaningIsEnabled },
                     set: { setArtifactCleaningEnabled($0) }
@@ -1755,9 +1824,25 @@ struct WaveformView: View {
 
                 Toggle("Eye Blink", isOn: $detectsEyeBlinkArtifacts)
                 Toggle("Eye Movement", isOn: $detectsEyeMovementArtifacts)
-                
+
+                Button("Threshold Settings…") {
+                    artifactVM.showsThresholdSheet = true
+                }
+                if !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
+                    Text("Enable Eye Blink or Eye Movement above to detect.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Divider()
-                
+
+                Button("ICA…") {
+                    openICASheet(for: base)
+                }
+                .help("Run or review ICA components. Threshold artifact detection remains enabled independently.")
+
+                Divider()
+
                 Button(ecg.isEnabled ? "Configure ECG / QRS Detection…" : "ECG / QRS Detection…") {
                     openECGDetectionSheet(for: continuousSignal)
                 }
@@ -1778,35 +1863,82 @@ struct WaveformView: View {
 
                 Divider()
 
-                Picker("Method", selection: $artifactVM.detectionMethod) {
-                    ForEach(ArtifactDetectionMethod.selectableCases) { method in
-                        Text(method.rawValue)
-                            .tag(method)
-                    }
-                }
-                .pickerStyle(.inline)
-
-                if artifactVM.detectionMethod == .threshold {
-                    Divider()
-                    Button("Threshold Settings…") {
-                        artifactVM.showsThresholdSheet = true
-                    }
-                    if !detectsEyeBlinkArtifacts, !detectsEyeMovementArtifacts {
-                        Text("Enable Eye Blink or Eye Movement above to detect.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                Button("Saccadic Spike Potential…") {
+                    openSaccadicSpikeSheet(for: continuousSignal)
                 }
 
-                if artifactVM.detectionMethod == .ica {
-                    Divider()
-                    Button("Run / Review ICA…") {
-                        openICASheet(for: base)
-                    }
-                    Text("Inspect component maps and remove selected components.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Button("Corneo-Retinal Dipole…") {
+                    openCorneoRetinalSheet(for: continuousSignal)
                 }
+
+                Button("Movement Artifact (PCA)…") {
+                    openMovementPCASheet(for: continuousSignal)
+                }
+                .disabled(continuousSignal.isAveraged)
+
+                Button("Muscle Artifact (BSS-CCA)…") {
+                    openMuscleBSSCCASheet(for: continuousSignal)
+                }
+                .disabled(continuousSignal.isAveraged || continuousSignal.samplingRate / 2 < MuscleBSSCCAConfiguration.default.emgBandHighHz)
+                .help(continuousSignal.isAveraged
+                      ? "MAAC-4 operates on single-trial or continuous data, not averages."
+                      : continuousSignal.samplingRate / 2 < MuscleBSSCCAConfiguration.default.emgBandHighHz
+                        ? "The signal's Nyquist bandwidth does not cover the default 15–30 Hz EMG classifier band."
+                        : "Analyze and review MAAC-4 muscle ranges before adding them to Clean Artifacts.")
+
+                Divider()
+
+                Button("Wavelet Artifact Explorer…") {
+                    openWaveletArtifactExplorer(for: continuousSignal)
+                }
+                .disabled(waveletExplorer.isRunning)
+
+                Divider()
+
+                Button("W-ICA (Experimental)…") {
+                    openWICASheet(for: wicaInput)
+                }
+                .disabled(wica.isAnalyzing || wica.isApplying || wicaInput.isAveraged)
+                .help("Fit ICA, inspect ICLabel evidence, then wavelet-threshold all or selected component activations.")
+
+                Toggle("Show W-ICA", isOn: Binding(
+                    get: { wica.isEnabled },
+                    set: { enabled in
+                        wica.isEnabled = enabled
+                        wavelet.clearResults()
+                        invalidateInterpolations()
+                        invalidateEpochsForSignalChange()
+                    }
+                ))
+                    .disabled(wica.cleanedSignal == nil)
+
+                Button("Revert W-ICA") {
+                    wica.revert()
+                    wavelet.clearResults()
+                    invalidateInterpolations()
+                    invalidateEpochsForSignalChange()
+                }
+                .disabled(wica.cleanedSignal == nil)
+
+                Divider()
+
+                Button("Wavelet Reduction…") {
+                    openWaveletReductionSheet(input: waveletInput)
+                }
+
+                Toggle("Show Wavelet Reduction", isOn: Binding(
+                    get: { wavelet.isEnabled },
+                    set: { setWaveletReductionEnabled($0) }
+                ))
+                .disabled(wavelet.reducedSignal == nil)
+                .help(wavelet.reducedSignal == nil
+                    ? "Run wavelet reduction before toggling the reduced signal."
+                    : "Switch between the wavelet-reduced signal and the input signal.")
+
+                Button("Revert Wavelet Reduction") {
+                    revertWaveletReduction()
+                }
+                .disabled(wavelet.reducedSignal == nil)
             } label: {
                 ToolbarIcon(
                     name: "icon.artifacts",
@@ -1867,19 +1999,30 @@ struct WaveformView: View {
             .accessibilityLabel("Processing")
             .help("Segment the recording into event-locked epochs")
 
-            Button {
-                eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
-                eegAnalysis.showsSheet = true
+            Menu {
+                Button {
+                    eegAnalysis.syncArtifactSources(eegArtifactRejectionSources())
+                    eegAnalysis.showsSheet = true
+                } label: {
+                    Label("EEG Analysis…", systemImage: "waveform.path.ecg")
+                }
+
+                Button {
+                    rhythmicityExplorer.showsSheet = true
+                } label: {
+                    Label("Rhythmicity Explorer…", systemImage: "waveform.path")
+                }
             } label: {
                 ToolbarIcon(
                     name: "icon.eeg-processing",
                     label: toolbarButtonLabel("EEG"),
-                    isActive: eegAnalysis.result != nil
+                    isActive: eegAnalysis.result != nil || rhythmicityExplorer.showsSheet
                 )
             }
+            .menuIndicator(.hidden)
             .buttonStyle(.plain)
-            .accessibilityLabel("EEG Processing")
-            .help(eegAnalysis.result == nil ? "Continuous EEG analysis tools" : "EEG analysis results ready")
+            .accessibilityLabel("EEG analyses")
+            .help(eegAnalysis.result == nil ? "Choose an EEG analysis" : "Choose an EEG analysis; EEG analysis results are ready")
 
             Button {
                 showsEventsPanel.toggle()
@@ -1973,6 +2116,164 @@ struct WaveformView: View {
     /// so neither truncates and both share one left edge.
     private var scaleReadoutWidth: CGFloat { 80 }
 
+    private var currentSensitivity: Double {
+        WaveformScaleUnits.microvoltsPerMillimeter(
+            amplitudeScale: amplitudeScale,
+            rowHeight: channelRowHeight
+        )
+    }
+
+    private var displayChannelSignal: MFFSignalData? {
+        continuousProcessedSignal ?? recording.signal
+    }
+
+    private var displayChannelTotalCount: Int {
+        displayChannelSignal?.numberOfChannels ?? 0
+    }
+
+    private var displayChannelNetType: String? {
+        recording.sensorLayout?.name
+    }
+
+    private var compatibleDisplayChannelSets: [ChannelSet] {
+        DisplayChannelsResolver.compatibleSets(
+            from: ChannelSetStore.shared.allSets,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
+        )
+    }
+
+    private var activeDisplayChannelSet: ChannelSet? {
+        DisplayChannelsResolver.resolvedSet(
+            id: displayedChannelSetID,
+            sets: ChannelSetStore.shared.allSets,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
+        )
+    }
+
+    var displayedChannelCount: Int {
+        activeDisplayChannelSet?.channelIndices.reduce(into: Set<Int>()) { result, index in
+            if (0..<displayChannelTotalCount).contains(index) { result.insert(index) }
+        }.count ?? max(displayChannelTotalCount, 1)
+    }
+
+    private var displayChannelSetBinding: Binding<ChannelSet.ID?> {
+        Binding(
+            get: { activeDisplayChannelSet?.id },
+            set: { setDisplayedChannelSetID($0) }
+        )
+    }
+
+    private var displayChannelSetSummary: String {
+        "\(min(displayedChannelCount, displayChannelTotalCount)) of \(displayChannelTotalCount)"
+    }
+
+    private func setDisplayedChannelSetID(_ id: ChannelSet.ID?) {
+        let resolvedID = DisplayChannelsResolver.resolvedSet(
+            id: id,
+            sets: ChannelSetStore.shared.allSets,
+            channelCount: displayChannelTotalCount,
+            netType: displayChannelNetType
+        )?.id
+        guard resolvedID != displayedChannelSetID else { return }
+
+        let sensitivity = currentSensitivity
+        displayedChannelSetID = resolvedID
+        setSensitivity(sensitivity)
+        syncScaleUnitEntries()
+    }
+
+    private func manageChannelSets() {
+        ChannelsWindowModel.shared.present(tab: .channelSets)
+        openWindow(id: EVAApp.channelSetsWindowID)
+    }
+
+    private var densityMaximumCount: Int {
+        min(max(displayChannelTotalCount, 1), WaveformDensityLayout.maximumChannelsPerScreen)
+    }
+
+    private var densitySummary: String {
+        switch waveformDensityMode {
+        case .fit:
+            return "Fit · \(min(waveformDensityGeometry.channelsPerScreen, displayedChannelCount)) now"
+        case .fixed(let count):
+            let target = min(max(count, 1), densityMaximumCount)
+            let current = min(target, displayedChannelCount)
+            return current < target ? "\(current) now · target \(target)" : "\(current)"
+        }
+    }
+
+    private var densityModeBinding: Binding<WaveformDensityMode> {
+        Binding(
+            get: { waveformDensityMode },
+            set: { setDensityMode($0) }
+        )
+    }
+
+    private var densityCountBinding: Binding<Double> {
+        Binding(
+            get: {
+                switch waveformDensityMode {
+                case .fit:
+                    return Double(min(waveformDensityGeometry.channelsPerScreen, densityMaximumCount))
+                case .fixed(let count):
+                    return Double(min(count, densityMaximumCount))
+                }
+            },
+            set: { value in
+                setDensityMode(.fixed(Int(value.rounded())))
+            }
+        )
+    }
+
+    private func setDensityMode(_ mode: WaveformDensityMode) {
+        let bounded: WaveformDensityMode
+        switch mode {
+        case .fit:
+            bounded = .fit
+        case .fixed(let count):
+            bounded = .fixed(min(max(count, 1), densityMaximumCount))
+        }
+        guard bounded != waveformDensityMode else { return }
+
+        let sensitivity = currentSensitivity
+        waveformDensityMode = bounded
+        setSensitivity(sensitivity)
+        syncScaleUnitEntries()
+    }
+
+    private func updateVerticalWaveformViewportHeight(_ height: CGFloat) {
+        let bounded = max(height, 1)
+        guard abs(bounded - verticalWaveformViewportHeight) >= geometryUpdateQuantum else { return }
+
+        let sensitivity = currentSensitivity
+        verticalWaveformViewportHeight = bounded
+        // Fixed density derives row height from the viewport, so every accepted
+        // resize must re-derive amplitudeScale from the pre-resize sensitivity.
+        // Comparing only the latest row-height delta lets many small window
+        // changes accumulate into a visible sensitivity drift.
+        setSensitivity(sensitivity)
+        syncScaleUnitEntries()
+    }
+
+    private func setSensitivity(_ value: Double) {
+        let bounded = min(
+            max(value, sensitivitySliderBounds.lowerBound),
+            sensitivitySliderBounds.upperBound
+        )
+        amplitudeScale = clampedAmplitudeScale(
+            WaveformScaleUnits.amplitudeScale(
+                forMicrovoltsPerMillimeter: bounded,
+                rowHeight: channelRowHeight
+            )
+        )
+    }
+
+    private func formatRowPitch(_ value: CGFloat) -> String {
+        value >= 20 ? String(format: "%.0f", value) : String(format: "%.1f", value)
+    }
+
     /// Typed entry in physical units, plus the clinical preset.
     ///
     /// The units are **nominal** — 72 points to the inch — because the true size
@@ -2010,6 +2311,87 @@ struct WaveformView: View {
             }
             .textFieldStyle(.roundedBorder)
 
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Display Channels")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(displayChannelSetSummary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Picker("Display Channels", selection: displayChannelSetBinding) {
+                    Text("All Channels").tag(ChannelSet.ID?.none)
+                    if !compatibleDisplayChannelSets.isEmpty {
+                        Divider()
+                        ForEach(compatibleDisplayChannelSets) { set in
+                            Text("\(set.name) (\(Set(set.channelIndices).count))")
+                                .tag(ChannelSet.ID?.some(set.id))
+                        }
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button("Manage Channel Sets…", action: manageChannelSets)
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Channels on screen")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Text(densitySummary)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Picker("Channels on screen", selection: densityModeBinding) {
+                    Text("Fit").tag(WaveformDensityMode.fit)
+                    Text("16")
+                        .tag(WaveformDensityMode.fixed(16))
+                        .disabled(densityMaximumCount < 16)
+                    Text("32")
+                        .tag(WaveformDensityMode.fixed(32))
+                        .disabled(densityMaximumCount < 32)
+                    Text("64")
+                        .tag(WaveformDensityMode.fixed(64))
+                        .disabled(densityMaximumCount < 64)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+
+                HStack(spacing: 8) {
+                    Text("1")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Slider(
+                        value: densityCountBinding,
+                        in: 1 ... Double(densityMaximumCount),
+                        step: 1
+                    )
+                    Text("\(densityMaximumCount)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("Row pitch \(formatRowPitch(waveformDensityGeometry.rowPitch)) pt · sensitivity preserved")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Text("Fit follows the window; a fixed count stays fixed.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack(spacing: 8) {
                 Button("Apply") {
                     applySensitivityEntry()
@@ -2017,12 +2399,7 @@ struct WaveformView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 Button("Clinical") {
-                    amplitudeScale = clampedAmplitudeScale(
-                        WaveformScaleUnits.amplitudeScale(
-                            forMicrovoltsPerMillimeter: WaveformScaleUnits.clinicalMicrovoltsPerMillimeter,
-                            rowHeight: channelRowHeight
-                        )
-                    )
+                    setSensitivity(WaveformScaleUnits.clinicalMicrovoltsPerMillimeter)
                     timeScale = clampedTimeScale(
                         WaveformScaleUnits.timeScale(
                             forMillimetersPerSecond: WaveformScaleUnits.clinicalMillimetersPerSecond,
@@ -2031,7 +2408,7 @@ struct WaveformView: View {
                     )
                     syncScaleUnitEntries()
                 }
-                .help("7 µV/mm and 30 mm/s — the standard clinical review settings.")
+                .help("Sets sensitivity to 7 µV/mm and sweep speed to 30 mm/s. Channel density is unchanged.")
             }
 
             Divider()
@@ -2042,7 +2419,7 @@ struct WaveformView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: 240, alignment: .leading)
+                .frame(width: 300, alignment: .leading)
         }
         .padding(14)
         .onAppear(perform: syncScaleUnitEntries)
@@ -2074,11 +2451,7 @@ struct WaveformView: View {
             syncScaleUnitEntries()
             return
         }
-        amplitudeScale = clampedAmplitudeScale(
-            WaveformScaleUnits.amplitudeScale(
-                forMicrovoltsPerMillimeter: value, rowHeight: channelRowHeight
-            )
-        )
+        setSensitivity(value)
         syncScaleUnitEntries()
     }
 
@@ -2330,7 +2703,8 @@ struct WaveformView: View {
                     .comparisonCandidates(for: recording.id).count,
                 cacheSummary: recordingStore.processingHistory.snapshotBudgetSummary,
                 onTogglePinNode: { togglePin(EVAHistoryNodeID(hex: $0)) },
-                onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) }
+                onRenameNode: { beginRenamingHistoryNode(EVAHistoryNodeID(hex: $0)) },
+                onDismissNode: { recordingStore.processingHistory.dismissNoOutput(EVAHistoryNodeID(hex: $0)) }
             )
         }
     }
@@ -2343,6 +2717,11 @@ struct WaveformView: View {
     private func waveformArea(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
         let plotWidth = plotWidth(for: signal)
         let displayStride = displaySampleStride(for: signal)
+        let displayedChannelIndices = channelIndices(in: signal)
+        let channelStackHeight = WaveformDensityLayout.stackHeight(
+            rowCount: displayedChannelIndices.count,
+            geometry: waveformDensityGeometry
+        )
 
         // Stagger events from different source XML files into vertical lanes so
         // overlapping markers/labels stay legible. Cap the lane count so the
@@ -2404,12 +2783,16 @@ struct WaveformView: View {
             ScrollView(.vertical) {
                 HStack(alignment: .top, spacing: 12) {
                     LazyVStack(alignment: .leading, spacing: rowSpacing) {
-                        ForEach(channelIndices(in: signal), id: \.self) { index in
+                        ForEach(displayedChannelIndices, id: \.self) { index in
                             channelLabel(index: index, signal: signal)
                                 .id(index)
                         }
                     }
-                    .frame(width: labelColumnWidth, alignment: .topLeading)
+                    .frame(
+                        width: labelColumnWidth,
+                        height: channelStackHeight,
+                        alignment: .topLeading
+                    )
 
                     ScrollView(.horizontal, showsIndicators: true) {
                         // Plain `VStack`, not `LazyVStack` — deliberate, and measured.
@@ -2426,11 +2809,14 @@ struct WaveformView: View {
                         //
                         // The rows are `.equatable()`, so eagerly building them is cheap
                         // (`WaveformChannelRow` is 0.55% of the whole trace).
+                        // PERF-GUARD: horizontal-channel-stack-begin
                         VStack(alignment: .leading, spacing: rowSpacing) {
-                            ForEach(channelIndices(in: signal), id: \.self) { index in
+                            ForEach(displayedChannelIndices, id: \.self) { index in
                                 waveformRow(index: index, channel: signal.data[index], plotWidth: plotWidth, signal: signal)
                             }
                         }
+                        .frame(height: channelStackHeight, alignment: .top)
+                        // PERF-GUARD: horizontal-channel-stack-end
                         // With overflow on, row chrome is drawn here — one layer
                         // beneath every trace — instead of by each row. That is
                         // the whole point: a row's own opaque background sits
@@ -2468,7 +2854,15 @@ struct WaveformView: View {
                         .gesture(waveformInteractionGesture(in: signal))
                         .padding(.trailing, 20)
                     }
+                    .frame(height: channelStackHeight, alignment: .top)
                     .scrollPosition(Binding(get: { horizontalScrollPosition }, set: { horizontalScrollPosition = $0 }))
+                    // This horizontal scroller lives inside the vertical channel
+                    // scroller, but its document height changes with density too.
+                    // Keep its unused cross-axis pinned to the top; otherwise a
+                    // bottom-of-record density change can preserve a stale
+                    // vertical clip origin and hide the entire trace stack while
+                    // the sibling label stack remains visible.
+                    .defaultScrollAnchor(.top, for: .sizeChanges)
                     .scrollIndicators(.visible, axes: .horizontal)
                     .onScrollGeometryChange(
                         for: HorizontalViewport.self,
@@ -2484,9 +2878,25 @@ struct WaveformView: View {
                     )
                 }
                 .padding(.horizontal, 20)
-                .padding(.bottom, 16)
+                .padding(.bottom, waveformDensityMode == .fit ? 16 : 0)
             }
             .scrollPosition(id: binding(recordingStore.selection, \.scrollToChannelRequest), anchor: .center)
+            // Fixed density derives every row's pitch from this viewport. A
+            // transient accessory (most notably the Option-key Jump strip)
+            // therefore changes both the container height and, one layout pass
+            // later, the full channel stack's height. Keep the bottom edge as
+            // the size-change anchor so a view already scrolled to channels
+            // 129/257 follows that contraction instead of retaining an offset
+            // beyond the new end and exposing a large blank region.
+            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onChange(of: proxy.size.height, initial: true) { _, newHeight in
+                            updateVerticalWaveformViewportHeight(newHeight)
+                        }
+                }
+            }
 
             // Pinned physio (PNS) pane: always visible below the EEG channels
             // (separated by a gap), sharing the EEG time axis. Like the events
@@ -2566,9 +2976,11 @@ struct WaveformView: View {
         } else if displayMode == .timeFrequency {
             TimeFrequencyView(
                 signal: epoching.segmentedEpochSignal ?? signal,
+                recordingSourceRevision: signal.dataRevision.uuidString,
                 segments: epoching.segmentedEpochSegments,
                 layout: recording.sensorLayout,
-                epoching: epoching
+                epoching: epoching,
+                rhythmicity: rhythmicityExplorer
             )
             .transition(.opacity)
         } else {
@@ -2778,6 +3190,7 @@ struct WaveformView: View {
     }
 
     private func cancelInFlightRecordingTasks() {
+        wica.cancel()
         waveletExplorerTask?.cancel()
         waveletExplorerTask = nil
         topographyTask?.cancel()
@@ -2806,6 +3219,14 @@ struct WaveformView: View {
         bcgTask = nil
         bcgRefinementTask?.cancel()
         bcgRefinementTask = nil
+        saccadicSpike.detectionTask?.cancel()
+        saccadicSpike.detectionTask = nil
+        corneoRetinal.analysisTask?.cancel()
+        corneoRetinal.analysisTask = nil
+        movementPCA.analysisTask?.cancel()
+        movementPCA.analysisTask = nil
+        muscleBSSCCA.analysisTask?.cancel()
+        muscleBSSCCA.analysisTask = nil
         artifactIdentityRefreshTask?.cancel()
         artifactIdentityRefreshTask = nil
         historyReDeriveTask?.cancel()
@@ -2819,6 +3240,7 @@ struct WaveformView: View {
         chanHealth.resetForClose()
         segHealth.resetForClose()
         eegAnalysis.resetForClose()
+        rhythmicityExplorer.resetForClose()
     }
 
     private func clearRecordingStateForClose() {
@@ -2833,12 +3255,18 @@ struct WaveformView: View {
         gradient.resetForClose()
         artifactVM.resetForClose()
         template.resetForClose()
+        saccadicSpike.resetForClose()
+        corneoRetinal.resetForClose()
+        movementPCA.resetForClose()
+        muscleBSSCCA.resetForClose()
         wavelet.resetForClose()
+        wica.resetForClose()
         epoching.resetForClose()
         singleTrial.resetForClose()
         bcg.resetForClose()
         ecg.resetForClose()
         eegAnalysis.resetForClose()
+        rhythmicityExplorer.resetForClose()
         chanHealth.resetForClose()
         segHealth.resetForClose()
 
@@ -2955,6 +3383,16 @@ struct WaveformView: View {
         template.clickedChannel = nil
         template.selectionRange = nil
         template.definedArtifactID = nil
+        saccadicSpike.result = nil
+        saccadicSpike.definedArtifactID = nil
+        corneoRetinal.result = nil
+        corneoRetinal.definedArtifactID = nil
+        movementPCA.result = nil
+        movementPCA.statusMessage = nil
+        movementPCA.definedArtifactID = nil
+        muscleBSSCCA.result = nil
+        muscleBSSCCA.statusMessage = nil
+        muscleBSSCCA.definedArtifactID = nil
 
         // Status messages and progress.
         filter.statusMessage = nil
@@ -3153,7 +3591,7 @@ struct WaveformView: View {
         }
     }
 
-    private func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
+    func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventID = event.id
         let plotWidth = plotWidth(for: signal)
         // Onset, not `beginTimeSeconds`: jumping should land at the start of

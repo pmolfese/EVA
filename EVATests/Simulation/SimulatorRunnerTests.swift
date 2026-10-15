@@ -23,6 +23,85 @@ import Testing
 @Suite("SimulatorRunner")
 struct SimulatorRunnerTests {
 
+    @MainActor
+    @Test("GUI defaults make gradient subtraction a controlled sanity check")
+    func guiDefaultsUseAStableGradient() {
+        let controller = SimulatorController()
+
+        #expect(controller.config.gradientEnabled)
+        #expect(controller.config.slicesPerVolume == 30)
+        let sliceSamples = controller.config.sliceIntervalSeconds * controller.config.samplingRate
+        #expect(abs(sliceSamples - sliceSamples.rounded()) < 1e-9)
+        #expect(controller.config.clockOffsetMicrosecondsPerSecond == 0)
+        #expect(controller.config.slowModulationFraction == 0)
+        #expect(!controller.config.includeMotionSensor)
+    }
+
+    @MainActor
+    @Test("GUI default gradient is removable by volume and slice templates")
+    func guiDefaultGradientSupportsBothEpochGeometries() throws {
+        var simulation = SimulatorController().config
+        simulation.channelCount = 4
+        simulation.durationSeconds = 30
+        simulation.bcgEnabled = false
+
+        let montage = Montage.standard(count: simulation.channelCount)
+        var artifactOnly = [[Double]](
+            repeating: [Double](repeating: 0, count: simulation.sampleCount),
+            count: simulation.channelCount
+        )
+        let injection = GradientArtifactModel.inject(
+            into: &artifactOnly,
+            config: simulation,
+            montage: montage,
+            template: nil
+        )
+        let input = artifactOnly.map { $0.map(Float.init) }
+        let triggers = injection.quantizedVolumeOnsetsSeconds.map {
+            Int(($0 * simulation.samplingRate).rounded())
+        }
+
+        func residualFraction(groupsPerVolume: Int, upsampleFactor: Int) throws -> Double {
+            var correction = GradientCorrectionConfig()
+            correction.acquisitionSchedule = .uniform(groupsPerVolume: groupsPerVolume)
+            correction.numberOfSlices = groupsPerVolume
+            correction.upsampleFactor = upsampleFactor
+            correction.alignmentEnabled = true
+            correction.subSampleAlignment = false
+            correction.alignmentSearchRadius = 1
+            correction.templateScaling = .unscaled
+            let result = try GradientTemplateCorrector.correct(
+                channels: input,
+                volumeTriggers: triggers,
+                config: correction,
+                samplingRate: simulation.samplingRate
+            )
+
+            // Ignore the first and last volume: the anti-alias filter rings
+            // across the scan boundary there, so those edge epochs correctly
+            // differ from the repeated interior artifact.
+            let first = Int(simulation.repetitionTimeSeconds * simulation.samplingRate)
+            let last = simulation.sampleCount - first
+            var before = 0.0
+            var after = 0.0
+            for channel in input.indices {
+                for sample in first..<last {
+                    before += Double(input[channel][sample] * input[channel][sample])
+                    after += Double(result.channels[channel][sample] * result.channels[channel][sample])
+                }
+            }
+            return after / max(before, 1e-12)
+        }
+
+        let volumeResidual = try residualFraction(groupsPerVolume: 1, upsampleFactor: 1)
+        let sliceResidual = try residualFraction(
+            groupsPerVolume: simulation.slicesPerVolume,
+            upsampleFactor: 1
+        )
+        #expect(volumeResidual < 0.01, "volume residual energy fraction: \(volumeResidual)")
+        #expect(sliceResidual < 0.01, "slice residual energy fraction: \(sliceResidual)")
+    }
+
     /// A deliberately tiny recording so the test stays fast: 2 seconds, few
     /// channels, artifacts off.
     private func fastConfig() -> SimulationConfig {

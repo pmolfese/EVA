@@ -23,5 +23,6 @@ The exact layout depends on the recording and active tools, but EVA's main view 
 - ICA component review with ICLabel support
 - Channel and segment health scoring
 - Epoching, category averages, butterfly plots, and single-trial analysis
+- Recording-level bands, event-related WTPL, and rhythmic-burst analysis
 
 ![EVA controls](../assets/images/readme_controls.png)

@@ -1,0 +1,14 @@
+=== W-ICA: seeded dipole EEG, brain transients, and blinks ===
+components: 9; ICLabel artifact selection: [0, 3, 7, 8]
+  IC01   42.14%  Muscle 68%
+  IC02   20.44%  Brain 87%
+  IC03    1.51%  Other 78%
+  IC04    3.19%  Muscle 69%
+  IC05    8.94%  Brain 99%
+  IC06   13.48%  Brain 33%
+  IC07   10.13%  Brain 75%
+  IC08    0.04%  Muscle 100%
+  IC09    0.13%  Muscle 69%
+channel wavelet: preserve K/spindle/sharp -0.000/-0.000/0.000; blink removal 0.666
+all-component W-ICA: preserve K/spindle/sharp 0.752/0.738/0.754; blink removal 0.654
+ICLabel-selective W-ICA: preserve K/spindle/sharp 0.997/0.988/1.000; blink removal -0.269

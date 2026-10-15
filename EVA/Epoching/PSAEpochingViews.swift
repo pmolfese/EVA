@@ -402,7 +402,14 @@ extension WaveformView {
         let hasBlink = detectsEyeBlinkArtifacts
         let hasMovement = detectsEyeMovementArtifacts
         let definedArtifacts = template.definedArtifacts
-        let hasAny = hasBlink || hasMovement || !definedArtifacts.isEmpty
+        let mriUnreliableCount = psaUnreliableMRIEvents(
+            in: continuousProcessedSignal ?? recording.signal
+        ).count
+        // Offered once a correction has run — even one that marked nothing, so
+        // the choice can be made before it matters — or when the file already
+        // carries spans from an earlier export.
+        let hasMRI = gradient.isActive || mriUnreliableCount > 0
+        let hasAny = hasBlink || hasMovement || hasMRI || !definedArtifacts.isEmpty
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Reject epochs containing")
@@ -426,8 +433,16 @@ extension WaveformView {
                                 help: "Rejects epochs containing detected eye movement artifact events."
                             )
                         }
+                        if hasMRI {
+                            psaArtifactRejectionRow(
+                                title: GradientCoverage.unreliableEventLabel,
+                                detail: "\(mriUnreliableCount) span\(mriUnreliableCount == 1 ? "" : "s") · MRI gradient",
+                                isOn: $epoching.skipUnreliableMRI,
+                                help: "Rejects epochs that overlap a stretch the MRI gradient correction could not be trusted on (\(GradientCoverage.unreliableEventCode)): epochs left uncorrected with no usable donors or an empty template, or corrected from donors across a motion event."
+                            )
+                        }
                         if !definedArtifacts.isEmpty {
-                            if hasBlink || hasMovement {
+                            if hasBlink || hasMovement || hasMRI {
                                 Divider()
                                     .padding(.vertical, 2)
                             }
@@ -1757,8 +1772,18 @@ extension WaveformView {
         for artifact in template.definedArtifacts where epoching.skippedDefinedArtifactIDs.contains(artifact.id) {
             eventsByLabel[artifact.name, default: []] += artifact.events
         }
+        if epoching.skipUnreliableMRI {
+            eventsByLabel[GradientCoverage.unreliableEventLabel, default: []] += psaUnreliableMRIEvents(in: signal)
+        }
 
         return eventsByLabel.filter { !$0.value.isEmpty }
+    }
+
+    /// The gradient correction's unreliable spans carried on `signal` — they
+    /// ride on the corrected signal's events, so every downstream stage (and an
+    /// exported, reopened file) still has them.
+    func psaUnreliableMRIEvents(in signal: MFFSignalData?) -> [MFFEvent] {
+        signal?.events.filter { $0.code == GradientCoverage.unreliableEventCode } ?? []
     }
 
     func artifactEventsOrDetection(for kind: EyeArtifactKind, in signal: MFFSignalData) -> [MFFEvent] {
@@ -1791,9 +1816,7 @@ extension WaveformView {
               samplingRate > 0 else { return false }
         let startSeconds = Double(startSample) / samplingRate
         let endSeconds = Double(endSample) / samplingRate
-        return artifactEvents.contains { event in
-            event.beginTimeSeconds >= startSeconds && event.beginTimeSeconds <= endSeconds
-        }
+        return artifactEvents.contains { $0.overlaps(startSeconds: startSeconds, endSeconds: endSeconds) }
     }
 
     func psaArtifactRejectionLabel() -> String {
@@ -1803,6 +1826,9 @@ extension WaveformView {
         }
         if epoching.skipEyeMovements {
             labels.append("eye movements")
+        }
+        if epoching.skipUnreliableMRI, gradient.isActive {
+            labels.append("unreliable MRI correction")
         }
         let definedCount = template.definedArtifacts.filter {
             epoching.skippedDefinedArtifactIDs.contains($0.id)

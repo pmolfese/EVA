@@ -962,9 +962,8 @@ nonisolated struct PSABuildJob: Sendable {
                     endSeconds = min(endSeconds, anchorTimeSeconds + window.upperBound)
                 }
                 let matchedLabels = startSeconds > endSeconds ? [] : artifactRejectionGroups.compactMap { label, events -> String? in
-                    events.contains { artifact in
-                        artifact.beginTimeSeconds >= startSeconds && artifact.beginTimeSeconds <= endSeconds
-                    } ? label : nil
+                    events.contains { $0.overlaps(startSeconds: startSeconds, endSeconds: endSeconds) }
+                        ? label : nil
                 }
                 if !matchedLabels.isEmpty {
                     skippedArtifacts += 1
@@ -1332,18 +1331,6 @@ enum ArtifactTemplateChannelScope: String, CaseIterable, Identifiable {
     case specificChannels = "Specific Channels"
 
     var id: String { rawValue }
-}
-
-enum ArtifactDetectionMethod: String, CaseIterable, Identifiable {
-    case threshold = "Threshold"
-    case template = "Template"
-    case ica = "ICA"
-
-    var id: String { rawValue }
-
-    /// Methods the user can pick directly. `.template` is entered implicitly by
-    /// drawing a selection and defining a template, so it is not offered here.
-    static var selectableCases: [ArtifactDetectionMethod] { [.threshold, .ica] }
 }
 
 /// `nonisolated` so the pipeline layer can read it without a main-actor hop —

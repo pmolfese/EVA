@@ -67,18 +67,16 @@ nonisolated enum EMGArtifactModel {
         // Keeping the carrier continuous underneath the envelopes avoids
         // restarting every burst at the same phase or waveform.
         let sampleCount = config.sampleCount
-        let leftCarrier = SpectralNoise.bandLimited(
-            sampleCount: sampleCount, samplingRate: config.samplingRate,
-            lowHz: model.lowHz, highHz: model.highHz, source: &source
-        )
-        let rightCarrier = SpectralNoise.bandLimited(
-            sampleCount: sampleCount, samplingRate: config.samplingRate,
-            lowHz: model.lowHz, highHz: model.highHz, source: &source
-        )
-        let neckCarrier = SpectralNoise.bandLimited(
-            sampleCount: sampleCount, samplingRate: config.samplingRate,
-            lowHz: model.lowHz, highHz: model.highHz, source: &source
-        )
+        func carrier() -> [Double] {
+            let raw = SpectralNoise.bandLimited(
+                sampleCount: sampleCount, samplingRate: config.samplingRate,
+                lowHz: model.lowHz, highHz: model.highHz, source: &source
+            )
+            return colored(raw, rho: model.carrierAutocorrelation)
+        }
+        let leftCarrier = carrier()
+        let rightCarrier = carrier()
+        let neckCarrier = carrier()
 
         for burst in bursts {
             let start = max(0, Int((burst.onsetSeconds * config.samplingRate).rounded()))
@@ -163,6 +161,24 @@ nonisolated enum EMGArtifactModel {
     private static func smoothstep(_ value: Double) -> Double {
         let u = max(0, min(1, value))
         return u * u * (3 - 2 * u)
+    }
+
+    /// First-order (AR-1) coloring of a carrier: `c[n] = ρ·c[n-1] + √(1−ρ²)·raw[n]`,
+    /// variance preserved. `nil`/0 returns the carrier unchanged. Raising ρ lifts
+    /// the carrier's autocorrelation toward brain-like, the BSS-CCA stressor.
+    static func colored(_ carrier: [Double], rho: Double?) -> [Double] {
+        guard let rho, rho > 0, carrier.count > 1 else { return carrier }
+        let r = min(rho, 0.99)
+        let mix = (1 - r * r).squareRoot()
+        var out = carrier
+        for n in 1..<out.count { out[n] = r * out[n - 1] + mix * carrier[n] }
+        func std(_ x: [Double]) -> Double {
+            let mean = x.reduce(0, +) / Double(x.count)
+            return (x.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(x.count)).squareRoot()
+        }
+        let inStd = std(carrier), outStd = std(out)
+        if outStd > 1e-12 { let scale = inStd / outStd; for n in out.indices { out[n] *= scale } }
+        return out
     }
 
     static func topographies(

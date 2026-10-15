@@ -306,6 +306,7 @@ struct WaveformPlot: View {
     var usesPixelAdaptiveRendering = true
     var showsTimeMarkers = false
     var timeMarkerStyle = WaveformTimeMarkerStyle.defaultValue
+    var zeroLineColor = WaveformZeroLineColor.defaultValue
     /// Draw an edge bar wherever the trace left the drawable area, so a
     /// clipped excursion is visible as *something* rather than as a flat
     /// stretch that looks like real data. See
@@ -529,7 +530,13 @@ struct WaveformPlot: View {
         var baseline = Path()
         baseline.move(to: CGPoint(x: visibleRange.lowerBound, y: midY))
         baseline.addLine(to: CGPoint(x: visibleRange.upperBound, y: midY))
-        context.stroke(baseline, with: .color(.secondary.opacity(0.3)), lineWidth: 0.75)
+        let color: Color
+        if let rgb = zeroLineColor.customRGB {
+            color = Color(red: rgb.red, green: rgb.green, blue: rgb.blue).opacity(0.3)
+        } else {
+            color = .secondary.opacity(0.3)
+        }
+        context.stroke(baseline, with: .color(color), lineWidth: 0.75)
     }
 
     private func yPosition(for value: Float, midY: CGFloat, pointsPerMicrovolt: CGFloat) -> CGFloat {
@@ -1200,11 +1207,15 @@ struct ArtifactTemplateAveragePlot: View {
 struct ICATimeCoursePreview: View {
     let samples: [Double]
     let visibleRange: ClosedRange<Int>?
+    /// Optional comparison trace used only to choose a shared robust y scale.
+    /// W-ICA supplies the paired original/cleaned activation so attenuation is
+    /// visually meaningful rather than hidden by independent auto-scaling.
+    var scaleSamples: [Double]? = nil
     @State private var isExpanded = false
     @State private var hoverTask: Task<Void, Never>?
 
     var body: some View {
-        ICATimeCoursePlot(samples: samples, visibleRange: visibleRange)
+        ICATimeCoursePlot(samples: samples, visibleRange: visibleRange, scaleSamples: scaleSamples)
             .frame(height: 64)
             .contentShape(Rectangle())
             .onHover { isHovering in
@@ -1228,7 +1239,7 @@ struct ICATimeCoursePreview: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Component Time Course")
                         .font(.headline)
-                    ICATimeCoursePlot(samples: samples, visibleRange: visibleRange)
+                    ICATimeCoursePlot(samples: samples, visibleRange: visibleRange, scaleSamples: scaleSamples)
                         .frame(width: 720, height: 260)
                 }
                 .padding(14)
@@ -1240,6 +1251,7 @@ struct ICATimeCoursePreview: View {
 struct ICATimeCoursePlot: View {
     let samples: [Double]
     let visibleRange: ClosedRange<Int>?
+    var scaleSamples: [Double]? = nil
 
     var body: some View {
         Canvas { context, size in
@@ -1248,7 +1260,7 @@ struct ICATimeCoursePlot: View {
                   range.upperBound > range.lowerBound else { return }
 
             let midY = size.height / 2
-            let scale = robustScale(samples, in: range)
+            let scale = robustScale(samples, comparison: scaleSamples, in: range)
             let yScale = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(scale.amplitude)
             let binCount = max(Int(size.width.rounded(.down)), 2)
             let visibleCount = range.upperBound - range.lowerBound + 1
@@ -1304,7 +1316,11 @@ struct ICATimeCoursePlot: View {
         return lower...upper
     }
 
-    private func robustScale(_ values: [Double], in range: ClosedRange<Int>) -> (center: Double, amplitude: Double) {
+    private func robustScale(
+        _ values: [Double],
+        comparison: [Double]?,
+        in range: ClosedRange<Int>
+    ) -> (center: Double, amplitude: Double) {
         guard !values.isEmpty, range.upperBound >= range.lowerBound else {
             return (0, 1)
         }
@@ -1321,6 +1337,16 @@ struct ICATimeCoursePlot: View {
             let value = values[index]
             if value.isFinite {
                 scaledValues.append(value)
+            }
+        }
+
+        if let comparison, !comparison.isEmpty {
+            let comparisonLower = min(lowerBound, comparison.count - 1)
+            let comparisonUpper = min(max(upperBound, comparisonLower + 1), comparison.count)
+            let comparisonStride = max((comparisonUpper - comparisonLower) / 5_000, 1)
+            for index in stride(from: comparisonLower, to: comparisonUpper, by: comparisonStride) {
+                let value = comparison[index]
+                if value.isFinite { scaledValues.append(value) }
             }
         }
 

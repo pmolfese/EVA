@@ -176,14 +176,28 @@ struct GIFTIQuickLookReaderTests {
         try withFixture(xml) { url in
             let model = try GIFTIQuickLookReader.read(from: url)
             let bundle = GIFTISceneFactory.make(model: model, showsNormals: true)
-            let geometries = bundle.scene.rootNode.childNodes.compactMap(\.geometry)
-            let surface = try #require(geometries.first {
-                $0.elements.contains(where: { $0.primitiveType == .triangles })
-            })
-            #expect(surface.sources.contains(where: { $0.semantic == .normal }))
-            #expect(geometries.contains {
-                $0.elements.contains(where: { $0.primitiveType == .line })
-            })
+            // The mesh sits inside the turntable rig (yaw → pitch), not directly
+            // under the root, so search the whole hierarchy.
+            let nodes = bundle.scene.rootNode.childNodes { node, _ in node.geometry != nil }
+            func node(drawing primitive: SCNGeometryPrimitiveType) -> SCNNode? {
+                nodes.first { $0.geometry?.elements.contains { $0.primitiveType == primitive } == true }
+            }
+            let surface = try #require(node(drawing: .triangles))
+            #expect(surface.geometry?.sources.contains(where: { $0.semantic == .normal }) == true)
+            let glyphs = try #require(node(drawing: .line))
+
+            // Dragging turns the pitch node, so the surface and its normal
+            // glyphs must both ride on it or they would separate mid-drag.
+            func rides(_ node: SCNNode) -> Bool {
+                var ancestor = node.parent
+                while let current = ancestor {
+                    if current === bundle.pitchNode { return true }
+                    ancestor = current.parent
+                }
+                return false
+            }
+            #expect(rides(surface))
+            #expect(rides(glyphs))
         }
     }
 

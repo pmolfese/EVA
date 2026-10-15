@@ -42,11 +42,19 @@ struct SourceFitModeView: View {
         VStack(spacing: 14) {
             Image(systemName: "scope").font(.system(size: 40)).foregroundStyle(.secondary)
             Text("No data to fit").font(.headline)
-            Text("Right-click a butterfly or topomap in a recording and choose “Fit Source Model”, or load a demo dataset to try it.")
+            Text("Drop an averaged .mff recording anywhere in this window, right-click a butterfly or topomap in a recording and choose “Fit Source Model”, or load a demo dataset to try it.")
                 .font(.callout).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
             Button("Load demo dataset") { controller.loadFitDemoDataset() }
                 .controlSize(.large)
+            // The status line lives in Simulate mode's bottom strip, so import
+            // failures (a drop that is not averaged, has no geometry) would be
+            // invisible here without this.
+            if !controller.generationMessage.isEmpty {
+                Text(controller.generationMessage)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center).frame(maxWidth: 420)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)

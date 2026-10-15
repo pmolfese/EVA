@@ -64,6 +64,8 @@ struct HistoryRailNodeList: View, Equatable {
     /// Rename a node, replacing the default step rendering with the operator's
     /// own name for that point.
     var onRename: ((String) -> Void)?
+    /// Dismiss a recorded-refusal (no-output) node. `nil` disables the action.
+    var onDismiss: ((String) -> Void)?
 
     static func == (lhs: HistoryRailNodeList, rhs: HistoryRailNodeList) -> Bool {
         lhs.nodes == rhs.nodes
@@ -107,7 +109,8 @@ struct HistoryRailNodeList: View, Equatable {
                 )
                 .equatable()
                 .modifier(HistoryRailRowMenu(
-                    node: node, onFork: onFork, onTogglePin: onTogglePin, onRename: onRename
+                    node: node, onFork: onFork, onTogglePin: onTogglePin,
+                    onRename: onRename, onDismiss: onDismiss
                 ))
 
                 if let onSelect, !node.isCurrent, node.isReachable {
@@ -161,14 +164,25 @@ private struct HistoryRailRowMenu: ViewModifier {
     let onFork: ((String) -> Void)?
     let onTogglePin: ((String) -> Void)?
     let onRename: ((String) -> Void)?
+    let onDismiss: ((String) -> Void)?
 
     private var hasAnyAction: Bool {
-        onRename != nil || (node.isReachable && (onFork != nil || onTogglePin != nil))
+        (node.isNoOutput && onDismiss != nil)
+            || onRename != nil || (node.isReachable && (onFork != nil || onTogglePin != nil))
     }
 
     func body(content: Content) -> some View {
         if hasAnyAction {
             content.contextMenu {
+                if node.isNoOutput, let onDismiss {
+                    // A recorded refusal is transient anyway; this lets the user
+                    // clear it now rather than waiting for the next commit.
+                    Button(role: .destructive) {
+                        onDismiss(node.id)
+                    } label: {
+                        Label("Dismiss", systemImage: "xmark")
+                    }
+                }
                 if let onFork, node.isReachable {
                     Button {
                         onFork(node.id)
@@ -241,10 +255,14 @@ struct HistoryRailRow: View, Equatable {
             HStack(spacing: 4) {
                 Text(node.title)
                     .font(.system(.body, weight: node.isCurrent ? .semibold : .regular))
+                    .strikethrough(node.isNoOutput, color: .secondary)
                 if node.isPinned {
                     Image(systemName: "pin.fill")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                }
+                if let quality = node.quality {
+                    RunGradePill(quality: quality)
                 }
             }
             if !node.subtitle.isEmpty {
@@ -273,9 +291,17 @@ struct HistoryRailRow: View, Equatable {
             Rectangle()
                 .fill(isFirst ? Color.clear : lineColor)
                 .frame(width: 1, height: dotInset)
-            Circle()
-                .fill(node.isCurrent ? Color.accentColor : Color.secondary.opacity(0.55))
-                .frame(width: spineWidth, height: spineWidth)
+            Group {
+                if node.isNoOutput {
+                    // A refusal is a place you cannot stand: a hollow dot.
+                    Circle()
+                        .stroke(Color.secondary.opacity(0.55), lineWidth: 1.5)
+                } else {
+                    Circle()
+                        .fill(node.isCurrent ? Color.accentColor : Color.secondary.opacity(0.55))
+                }
+            }
+            .frame(width: spineWidth, height: spineWidth)
             Rectangle()
                 .fill(isLast ? Color.clear : lineColor)
                 .frame(width: 1)
@@ -293,8 +319,90 @@ struct HistoryRailRow: View, Equatable {
     private var accessibilityText: String {
         var text = node.title
         if !node.subtitle.isEmpty { text += ", \(node.subtitle)" }
+        if let grade = node.quality?.grade { text += ", \(grade.displayName)" }
+        if node.isNoOutput { text += ", refused, made no change" }
         if node.isCurrent { text += ", current" }
         if !node.isOnCurrentPath { text += ", on another branch" }
         return text
+    }
+}
+
+/// The Good/Watch/Poor color, shared by the rail pill and the status-popover
+/// breakdown so the two never drift. Semantic system colors, matching the
+/// Good/Watch/Poor scale channel health already uses.
+extension RunGrade {
+    var tint: Color {
+        switch self {
+        case .good: return .green
+        case .watch: return .orange
+        case .poor: return .red
+        }
+    }
+}
+
+/// The always-visible grade chip on a graded history node. Clicking it opens the
+/// breakdown — the same affordance for Good, Watch, Poor and a recorded refusal,
+/// which is how a refusal (not a navigable node) is still inspectable.
+struct RunGradePill: View {
+    let quality: StepQuality
+    @State private var showingBreakdown = false
+
+    var body: some View {
+        Button {
+            showingBreakdown = true
+        } label: {
+            Text(quality.grade.displayName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(quality.grade.tint)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(quality.grade.tint.opacity(0.16)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(quality.grade.displayName) — show run quality")
+        .popover(isPresented: $showingBreakdown, arrowEdge: .bottom) {
+            RunGradeBreakdown(quality: quality).frame(width: 320)
+        }
+    }
+}
+
+/// The metric breakdown for one graded step, mirroring the channel-health detail:
+/// a headline grade, a one-line summary, and each metric with its own grade and
+/// human explanation. A metric that was never reached (a refusal that stopped at
+/// an earlier gate) reads "n/a" rather than a false zero.
+struct RunGradeBreakdown: View {
+    let quality: StepQuality
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Circle().fill(quality.grade.tint).frame(width: 8, height: 8)
+                Text(quality.grade.displayName).font(.headline).foregroundStyle(quality.grade.tint)
+            }
+            Text(quality.summary)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            ForEach(quality.metrics) { metric in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(metric.name).font(.system(.callout, weight: .medium))
+                        Spacer()
+                        if metric.reached {
+                            Text(metric.grade.displayName)
+                                .font(.caption).foregroundStyle(metric.grade.tint)
+                        } else {
+                            Text("n/a").font(.caption).foregroundStyle(.tertiary)
+                        }
+                    }
+                    Text(metric.detail)
+                        .font(.caption)
+                        .foregroundStyle(metric.reached ? .secondary : .tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(14)
     }
 }

@@ -188,6 +188,78 @@ struct CWTRidgePipelineTests {
         #expect(result.trials.allSatisfy { !$0.detectedPeaks.isEmpty })
     }
 
+    @Test func multipleDetectionWindowsPreserveDisjointGaps() throws {
+        var config = CWTRidgePipeline.Configuration()
+        config.detectionWindows = [
+            .init(startMs: 20, endMs: 60),
+            .init(startMs: 150, endMs: 190)
+        ]
+
+        let windows = try #require(CWTRidgePipeline.sampleWindows(
+            configuration: config,
+            stimulusOffsetSamples: stimulusOffsetSamples,
+            samplingRate: samplingRate,
+            length: length
+        ))
+
+        #expect(windows.count == 2)
+        #expect(windows.contains { $0.contains(140) })
+        #expect(!windows.contains { $0.contains(210) })
+        #expect(windows.contains { $0.contains(270) })
+    }
+
+    @Test func pipelineFiltersDetectedPeaksThroughEveryConfiguredWindow() throws {
+        let first = gaussian(center: stimulusOffsetSamples + 40, amplitude: 4, width: 7)
+        let gap = gaussian(center: stimulusOffsetSamples + 105, amplitude: 8, width: 7)
+        let last = gaussian(center: stimulusOffsetSamples + 170, amplitude: 4, width: 7)
+        let samples = first.indices.map { first[$0] + gap[$0] + last[$0] }
+        let trials = (0..<3).map {
+            CWTRidgePipeline.TrialInput(
+                sourceTimeSeconds: Double($0),
+                stimulusOffsetSamples: stimulusOffsetSamples,
+                samples: samples
+            )
+        }
+        var config = CWTRidgePipeline.Configuration()
+        config.appliesDenoising = false
+        config.ridge.minSNR = 1.5
+        config.detectionWindows = [
+            .init(startMs: 20, endMs: 60),
+            .init(startMs: 150, endMs: 190)
+        ]
+
+        let result = try #require(CWTRidgePipeline.run(
+            trials: trials,
+            samplingRate: samplingRate,
+            configuration: config
+        ))
+
+        #expect(!result.averagePeaks.isEmpty)
+        #expect(result.averagePeaks.allSatisfy { peak in
+            (120...160).contains(peak.sampleIndex) || (250...290).contains(peak.sampleIndex)
+        })
+        #expect(result.trials.allSatisfy { trial in
+            trial.detectedPeaks.allSatisfy { peak in
+                (120...160).contains(peak.sampleIndex) || (250...290).contains(peak.sampleIndex)
+            }
+        })
+    }
+
+    @Test func legacySingleDetectionWindowRemainsSupported() throws {
+        var config = CWTRidgePipeline.Configuration()
+        config.windowStartMs = 20
+        config.windowEndMs = 60
+
+        let windows = try #require(CWTRidgePipeline.sampleWindows(
+            configuration: config,
+            stimulusOffsetSamples: stimulusOffsetSamples,
+            samplingRate: samplingRate,
+            length: length
+        ))
+
+        #expect(windows == [120..<161])
+    }
+
     // MARK: - Woody matched-wavelet mode
 
     @Test func woodyMatchedWaveletModeAligns() {

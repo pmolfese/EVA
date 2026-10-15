@@ -56,6 +56,7 @@ final class BatchController {
     private(set) var stepTemplates: [ReplayController.StepConfig] = []
     private(set) var mode: ReplayController.Mode = .fullAuto
     private(set) var outputFolder: URL?
+    private(set) var skipsUnsupportedDecisions = false
 
     // Queue state.
     private(set) var jobs: [BatchJob] = []
@@ -103,6 +104,7 @@ final class BatchController {
         steps: [ReplayController.StepConfig],
         mode: ReplayController.Mode,
         outputFolder: URL,
+        skipUnsupportedDecisions: Bool = false,
         scopedURLs: [URL] = []
     ) {
         guard !files.isEmpty else { return }
@@ -112,6 +114,7 @@ final class BatchController {
         self.stepTemplates = steps
         self.mode = mode
         self.outputFolder = outputFolder
+        self.skipsUnsupportedDecisions = skipUnsupportedDecisions
         self.scopedURLs = scopedURLs
         scopedURLs.forEach { _ = $0.startAccessingSecurityScopedResource() }
         summary = nil
@@ -187,7 +190,8 @@ final class BatchController {
     /// `ContentView`/`WaveformView` involvement at all. Only appropriate when
     /// `script`'s configured (included) steps contain no decision step — the
     /// caller (`BatchSetupSheet`) checks that before choosing this over
-    /// `start(...)`. Each file gets a fresh `RecordingStore`/VM set purely as
+    /// `start(...)`, or when PB-1's per-file skip policy handles unsupported
+    /// decisions. Each file gets a fresh `RecordingStore`/VM set purely as
     /// `ProcessingCore` collaborators (see `HeadlessBatchProcessor`); nothing
     /// here ever touches a live view.
     func startHeadless(
@@ -195,6 +199,7 @@ final class BatchController {
         script: EVAProcessingScript,
         sourceName: String,
         outputFolder: URL,
+        skipUnsupportedDecisions: Bool = false,
         scopedURLs: [URL] = []
     ) async {
         guard !files.isEmpty else { return }
@@ -202,6 +207,7 @@ final class BatchController {
         self.script = script
         self.sourceName = sourceName
         self.outputFolder = outputFolder
+        self.skipsUnsupportedDecisions = skipUnsupportedDecisions
         self.scopedURLs = scopedURLs
         scopedURLs.forEach { _ = $0.startAccessingSecurityScopedResource() }
         summary = nil
@@ -225,6 +231,7 @@ final class BatchController {
                     url: jobs[index].url,
                     script: script,
                     outputFolder: outputFolder,
+                    skipUnsupportedDecisions: skipUnsupportedDecisions,
                     progress: { [self] update in
                         updateProgress(
                             stepName: update.stepName,

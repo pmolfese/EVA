@@ -232,14 +232,29 @@ extension WaveformView {
 
                         ArtifactTemplateFieldLabel(
                             title: "Threshold scope",
-                            help: "Global estimates one threshold per level from the whole recording, matching MATLAB wdenoise's documented level-dependent behavior. Local (30 s) re-estimates each level's threshold in overlapping 30-second windows, so a quiet stretch and a noisy stretch each get their own noise floor — the same scheme the Wavelet Artifact Explorer uses. Local is an EVA improvement for recordings whose noise level changes over time."
+                            help: "Global estimates one threshold per level from the whole recording, matching MATLAB wdenoise's documented level-dependent behavior (and HAPPE's channel-space wavelet). Local re-estimates each level's threshold in overlapping windows of the chosen length, so a quiet stretch and a noisy stretch each get their own noise floor — the same scheme the Wavelet Artifact Explorer uses. Local is an EVA extension for recordings whose noise level changes over time; typical windows are 10–60 s."
                         )
                         .gridColumnAlignment(.leading)
-                        Picker("", selection: $wavelet.config.thresholdWindowSeconds) {
-                            Text("Global").tag(0.0)
-                            Text("Local (30 s)").tag(30.0)
+                        HStack(spacing: 8) {
+                            Picker("", selection: Binding(
+                                get: { wavelet.config.thresholdWindowSeconds > 0 },
+                                set: { isLocal in
+                                    wavelet.config.thresholdWindowSeconds = isLocal
+                                        ? (wavelet.config.thresholdWindowSeconds > 0 ? wavelet.config.thresholdWindowSeconds : 30)
+                                        : 0
+                                }
+                            )) {
+                                Text("Global").tag(false)
+                                Text("Local").tag(true)
+                            }
+                            .labelsHidden().frame(width: 110)
+                            if wavelet.config.thresholdWindowSeconds > 0 {
+                                TextField("s", value: $wavelet.config.thresholdWindowSeconds,
+                                          format: .number.precision(.fractionLength(0)))
+                                    .frame(width: 56)
+                                Text("s").foregroundStyle(.secondary)
+                            }
                         }
-                        .labelsHidden().frame(width: 130)
                     }
                     GridRow {
                         ArtifactTemplateFieldLabel(

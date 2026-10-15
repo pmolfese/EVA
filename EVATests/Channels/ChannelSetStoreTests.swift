@@ -22,16 +22,33 @@ import Foundation
 @testable import EVA
 
 @MainActor
-struct ChannelSetStoreTests {
+final class ChannelSetStoreTests {
+
+    /// One directory per test (Swift Testing makes a fresh instance for each),
+    /// removed afterwards — these used to pile up in `tmp` by the hundreds.
+    private let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("ChannelSetStoreTests-\(UUID().uuidString)", isDirectory: true)
+
+    deinit {
+        try? FileManager.default.removeItem(at: directory)
+    }
 
     private func makeStore() -> ChannelSetStore {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ChannelSetStoreTests-\(UUID().uuidString)", isDirectory: true)
-        return ChannelSetStore(testStorageDirectory: dir)
+        ChannelSetStore(testStorageDirectory: directory)
     }
 
     private func positions(_ count: Int) -> [SensorPosition] {
         (0..<count).map { SensorPosition(channelIndex: $0, x: Double($0), y: Double($0)) }
+    }
+
+    @Test("A channel set's explicit display order survives persistence")
+    func channelDisplayOrderPersists() {
+        let first = makeStore()
+        first.save(ChannelSet(name: "Custom order", channelIndices: [7, 1, 5, 2]))
+
+        let second = makeStore()
+
+        #expect(second.userSets.first { $0.name == "Custom order" }?.channelIndices == [7, 1, 5, 2])
     }
 
     // MARK: - Saving geometries
@@ -57,12 +74,10 @@ struct ChannelSetStoreTests {
 
     @Test("A saved geometry survives a fresh store pointed at the same directory")
     func geometryPersistsAcrossInstances() {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ChannelSetStoreTests-\(UUID().uuidString)", isDirectory: true)
-        let first = ChannelSetStore(testStorageDirectory: dir)
+        let first = makeStore()
         first.saveGeometry(name: "128ch", positions: positions(128))
 
-        let second = ChannelSetStore(testStorageDirectory: dir)
+        let second = makeStore()
         #expect(second.geometry(named: "128ch")?.positions.count == 128)
     }
 

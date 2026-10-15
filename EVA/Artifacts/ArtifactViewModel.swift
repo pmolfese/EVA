@@ -11,7 +11,7 @@
 //
 //  L4 store for the artifact detection + cleaning domain, extracted from
 //  WaveformView (REFACTOR.md slice 5). State-ownership extraction: the store
-//  holds detection method/events, cleaning state, and the cleaned output;
+//  holds detected events, cleaning state, and the cleaned output;
 //  WaveformView still drives the detection/cleaning orchestration. (The separate
 //  "Define Artifact" template domain is slice 10, not here.)
 //
@@ -28,13 +28,11 @@ final class ArtifactViewModel {
     init(store: RecordingStore) {
         self.store = store
         let defaults = ProcessingDefaults.shared
-        detectionMethod = defaults.artifactDetectionDefaultMethod
         blinkThresholdConfig = defaults.ocularBlinkThresholdConfig
         movementThresholdConfig = defaults.ocularMovementThresholdConfig
     }
 
     // MARK: Detection
-    var detectionMethod = ArtifactDetectionMethod.threshold
     var events: [MFFEvent] = []
     var isDetecting = false
     var statusMessage: String?
@@ -104,6 +102,9 @@ final class ArtifactViewModel {
     var cleaningSummaries: [ArtifactCleaningSummary] = []
     var cleaningProgress: ArtifactCleaningProgress?
     var cleanedSignal: MFFSignalData?
+    /// Quality numbers for the cleaning that produced `cleanedSignal`, graded
+    /// into the history rail's pill by `ArtifactCleanRunGrade`.
+    var runMetrics: ArtifactCleanRunMetrics?
     var cleaningIsEnabled = true
 
     var isCleaningActive: Bool { cleanedSignal != nil }
@@ -124,6 +125,7 @@ final class ArtifactViewModel {
         cleaningSummaries = []
         cleaningProgress = nil
         cleanedSignal = nil
+        runMetrics = nil
         cleaningIsEnabled = true
     }
 }

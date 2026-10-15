@@ -40,6 +40,12 @@ extension WaveformView {
 
     func inferredArtifactType(name: String, eventCode: String) -> DefinedArtifactType {
         let text = "\(name) \(eventCode)".lowercased()
+        if text.contains("muscle") || text.contains("emg") {
+            return .muscle
+        }
+        if text.contains("saccadic spike") || text.contains("sacc-sp") || text.contains("spike potential") {
+            return .saccadicSpike
+        }
         if text.contains("ecg") || text.contains("heart") || text.contains("cardiac") {
             return .ecg
         }
@@ -55,6 +61,10 @@ extension WaveformView {
     func artifactTemplateEventCodeSuffix(for type: DefinedArtifactType) -> String {
         switch type {
         case .ocular: return "AOC"
+        case .saccadicSpike: return "ASP"
+        case .corneoRetinal: return "CRD"
+        case .movement: return "MOV"
+        case .muscle: return "EMG"
         case .ecg: return "ECG"
         case .bcg: return "BCG"
         case .other: return "AOT"
@@ -149,7 +159,6 @@ extension WaveformView {
         template.result = nil
         template.lastScanSignature = nil
         template.selectedChannel = nil
-        artifactVM.detectionMethod = .template
         template.showsSheet = true
     }
 
@@ -239,6 +248,17 @@ extension WaveformView {
             if newType != .ocular, template.topographyScanStyle != .windowed {
                 template.topographyScanStyle = .windowed
             }
+            if newType == .bcg {
+                // Manual-exemplar PCA-S starts with the full evolving scalp
+                // pattern, not a single channel or one static scalp map.
+                template.definitionPanel = .topography
+                template.topographyMode = .trajectory
+                template.topographyMetric = .pearson
+                template.threshold = 0.60
+                template.trajectoryShiftSeconds = 0.05
+                template.trajectoryScaleRange = 0.10
+                template.trajectoryGFPWeighted = true
+            }
         }
         .onChange(of: template.name) { _, _ in
             scheduleDefinedArtifactIdentityRefresh()
@@ -295,7 +315,7 @@ extension WaveformView {
                     help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
                 )
                 Picker("Type", selection: $template.type) {
-                    ForEach(DefinedArtifactType.allCases) { type in
+                    ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal && $0 != .movement && $0 != .muscle }) { type in
                         Text(type.rawValue).tag(type)
                     }
                 }
@@ -1394,9 +1414,15 @@ extension WaveformView {
             windowSizeSeconds: configuration.windowSizeSeconds,
             average: result.templateAverage,
             topography: source == .topography ? result.topographyReference : nil,
-            cleaningMethod: isContinuousSourced ? .regression : (source == .topography ? .sspPCA : .obs),
+            cleaningMethod: template.type == .bcg
+                ? .pcaS
+                : (isContinuousSourced ? .regression : (source == .topography ? .sspPCA : .obs)),
             obsStrategy: source == .topography ? .topographyAligned : .standard,
             usesVariableEventDuration: isContinuousSourced,
+            pcaSSettings: template.type == .bcg
+                ? manualExemplarPCASSettings(windowSeconds: configuration.windowSizeSeconds)
+                : nil,
+            savedTemplate: savedArtifactTemplateForDefinition(from: result),
             appliedMethod: nil,
             cleanedAt: nil
         )
@@ -1412,6 +1438,26 @@ extension WaveformView {
         invalidateOBSVarianceCache(for: artifact.id)
         template.definedArtifactID = artifact.id
         clearAppliedArtifactCleaning()
+    }
+
+    func manualExemplarPCASSettings(windowSeconds: Double) -> BCGSurrogateSettings {
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        let halfWindow = max(windowSeconds, 0.02) / 2
+        settings.windowStartSeconds = -halfWindow
+        settings.windowEndSeconds = halfWindow
+        return settings
+    }
+
+    /// Captures the current scan controls with the detector's versioned JSON
+    /// payload. `result.savedTemplate` is produced by the common waveform scan;
+    /// trajectory controls live in the topography panel and are attached here.
+    func savedArtifactTemplateForDefinition(
+        from result: ArtifactTemplateDetectionResult
+    ) -> SavedArtifactTemplate {
+        var saved = result.savedTemplate
+        saved.trajectory = savedArtifactTemplateTrajectory()
+        return saved
     }
 
     /// Debounces `refreshDefinedArtifactIdentity()` behind the Name/Event Code
@@ -1494,6 +1540,18 @@ extension WaveformView {
         }
     }
 
+    /// Events intended only for waveform inspection. MAAC-2 blink spans live
+    /// outside `events` so epoch rejection and ordinary artifact cleaning do
+    /// not accidentally treat a CRD estimation mask as a blink correction.
+    func definedArtifactDisplayEventList() -> [MFFEvent] {
+        template.definedArtifacts.flatMap { artifact in
+            let events = artifact.isCorneoRetinalDefinition
+                ? (artifact.corneoRetinalBlinkEvents ?? [])
+                : artifact.events
+            return definedArtifactEvents(events, label: artifact.name)
+        }
+    }
+
     func deleteDefinedArtifact(id: DefinedArtifact.ID) {
         guard let index = template.definedArtifacts.firstIndex(where: { $0.id == id }) else { return }
         let name = template.definedArtifacts[index].name
@@ -1563,8 +1621,22 @@ extension WaveformView {
         artifactVM.cleaningStatusMessage = message
     }
 
-    func artifactCleaningSheet(for signal: MFFSignalData) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
+    func artifactCleaningSheet(
+        for signal: MFFSignalData,
+        broadbandSignal: MFFSignalData? = nil
+    ) -> some View {
+        let rWaveCount = artifactVM.events.filter { $0.code == RWaveDetector.eventCode }.count
+        let hasCompletePCASGeometry = electrodeGeometry != nil
+            && surrogateMissingGeometryChannels(for: signal).isEmpty
+        let hasUnavailablePCAS = template.definedArtifacts.contains { artifact in
+            guard artifact.cleaningMethod == .pcaS else { return false }
+            let settings = artifact.pcaSSettings ?? .default
+            let anchors = settings.beatSource == .rWaves ? rWaveCount : artifact.eventCount
+            return !hasCompletePCASGeometry
+                || anchors < settings.minimumAcceptedBeats
+                || (settings.inputSource == .broadband && broadbandSignal == nil)
+        }
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Clean Artifacts")
                     .font(.title3.weight(.semibold))
@@ -1612,19 +1684,22 @@ extension WaveformView {
                                 .help("Delete this artifact definition.")
                                 .frame(width: 24)
 
-                                Picker("Type", selection: $artifact.type) {
-                                    ForEach(DefinedArtifactType.allCases) { type in
-                                        Text(type.rawValue).tag(type)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(width: 150)
+                                Text(artifact.type.rawValue)
+                                    .font(.callout)
+                                    .frame(width: 150, alignment: .leading)
+                                    .help("Artifact type is set in Define Artifact. BCG is the gateway that makes PCA-S available here.")
 
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(artifact.name)
                                         .font(.callout.weight(.medium))
                                         .lineLimit(1)
-                                    Text("\(artifact.eventCount) events · \(artifact.eventCode)")
+                                    Text(artifact.isMuscleBSSCCADefinition
+                                         ? muscleBSSCCARangeSummary(artifact, signal: signal)
+                                         : artifact.isMovementPCADefinition
+                                            ? movementPCARangeSummary(artifact, signal: signal)
+                                         : artifact.isCorneoRetinalDefinition
+                                            ? "\(artifact.eventCount) blink-mask spans · CRD"
+                                            : "\(artifact.eventCount) events · \(artifact.eventCode)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -1633,6 +1708,7 @@ extension WaveformView {
                                 artifactTreatmentControl(
                                     artifact: $artifact,
                                     signal: signal,
+                                    broadbandSignal: broadbandSignal,
                                     cleanedSignal: artifactVM.cleanedSignal,
                                     layout: recording.sensorLayout
                                 )
@@ -1675,27 +1751,52 @@ extension WaveformView {
                 .keyboardShortcut(.cancelAction)
 
                 Button("Apply") {
-                    applyArtifactCleaning(to: signal)
+                    applyArtifactCleaning(to: signal, broadbandSignal: broadbandSignal)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(artifactVM.isCleaning || !template.definedArtifacts.contains { $0.cleaningMethod.removesArtifact })
+                .disabled(
+                    artifactVM.isCleaning
+                        || hasUnavailablePCAS
+                        || !template.definedArtifacts.contains { $0.cleaningMethod.removesArtifact }
+                )
             }
         }
         .padding(.horizontal, 32)
         .padding(.top, 28)
         .padding(.bottom, 22)
         .frame(width: 800)
+        .onAppear {
+            // Repair the transient malformed state produced by older builds:
+            // changing the Type picker could relabel a CRD definition as
+            // Ocular while its dedicated method and mask payload remained.
+            for index in template.definedArtifacts.indices
+            where template.definedArtifacts[index].isCorneoRetinalDefinition
+                && template.definedArtifacts[index].type != .corneoRetinal {
+                template.definedArtifacts[index].type = .corneoRetinal
+            }
+            for index in template.definedArtifacts.indices
+            where template.definedArtifacts[index].isMovementPCADefinition
+                && template.definedArtifacts[index].type != .movement {
+                template.definedArtifacts[index].type = .movement
+            }
+            for index in template.definedArtifacts.indices
+            where template.definedArtifacts[index].isMuscleBSSCCADefinition
+                && template.definedArtifacts[index].type != .muscle {
+                template.definedArtifacts[index].type = .muscle
+            }
+        }
     }
 
     func artifactTreatmentControl(
         artifact: Binding<DefinedArtifact>,
         signal: MFFSignalData,
+        broadbandSignal: MFFSignalData?,
         cleanedSignal: MFFSignalData?,
         layout: SensorLayout?
     ) -> some View {
         HStack(spacing: 8) {
             Picker("Treatment", selection: artifact.cleaningMethod) {
-                ForEach(ArtifactCleaningMethod.allCases) { method in
+                ForEach(availableCleaningMethods(for: artifact.wrappedValue)) { method in
                     Text(method.rawValue).tag(method)
                 }
             }
@@ -1708,6 +1809,59 @@ extension WaveformView {
                     artifact: artifact,
                     signal: signal,
                     reportCache: $template.obsVarianceReportCache,
+                    onSettingsChange: clearAppliedArtifactCleaning
+                )
+            }
+
+            if artifact.wrappedValue.cleaningMethod == .pcaS {
+                let missingGeometry = surrogateMissingGeometryChannels(for: signal)
+                let hasCompleteGeometry = missingGeometry.isEmpty && electrodeGeometry != nil
+                let settings = artifact.wrappedValue.pcaSSettings ?? BCGSurrogateSettings.default
+                let minimumMatches = settings.minimumAcceptedBeats
+                let rWaveCount = artifactVM.events.filter { $0.code == RWaveDetector.eventCode }.count
+                let selectedBeatCount = settings.beatSource == .rWaves
+                    ? rWaveCount
+                    : artifact.wrappedValue.eventCount
+                let hasEnoughMatches = selectedBeatCount >= minimumMatches
+                let hasSelectedInput = settings.inputSource != .broadband || broadbandSignal != nil
+                let isReady = hasCompleteGeometry && hasEnoughMatches && hasSelectedInput
+                let readinessText: String = if !hasCompleteGeometry {
+                    "Coordinates needed"
+                } else if !hasSelectedInput {
+                    "Broadband input unavailable"
+                } else if !hasEnoughMatches {
+                    "\(selectedBeatCount) \(settings.beatSource == .rWaves ? "R-waves" : "matches") · \(minimumMatches) needed"
+                } else {
+                    "\(selectedBeatCount) \(settings.beatSource == .rWaves ? "R-waves" : "matches") ready"
+                }
+                ArtifactPCASOptionsButton(
+                    artifact: artifact,
+                    currentSignal: signal,
+                    hasBroadbandInput: broadbandSignal != nil,
+                    rWaveCount: rWaveCount,
+                    hasCompleteGeometry: hasCompleteGeometry,
+                    onSettingsChange: clearAppliedArtifactCleaning
+                )
+                Label(
+                    readinessText,
+                    systemImage: isReady ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(isReady ? Color.secondary : Color.orange)
+                .help(
+                    isReady
+                        ? "PCA-S is ready to use the selected beat anchors and fitting signal. The checkmark means the count, input, and coordinate requirements are met; it does not mean the anchors were manually reviewed."
+                        : "PCA-S requires its selected fitting signal, at least \(minimumMatches) beat anchors, and coordinates for every corrected channel."
+                )
+            }
+
+            if artifact.wrappedValue.cleaningMethod == .bssCCA {
+                MuscleBSSCCAOptionsButton(
+                    artifact: artifact,
+                    signal: signal,
+                    excludedChannels: channels.bad.union(channels.interpolated.keys),
+                    activeLowPassHz: filter.output == nil ? nil : filter.lowPassCutoff,
+                    icaMuscleComponentCount: upstreamICAMuscleComponentCount,
                     onSettingsChange: clearAppliedArtifactCleaning
                 )
             }
@@ -1743,12 +1897,30 @@ extension WaveformView {
         .frame(width: 340, alignment: .leading)
     }
 
+    private func availableCleaningMethods(for artifact: DefinedArtifact) -> [ArtifactCleaningMethod] {
+        ArtifactCleaningMethod.allCases.filter {
+            ($0 != .spikeTemplate || artifact.type == .saccadicSpike)
+                && ($0 != .corneoRetinalRegression || artifact.isCorneoRetinalDefinition)
+                && ($0 != .movementPCA || artifact.isMovementPCADefinition)
+                && ($0 != .bssCCA || artifact.isMuscleBSSCCADefinition)
+                && ($0 != .pcaS || artifact.type == .bcg)
+                && (!artifact.isCorneoRetinalDefinition || $0 == .doNothing || $0 == .corneoRetinalRegression)
+                && (!artifact.isMovementPCADefinition || $0 == .doNothing || $0 == .movementPCA)
+                && (!artifact.isMuscleBSSCCADefinition || $0 == .doNothing || $0 == .bssCCA)
+        }
+    }
+
     var artifactTreatmentHelpText: String {
         """
         Do Nothing: keep the artifact definition but do not alter the data.
         Regress: subtracts the average artifact waveform; useful as a historical/simple comparison.
         OBS: subtracts the mean artifact plus residual PCA components with padded, tapered edges; Options includes topography-aware OBS strategies.
         SSP/PCA: projects out stable spatial artifact patterns across channels; default for topography-defined artifacts.
+        PCA-S: BCG only. Builds source-informed artifact topographies from defined BCG matches or detected R-waves, then applies the spatial operator to the signal entering Clean Artifacts. Options can fit the topographies from the current filtered signal or the broadband pre-filter signal. Requires complete 3D channel coordinates and enough usable anchors.
+        SP Spatial Filter: the MAAC saccadic-spike specialization; fits and subtracts the saved canonical scalp map inside confirmed short SP windows.
+        MAAC-2 CRD Regression: estimates continuous horizontal and vertical eye-position scalp maps from HEOG/VEOG, then removes them in sequence while interpolating the predictor through blink spans.
+        MAAC-3 Movement PCA: runs temporal PCA + Promax independently in stored epochs, or in one-second blocks for continuous recordings, and removes factor back-projections over the peak-to-peak threshold.
+        MAAC-4 BSS-CCA: separates low-autocorrelation muscle sources with one-sample-lag CCA and suggests removals from the editable EMG/EEG spectral-power ratio. Component choices are reviewable and replayable.
         MAS/MAR: local (moving-window) median template — robust to an occasional distorted event; MAR additionally scales the template by a least-squares fit.
         wAAS/wAAR: exponentially weighted template (Goldman 2000); Options defaults to AMRI global weighting, where every valid event contributes by decay^distance, and wAAR additionally scales the template by a least-squares fit.
 
@@ -1766,13 +1938,16 @@ extension WaveformView {
         let detail = progress.detail.map { " · \($0)" } ?? ""
         switch progress.phase {
         case .preparing:
-            return "Setting up \(artifactPosition)\(progress.artifactName) (\(progress.artifactTotal) events) with \(progress.method.rawValue)\(detail)"
+            let workLabel = progress.method == .movementPCA || progress.method == .bssCCA
+                ? "epoch-wise"
+                : "\(progress.artifactTotal) events"
+            return "Setting up \(artifactPosition)\(progress.artifactName) (\(workLabel)) with \(progress.method.rawValue)\(detail)"
         case .cleaning:
             let current = min(progress.artifactCompleted, progress.artifactTotal)
             let overall = progress.total > progress.artifactTotal
                 ? " · \(progress.completed) of \(progress.total) overall"
                 : ""
-            return "Cleaning \(current) of \(progress.artifactTotal) \(artifactPosition)\(progress.artifactName) events with \(progress.method.rawValue)\(overall)"
+            return "Cleaning \(current) of \(progress.artifactTotal) \(artifactPosition)\(progress.artifactName) events with \(progress.method.rawValue)\(overall)\(detail)"
         case .finalizing:
             return "Finalizing \(artifactPosition)\(progress.artifactName) with \(progress.method.rawValue)\(detail)"
         }

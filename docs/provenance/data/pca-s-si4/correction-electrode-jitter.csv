@@ -1,0 +1,6 @@
+axis,value,seeds,corrected_snr_mean,corrected_snr_sd,uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean
+correction-electrode-jitter,0,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,15.907357
+correction-electrode-jitter,2,30,1.952076,0.772378,1.255144,0.054120,14.599837,1.270043,0.599834,0.394363,15.907357
+correction-electrode-jitter,5,30,1.620317,0.594027,1.255144,0.054120,14.559584,1.097643,0.678737,0.394363,15.907357
+correction-electrode-jitter,10,30,1.115303,0.206210,1.255144,0.054120,14.054199,0.839262,0.900685,0.394363,15.907357
+correction-electrode-jitter,15,30,1.124882,0.262038,1.255144,0.054120,13.772136,0.801044,0.912042,0.394363,15.907357

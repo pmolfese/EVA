@@ -20,7 +20,12 @@ extension WaveformView {
     // MARK: - Channels
 
     func channelIndices(in signal: MFFSignalData) -> [Int] {
-        Array(signal.data.indices)
+        DisplayChannelsResolver.indices(
+            selectedSetID: displayedChannelSetID,
+            sets: ChannelSetStore.shared.allSets,
+            channelCount: signal.data.count,
+            netType: recording.sensorLayout?.name
+        )
     }
 
     /// Trace/label color: gray for bad, teal for interpolated, accent otherwise.
@@ -214,6 +219,7 @@ extension WaveformView {
             usesPixelAdaptiveRendering: usesPixelAdaptiveWaveformRendering,
             showsTimeMarkers: showsTimeMarkersAcrossTraces,
             timeMarkerStyle: waveformTimeMarkerStyle,
+            zeroLineColor: waveformZeroLineColor,
             canDefineArtifact: activeSelectionRange(in: signal) != nil,
             moveToPhysioTitle: "Move \(eegChannelDisplayName(index: index, signal: signal)) to Physio",
             onDefineArtifact: { openArtifactTemplateSheet(for: signal, clickedChannel: index) },

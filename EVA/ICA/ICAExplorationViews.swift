@@ -27,7 +27,6 @@ extension WaveformView {
         ica.componentCount = min(max(ica.componentCount, 1), signal.numberOfChannels)
         ica.downsampleRate = min(ica.downsampleRate, signal.samplingRate)
         ica.statusMessage = nil
-        artifactVM.detectionMethod = .ica
         ica.showsSheet = true
     }
 
@@ -776,6 +775,7 @@ extension WaveformView {
             // that only this caller has.
             ICAComponentRemoval.commit(
                 cleaned: cleaned,
+                metrics: ICARunMetrics(decomposition: decomposition, maxIterations: ica.maxIterations),
                 ica: ica,
                 artifactVM: artifactVM,
                 template: template,

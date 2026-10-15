@@ -96,9 +96,30 @@ final class ReplayController {
     /// Destination folder for replay output; filename suffix follows the final
     /// export kind (`processed`, `segmented`, or `average`).
     var outputFolder: URL?
+    /// Per-file Phase-B drops carried into the exported process log when a
+    /// review step keeps this batch on the windowed path.
+    var batchPolicyAuditLogLines: [String] = []
 
     private var continuation: CheckedContinuation<Resolution, Never>?
     private var pendingResolution: Resolution?
+
+    /// Set by any `.cancel` resolution and held until the next `configure` or
+    /// `reset`, so the replay loop can tell "the operator abandoned this run"
+    /// apart from "the steps ran out".
+    ///
+    /// The gate's return value alone is not enough. `break loop` on `.cancel`
+    /// fell through to finish-and-export, so Skip File at a paused gate wrote a
+    /// partially processed file and marked the batch job Done. And a cancel
+    /// pressed while a step is *running* has no waiter: it is buffered for the
+    /// next gate, and a script with no further gate never reads it — the run
+    /// finished and exported as if nothing had been pressed.
+    private(set) var cancellationRequested = false
+
+    /// Whether the loop should stop without exporting: its task was cancelled,
+    /// or the operator cancelled through a gate or the banner.
+    func shouldAbandon(taskCancelled: Bool) -> Bool {
+        taskCancelled || cancellationRequested
+    }
 
     // MARK: Config population
 
@@ -132,6 +153,8 @@ final class ReplayController {
         banner = nil
         continuation = nil
         pendingResolution = nil
+        cancellationRequested = false
+        batchPolicyAuditLogLines = []
         showsConfigPane = true
     }
 
@@ -157,6 +180,18 @@ final class ReplayController {
         for i in steps.indices where batch.stepTemplates.indices.contains(i) {
             steps[i].included = batch.stepTemplates[i].included && steps[i].compatibilityFlag == nil
             steps[i].pauseToReview = batch.stepTemplates[i].pauseToReview
+        }
+        let policy = BatchDecisionPolicy.apply(
+            to: script, availability: availability,
+            enabled: batch.skipsUnsupportedDecisions
+        )
+        if batch.skipsUnsupportedDecisions {
+            let selected = Set(batch.stepTemplates.filter(\.included).map(\.id))
+            let selectedDrops = policy.drops.filter { selected.contains($0.stepIndex) }
+            for drop in selectedDrops where steps.indices.contains(drop.stepIndex) {
+                steps[drop.stepIndex].included = false
+            }
+            batchPolicyAuditLogLines = selectedDrops.map(\.auditLogLine)
         }
         mode = batch.mode
         exportWhenFinished = true
@@ -233,6 +268,7 @@ final class ReplayController {
     /// (for the race where the UI finishes before the loop reaches its gate); a
     /// second resume is a harmless no-op.
     func resume(_ resolution: Resolution) {
+        if resolution == .cancel { cancellationRequested = true }
         banner = nil
         if let cont = continuation {
             continuation = nil
@@ -252,6 +288,7 @@ final class ReplayController {
         banner = nil
         showsConfigPane = false
         pendingResolution = nil
+        cancellationRequested = false
         sourceName = ""
     }
 }

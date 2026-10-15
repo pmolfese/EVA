@@ -228,7 +228,7 @@ extension EVAProcessingStep {
     /// Prefer `replayInteraction(given:)` wherever the target file is known —
     /// this one has to assume the worst, so it reports the subject-specific
     /// steps as `.skip`/`.decision` even when the file could resolve them.
-    var replayInteraction: ReplayInteraction {
+    nonisolated var replayInteraction: ReplayInteraction {
         guard replayable else { return .skip }
         switch operation {
         // `.reference`/`.baseline` carry portable settings (reference type,
@@ -270,7 +270,7 @@ extension EVAProcessingStep {
     ///    needs geometry to re-solve against; without it there is nothing to
     ///    offer, so it stays `.skip`.
     /// 3. Everything else classifies exactly as it does without a file.
-    func replayInteraction(given availability: ReplayPayloadAvailability) -> ReplayInteraction {
+    nonisolated func replayInteraction(given availability: ReplayPayloadAvailability) -> ReplayInteraction {
         switch operation {
         case .icaClean where availability.hasICAPayload:
             return .resolvedFromPayload

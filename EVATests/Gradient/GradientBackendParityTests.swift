@@ -245,6 +245,17 @@ struct GradientBackendParityTests {
         }
     }
 
+    @Test func explicitAcquisitionGroupTimingAgrees() throws {
+        guard metalAvailable else { return }
+        try expectParity(
+            makeRecording(channels: 4, volumes: 40, period: 100),
+            "explicit acquisition groups"
+        ) {
+            $0.acquisitionSchedule = .offsetsFractionOfTR([0, 0.25, 0.5, 0.75])
+            $0.upsampleFactor = 4
+        }
+    }
+
     @Test func correlationRankedDonorSetsAgreeExactly() throws {
         guard metalAvailable else { return }
         // The stage most at risk: the ranking is discrete, and a score computed to

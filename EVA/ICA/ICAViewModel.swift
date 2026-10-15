@@ -63,6 +63,9 @@ final class ICAViewModel {
     // MARK: Results
     var decomposition: ICADecomposition?
     var cleanedSignal: MFFSignalData?
+    /// Quality numbers for the removal that produced `cleanedSignal`, graded
+    /// into the history rail's pill by `ICARunGrade`.
+    var runMetrics: ICARunMetrics?
 
     // MARK: Debug
     var debugReportRequest = 0
@@ -135,6 +138,7 @@ final class ICAViewModel {
         isRemovingComponents = false
         decomposition = nil
         cleanedSignal = nil
+        runMetrics = nil
         debugReportSerial = 0
         lastReconstructionDebugReport = nil
     }

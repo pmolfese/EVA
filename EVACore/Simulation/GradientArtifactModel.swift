@@ -156,14 +156,36 @@ nonisolated enum GradientArtifactModel {
     /// models an amplifier whose anti-aliasing is inadequate for gradient-rate
     /// content, which is a real failure mode, and it lets the harness show how
     /// badly aliased artifact defeats template subtraction.
+    ///
+    /// The filter runs on the template padded with `antiAliasMarginSeconds` of
+    /// silence on each side, and the result keeps that margin. Filtering the
+    /// bare window (as this did until 2026-09-26, ROADMAP MRI-1) wrapped the
+    /// band-limited waveform's ringing around the FFT's circular buffer and cut
+    /// it off at the window edges: the template started at +0.28 and ended at
+    /// −0.34 of its peak-to-peak, every slice injected a step at both ends, and
+    /// 1.5 % of its energy sat above the output Nyquist and aliased. That put a
+    /// floor under every correction method that no engine fix could get below
+    /// (FASTR truth residual ~1300 at 500 Hz without clock sync). The outermost
+    /// `antiAliasTaperSeconds` of the margin is cosine-tapered so the template
+    /// ends at exactly zero; the ringing there is already small, so the taper
+    /// changes almost nothing in band.
     static func antiAliasedTemplate(_ template: HighRateTemplate, config: SimulationConfig) -> HighRateTemplate {
         guard config.artifactAntiAliasFraction > 0 else { return template }
         let cutoff = config.artifactAntiAliasFraction * config.samplingRate / 2
+        let margin = max(1, Int((antiAliasMarginSeconds * template.rate).rounded()))
+        let padding = [Double](repeating: 0, count: margin)
         var filtered = SpectralNoise.lowPassed(
-            template.samples,
+            padding + template.samples + padding,
             samplingRate: template.rate,
             cutoffHz: cutoff
         )
+        let taper = min(margin, max(1, Int((antiAliasTaperSeconds * template.rate).rounded())))
+        for i in 0..<taper {
+            // 0 at the outermost sample, rising to 1 where the taper ends.
+            let weight = 0.5 - 0.5 * cos(Double.pi * Double(i) / Double(taper))
+            filtered[i] *= weight
+            filtered[filtered.count - 1 - i] *= weight
+        }
         // Re-normalize *after* filtering, not before. Most of an unfiltered
         // dB/dt waveform's energy sits above the output Nyquist, so a template
         // normalized before the anti-alias filter would land in the recording at
@@ -171,12 +193,22 @@ nonisolated enum GradientArtifactModel {
         // 7000` has to mean 7000 µV peak-to-peak in the file, since that is what
         // the paper's figure is measuring.
         normalizeToUnitPeakToPeak(&filtered)
+        // The front margin moves the waveform later in the window; the lead-in
+        // moves with it, so each slice still lands where the scanner put it.
         return HighRateTemplate(
             samples: filtered,
             rate: template.rate,
-            leadInSeconds: template.leadInSeconds
+            leadInSeconds: template.leadInSeconds + Double(margin) / template.rate
         )
     }
+
+    /// Silence added on each side of the template before the anti-alias
+    /// filter, so the band-limited waveform's ringing has room to decay
+    /// instead of wrapping. 30 ms took the unsynced 500 Hz FASTR floor from
+    /// ~1300 to ~60 in the 2026-09-26 experiment.
+    static let antiAliasMarginSeconds = 0.030
+    /// Outermost part of that margin tapered to zero.
+    static let antiAliasTaperSeconds = 0.010
 
     // MARK: - Synthetic waveform
 

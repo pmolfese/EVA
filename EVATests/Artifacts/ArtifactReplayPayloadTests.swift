@@ -184,6 +184,123 @@ struct ArtifactReplayPayloadTests {
         #expect(stored.usesVariableEventDuration)
     }
 
+    @Test func manualExemplarPCASDefinitionSurvivesButItsFittedReportIsStripped() throws {
+        let base = signal()
+        var original = artifact(method: .pcaS, in: base)
+        original.type = .bcg
+        var settings = BCGSurrogateSettings.default
+        settings.patternSearch = .reviewedExemplar
+        settings.regionalSourceCount = 21
+        original.pcaSSettings = settings
+        original.savedTemplate = SavedArtifactTemplate(
+            schemaVersion: 2,
+            name: "BCG",
+            eventCode: "BCG",
+            createdAt: Date(timeIntervalSince1970: 1_000),
+            sourceSignalPath: "/source/test.mff",
+            sourceSamplingRate: samplingRate,
+            exemplarStartSeconds: 1.8,
+            exemplarEndSeconds: 2.2,
+            windowSizeSeconds: windowSeconds,
+            channelScope: "all",
+            channels: [],
+            preprocessing: SavedArtifactTemplatePreprocessing(
+                downsampleRate: samplingRate,
+                normalization: "per-channel zscore"
+            ),
+            matching: SavedArtifactTemplateMatching(
+                threshold: 0.6,
+                mergeWindowSeconds: 0.25,
+                waveformStretchRange: 0,
+                polarity: .same
+            ),
+            exemplarSamples: [],
+            averageSamples: nil,
+            averageEventCount: original.events.count,
+            trajectory: SavedArtifactTemplateTrajectory(
+                shiftSeconds: 0.05,
+                scaleRange: 0.10,
+                gfpWeighted: true,
+                frameCount: 40,
+                excludedFrameCount: 1,
+                frames: []
+            )
+        )
+        original.pcaSReport = BCGSurrogateReport(
+            correctedChannelCount: 4,
+            excludedChannelCount: 0,
+            candidateBeatCount: 4,
+            acceptedBeatCount: 4,
+            artifactComponentCount: 2,
+            artifactVarianceFractions: [0.7, 0.2],
+            artifactComponentReliabilities: [0.99, 0.97],
+            reliabilityRejectedComponentCount: 0,
+            patternSearch: BCGArtifactPatternSearch.reviewedExemplar.rawValue,
+            representativeBeatIndex: nil,
+            regionalSourceCount: 21,
+            brainColumnCount: 63,
+            brainRegularization: 0.02,
+            operatorDiagnostics: SourceInformedOperatorDiagnostics(
+                electrodeCount: 4,
+                brainColumnCount: 63,
+                artifactInputCount: 2,
+                artifactRetainedCount: 2,
+                artifactDroppedCount: 0,
+                requestedBrainRegularization: 0.02,
+                projectedBrainMeanColumnPower: 1,
+                effectiveRidge: 0.02,
+                minimumCholeskyDiagonal: 0.1,
+                maximumCholeskyDiagonal: 1
+            ),
+            headModelName: "test",
+            headShellRadiiMeters: [0.08, 0.085, 0.09],
+            harmonicTerms: 60,
+            geometryName: "test",
+            reference: "average",
+            removedVarianceFraction: 0.3
+        )
+
+        let encoded = try ArtifactReplayPayload.encoder().encode(
+            ArtifactReplayPayload(artifacts: [original])
+        )
+        let decoded = try ArtifactReplayPayload.decoder().decode(
+            ArtifactReplayPayload.self, from: encoded
+        )
+        let stored = try #require(decoded.artifacts.first)
+
+        #expect(stored.pcaSSettings?.patternSearch == .reviewedExemplar)
+        #expect(stored.pcaSSettings?.regionalSourceCount == 21)
+        #expect(stored.savedTemplate?.matching.threshold == 0.6)
+        #expect(stored.savedTemplate?.trajectory?.shiftSeconds == 0.05)
+        #expect(stored.savedTemplate?.trajectory?.scaleRange == 0.10)
+        #expect(stored.events.map(\.beginTimeSeconds) == original.events.map(\.beginTimeSeconds))
+        #expect(stored.pcaSReport == nil, "a fitted result must be regenerated on replay")
+
+        let parameters = stored.processingParameters(prefix: "artifact1")
+        #expect(parameters["artifact1.pcaS.surrogatePatternSearch"] == "reviewedExemplar")
+        #expect(parameters["artifact1.trajectoryShiftSeconds"] == "0.050000")
+        #expect(parameters["artifact1.eventSampleIndices"] == "200,500,800,1100")
+    }
+
+    @Test func crossingTheBCGTypeBoundarySelectsAnEligibleCleaningMethod() {
+        let base = signal()
+        let previousOcular = artifact(method: .obs, in: base)
+        var becameBCG = artifact(method: .pcaS, in: base)
+        becameBCG.type = .bcg
+        var reviewed = BCGSurrogateSettings.default
+        reviewed.patternSearch = .reviewedExemplar
+        becameBCG.pcaSSettings = reviewed
+
+        becameBCG.preserveCleaningSettings(from: previousOcular)
+        #expect(becameBCG.cleaningMethod == .pcaS)
+        #expect(becameBCG.pcaSSettings?.patternSearch == .reviewedExemplar)
+
+        var leftBCG = artifact(method: .obs, in: base)
+        leftBCG.preserveCleaningSettings(from: becameBCG)
+        #expect(leftBCG.cleaningMethod == .obs)
+        #expect(leftBCG.pcaSSettings == nil)
+    }
+
     // MARK: - Package I/O
 
     @Test func packageRoundTrip() throws {

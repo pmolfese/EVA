@@ -102,6 +102,15 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// Pearson correlation imposed between S001 and S002 after independent
     /// signals are generated within S001's configured band. Zero disables it.
     var dipoleSourceCorrelation: Double = 0
+    /// Makes dipole source time courses non-Gaussian (bursty), which ICA and
+    /// BSS-CCA need to be separable. `nil` keeps the Gaussian paper model exactly
+    /// (the default), so existing scenarios decode and generate byte-identically.
+    /// Dipole model only — the Grouiller model is not a linear-mixing ICA model.
+    var nonGaussianSources: NonGaussianSourceModel? = nil
+    /// Genuine sharp brain transients (K-complexes, spindles, sharp waves) added
+    /// to the clean EEG, for measuring a cleaner's oversmoothing. `nil` adds none
+    /// (the default), so existing scenarios are byte-identical.
+    var brainTransients: BrainTransientConfig? = nil
     /// Move S002 this many degrees from S001, transporting its orientation with
     /// it. Zero keeps the prefix-stable catalog unchanged.
     var dipoleNearPairSeparationDegrees: Double = 0
@@ -229,6 +238,11 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     /// generator shares, in that order. Optional for backward-compatible
     /// scenario decoding; the effective default preserves the original model.
     var bcgGeneratorAmplitudeScales: [Double]? = nil
+    /// How many of the four physical BCG generators are active, 1–4. Sets the
+    /// artifact's spatial rank, which is exactly what an OBS-style "keep the top
+    /// k principal components" correction has to match. `nil` keeps all four (the
+    /// default), so existing scenarios generate byte-identically.
+    var bcgActiveGeneratorCount: Int? = nil
 
     /// Paper: automatic QRS detection jitters the recovered beat time by about
     /// 20 ms; simulations used 25 ms SD and swept 0-50 ms.
@@ -506,6 +520,7 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var effectiveBCGSpatialModel: BCGSpatialModel { bcgSpatialModel ?? .channelIndex }
     var effectiveBCGFieldStrengthTesla: Double { bcgFieldStrengthTesla ?? 3.0 }
     var effectiveBCGMorphologyJitterFraction: Double { bcgMorphologyJitterFraction ?? 0.20 }
+    var effectiveBCGActiveGeneratorCount: Int { min(4, max(1, bcgActiveGeneratorCount ?? 4)) }
     var effectiveBCGGeneratorAmplitudeScales: [Double] {
         guard let values = bcgGeneratorAmplitudeScales, values.count == 4 else {
             return [1, 1, 1, 1]
@@ -631,6 +646,13 @@ nonisolated struct EMGConfig: Codable, Sendable {
     /// Surface EMG is broadband and predominantly above ordinary EEG rhythms.
     var lowHz: Double = 20
     var highHz: Double = 200
+    /// First-order (AR-1) coloring of the EMG carrier, 0–0.99. BSS-CCA separates
+    /// muscle from brain on *autocorrelation* — surface EMG is broadband (low
+    /// autocorrelation) while brain is not, and raising this colors the carrier
+    /// toward brain-like autocorrelation to stress that separation. `nil` leaves
+    /// the broadband carrier unchanged (the default), so scenarios are
+    /// byte-identical.
+    var carrierAutocorrelation: Double? = nil
 }
 
 nonisolated struct ChewingConfig: Codable, Sendable {

@@ -53,14 +53,22 @@ nonisolated enum CWTRidgePipeline {
         var sakoeChibaBand: Int = 20
         var maxShiftSamples: Int = 60
         var priorSigmaSamples: Double = 15
-        /// Analysis window (ms relative to stimulus) restricting peak detection.
-        /// `nil` means the whole epoch.
+        /// Named analysis windows (ms relative to stimulus) restricting peak
+        /// detection. Disjoint windows stay disjoint: peaks in the gaps are not
+        /// admitted. When empty, the legacy single-window fields below apply.
+        var detectionWindows: [DetectionWindow] = []
+        /// Legacy/fallback single analysis window. `nil` means the whole epoch.
         var windowStartMs: Double?
         var windowEndMs: Double?
         var computesFunctionalPCA: Bool = true
         var functionalPCAComponentCount: Int = 3
 
         init() {}
+    }
+
+    struct DetectionWindow: Sendable, Equatable {
+        var startMs: Double
+        var endMs: Double
     }
 
     struct TrialResult: Identifiable, Sendable {
@@ -117,12 +125,11 @@ nonisolated enum CWTRidgePipeline {
 
         let unalignedAverage = NonlinearAligner.average(processed, length: length)
 
-        // 2. Restrict ridge detection to the window, using the first trial's
+        // 2. Restrict ridge detection to the windows, using the first trial's
         //    stimulus offset as the reference for the scalogram/template.
         let stimulusOffset = trials.first?.stimulusOffsetSamples ?? 0
-        let window = sampleWindow(
-            startMs: configuration.windowStartMs,
-            endMs: configuration.windowEndMs,
+        let averageWindows = sampleWindows(
+            configuration: configuration,
             stimulusOffsetSamples: stimulusOffset,
             samplingRate: samplingRate,
             length: length
@@ -135,7 +142,7 @@ nonisolated enum CWTRidgePipeline {
             stimulusOffsetSamples: stimulusOffset,
             configuration: configuration.ridge
         )
-        let averagePeaks = filterPeaks(averageDetection.peaks, to: window)
+        let averagePeaks = filterPeaks(averageDetection.peaks, to: averageWindows)
 
         // 4. Per-trial peaks (always computed for reporting; drive alignment
         //    only when peakSource == .perTrial).
@@ -146,7 +153,13 @@ nonisolated enum CWTRidgePipeline {
                 stimulusOffsetSamples: trial.stimulusOffsetSamples,
                 configuration: configuration.ridge
             )
-            return filterPeaks(detection.peaks, to: window)
+            let windows = sampleWindows(
+                configuration: configuration,
+                stimulusOffsetSamples: trial.stimulusOffsetSamples,
+                samplingRate: samplingRate,
+                length: length
+            )
+            return filterPeaks(detection.peaks, to: windows)
         }
 
         // 5. Build the alignment template. For landmark registration we align to
@@ -204,14 +217,43 @@ nonisolated enum CWTRidgePipeline {
 
     // MARK: - Windowing
 
+    static func sampleWindows(
+        configuration: Configuration,
+        stimulusOffsetSamples: Int,
+        samplingRate: Double,
+        length: Int
+    ) -> [Range<Int>]? {
+        if !configuration.detectionWindows.isEmpty {
+            return configuration.detectionWindows.compactMap { window in
+                sampleWindow(
+                    startMs: window.startMs,
+                    endMs: window.endMs,
+                    stimulusOffsetSamples: stimulusOffsetSamples,
+                    samplingRate: samplingRate,
+                    length: length
+                )
+            }
+        }
+        guard let startMs = configuration.windowStartMs,
+              let endMs = configuration.windowEndMs,
+              endMs > startMs else { return nil }
+        return sampleWindow(
+            startMs: startMs,
+            endMs: endMs,
+            stimulusOffsetSamples: stimulusOffsetSamples,
+            samplingRate: samplingRate,
+            length: length
+        ).map { [$0] } ?? []
+    }
+
     private static func sampleWindow(
-        startMs: Double?,
-        endMs: Double?,
+        startMs: Double,
+        endMs: Double,
         stimulusOffsetSamples: Int,
         samplingRate: Double,
         length: Int
     ) -> Range<Int>? {
-        guard let startMs, let endMs, endMs > startMs else { return nil }
+        guard endMs > startMs else { return nil }
         let startSample = stimulusOffsetSamples + Int((startMs / 1000.0 * samplingRate).rounded())
         let endSample = stimulusOffsetSamples + Int((endMs / 1000.0 * samplingRate).rounded())
         let lower = max(0, min(startSample, endSample))
@@ -219,8 +261,8 @@ nonisolated enum CWTRidgePipeline {
         return lower < upper ? lower..<upper : nil
     }
 
-    private static func filterPeaks(_ peaks: [CWTRidgeDetector.Peak], to window: Range<Int>?) -> [CWTRidgeDetector.Peak] {
-        guard let window else { return peaks }
-        return peaks.filter { window.contains($0.sampleIndex) }
+    private static func filterPeaks(_ peaks: [CWTRidgeDetector.Peak], to windows: [Range<Int>]?) -> [CWTRidgeDetector.Peak] {
+        guard let windows else { return peaks }
+        return peaks.filter { peak in windows.contains { $0.contains(peak.sampleIndex) } }
     }
 }

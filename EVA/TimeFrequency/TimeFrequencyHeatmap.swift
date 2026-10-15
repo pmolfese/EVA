@@ -26,13 +26,17 @@ struct TFRender: Sendable {
     var isDiverging: Bool
     var measure: EpochingViewModel.TFMeasure
     var isDifference: Bool
+    var isBaselineSubtracted: Bool = false
+    var unitOverride: String? = nil
     var trialCountA: Int
     var trialCountB: Int?
 
     var unitLabel: String {
+        if let unitOverride { return unitOverride }
         switch measure {
         case .power: return isDifference ? "Δ dB" : "dB"
         case .itpc: return isDifference ? "Δ ITPC" : "ITPC"
+        case .wtpl: return isDifference ? "Δ WTPL" : (isBaselineSubtracted ? "ΔWTPL" : "WTPL")
         }
     }
 }
@@ -95,6 +99,7 @@ enum TFColorMap {
 /// The freq × time heatmap with axes and an event marker.
 struct TFHeatmap: View {
     let render: TFRender
+    var rhythmicityBands: DetectedRhythmicityBandSet? = nil
 
     private struct Hover: Equatable {
         var location: CGPoint
@@ -117,6 +122,7 @@ struct TFHeatmap: View {
             Canvas { context, size in
                 let plot = plotRect(in: size)
                 drawCells(context: &context, plot: plot)
+                drawRhythmicityBands(context: &context, plot: plot)
                 drawEventLine(context: &context, plot: plot)
                 drawFrequencyAxis(context: &context, plot: plot)
                 drawTimeAxis(context: &context, plot: plot)
@@ -164,6 +170,10 @@ struct TFHeatmap: View {
                     .font(.caption.weight(.semibold).monospacedDigit())
                 Text(String(format: "%.3f %@", hover.value, render.unitLabel))
                     .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                if let band = rhythmicityBand(at: hover.frequencyHz) {
+                    Text("\(band.name) · \(band.direction.rawValue) · peak \(String(format: "%.2f", band.peakHz)) Hz")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 6).padding(.vertical, 4)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
@@ -185,7 +195,15 @@ struct TFHeatmap: View {
             for ti in 0..<min(timeCount, row.count) {
                 let x = plot.minX + CGFloat(ti) * cellW
                 let rect = CGRect(x: x, y: y, width: cellW + 0.6, height: cellH + 0.6)
-                context.fill(Path(rect), with: .color(TFColorMap.color(for: row[ti], render: render)))
+                if row[ti].isFinite {
+                    context.fill(Path(rect), with: .color(TFColorMap.color(for: row[ti], render: render)))
+                } else {
+                    context.fill(Path(rect), with: .color(.secondary.opacity(0.08)))
+                    var hatch = Path()
+                    hatch.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+                    hatch.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+                    context.stroke(hatch, with: .color(.secondary.opacity(0.22)), lineWidth: 0.5)
+                }
             }
         }
     }
@@ -198,6 +216,62 @@ struct TFHeatmap: View {
         path.move(to: CGPoint(x: x, y: plot.minY))
         path.addLine(to: CGPoint(x: x, y: plot.maxY))
         context.stroke(path, with: .color(.black.opacity(0.55)), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+    }
+
+    /// Adds a display-only ABBA layer. It reads the already-computed frequency
+    /// axis and never touches the ERSP/ITPC grid or its value range.
+    private func drawRhythmicityBands(context: inout GraphicsContext, plot: CGRect) {
+        guard let set = rhythmicityBands, !set.displayBands.isEmpty,
+              !render.frequenciesHz.isEmpty else { return }
+        let count = render.frequenciesHz.count
+        let cellH = plot.height / CGFloat(count)
+
+        func centerY(_ frequency: Double) -> CGFloat {
+            let index = render.frequenciesHz.indices.min {
+                abs(render.frequenciesHz[$0] - frequency) < abs(render.frequenciesHz[$1] - frequency)
+            } ?? 0
+            return plot.minY + (CGFloat(count - 1 - index) + 0.5) * cellH
+        }
+
+        for band in set.displayBands {
+            guard band.highHz >= (render.frequenciesHz.first ?? 0),
+                  band.lowHz <= (render.frequenciesHz.last ?? 0) else { continue }
+            let upperY = centerY(band.highHz)
+            let lowerY = centerY(band.lowHz)
+            let rect = CGRect(
+                x: plot.minX,
+                y: min(upperY, lowerY) - cellH / 2,
+                width: plot.width,
+                height: max(abs(lowerY - upperY) + cellH, 1)
+            ).intersection(plot)
+            let color: Color = band.direction == .sustained ? .cyan : .orange
+            context.fill(Path(rect), with: .color(color.opacity(0.10)))
+            for y in [rect.minY, rect.maxY] {
+                var border = Path()
+                border.move(to: CGPoint(x: plot.minX, y: y))
+                border.addLine(to: CGPoint(x: plot.maxX, y: y))
+                context.stroke(border, with: .color(color.opacity(0.85)), lineWidth: 1)
+            }
+            let peakY = centerY(band.peakHz)
+            var peak = Path()
+            peak.move(to: CGPoint(x: plot.minX, y: peakY))
+            peak.addLine(to: CGPoint(x: plot.maxX, y: peakY))
+            context.stroke(peak, with: .color(color.opacity(0.8)), style: StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            context.fill(
+                Path(ellipseIn: CGRect(x: plot.maxX - 6, y: peakY - 3, width: 6, height: 6)),
+                with: .color(color)
+            )
+            if rect.height >= 12 {
+                context.draw(
+                    Text(band.name).font(.system(size: 8, weight: .medium)).foregroundStyle(color),
+                    at: CGPoint(x: plot.maxX - 8, y: rect.minY + 2), anchor: .topTrailing
+                )
+            }
+        }
+    }
+
+    private func rhythmicityBand(at frequencyHz: Double) -> DetectedRhythmicityBand? {
+        rhythmicityBands?.displayBands.first { $0.lowHz <= frequencyHz && frequencyHz <= $0.highHz }
     }
 
     private func drawFrequencyAxis(context: inout GraphicsContext, plot: CGRect) {

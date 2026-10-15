@@ -27,6 +27,7 @@
 //      Neuroscience, 16, 842420. https://doi.org/10.3389/fnins.2022.842420
 //
 
+import Accelerate
 import Foundation
 
 /// Numerical provenance for one source-informed sensor-space operator.
@@ -270,9 +271,10 @@ nonisolated enum SourceInformedSeparation {
 
     static func apply(
         _ sourceInformedOperator: SourceInformedOperator,
-        to signal: [[Double]]
+        to signal: [[Double]],
+        progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Double]] {
-        try apply(matrix: sourceInformedOperator.matrix, to: signal)
+        try apply(matrix: sourceInformedOperator.matrix, to: signal, progress: progress)
     }
 
     /// Applies a persisted or boundary-adapted operator when its construction
@@ -280,7 +282,8 @@ nonisolated enum SourceInformedSeparation {
     /// is used by the value-typed overload above.
     static func apply(
         matrix: [[Double]],
-        to signal: [[Double]]
+        to signal: [[Double]],
+        progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> [[Double]] {
         let electrodeCount = matrix.count
         guard electrodeCount > 0,
@@ -300,17 +303,57 @@ nonisolated enum SourceInformedSeparation {
             throw SourceInformedOperatorError.nonFiniteSignal
         }
 
+        // This is one dense electrodes×electrodes operator applied to a very
+        // wide electrodes×samples matrix. The former implementation expressed
+        // it literally as three Swift loops, which is ~34 billion scalar
+        // multiply-adds for a 257-channel, nine-minute 1 kHz recording and took
+        // tens of minutes. Pack bounded sample blocks and hand the same matrix
+        // product to Accelerate's cache-tiled, multithreaded BLAS instead.
+        // Blocking avoids materialising another pair of full-recording flat
+        // Double buffers (~2.1 GB for that recording).
+        let flatMatrix = matrix.flatMap { $0 }
+        let blockSampleCount = min(sampleCount, 16_384)
         var output = [[Double]](
             repeating: [Double](repeating: 0, count: sampleCount), count: electrodeCount
         )
-        for row in 0..<electrodeCount {
-            for column in 0..<electrodeCount {
-                let weight = matrix[row][column]
-                guard weight != 0 else { continue }
-                for sample in 0..<sampleCount {
-                    output[row][sample] += weight * signal[column][sample]
+        progress?(0)
+        for blockStart in stride(from: 0, to: sampleCount, by: blockSampleCount) {
+            try Task.checkCancellation()
+            let width = min(blockSampleCount, sampleCount - blockStart)
+            var inputBlock = [Double](repeating: 0, count: electrodeCount * width)
+            inputBlock.withUnsafeMutableBufferPointer { packed in
+                for channel in 0..<electrodeCount {
+                    let offset = channel * width
+                    signal[channel].withUnsafeBufferPointer { source in
+                        packed.baseAddress!.advanced(by: offset).update(
+                            from: source.baseAddress!.advanced(by: blockStart),
+                            count: width
+                        )
+                    }
                 }
             }
+
+            var outputBlock = [Double](repeating: 0, count: electrodeCount * width)
+            cblas_dgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                Int32(electrodeCount), Int32(width), Int32(electrodeCount),
+                1, flatMatrix, Int32(electrodeCount),
+                inputBlock, Int32(width),
+                0, &outputBlock, Int32(width)
+            )
+
+            outputBlock.withUnsafeBufferPointer { packed in
+                for channel in 0..<electrodeCount {
+                    let offset = channel * width
+                    output[channel].withUnsafeMutableBufferPointer { destination in
+                        destination.baseAddress!.advanced(by: blockStart).update(
+                            from: packed.baseAddress!.advanced(by: offset),
+                            count: width
+                        )
+                    }
+                }
+            }
+            progress?(Double(blockStart + width) / Double(sampleCount))
         }
         guard output.allSatisfy({ $0.allSatisfy(\.isFinite) }) else {
             throw SourceInformedOperatorError.nonFiniteOutput

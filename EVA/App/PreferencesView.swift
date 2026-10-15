@@ -22,6 +22,7 @@ nonisolated enum EVAGeneralPreferences {
     static let pixelAdaptiveWaveformRenderingKey = "pixelAdaptiveWaveformRenderingEnabled"
     static let waveformTimeMarkersAcrossTracesKey = "waveformTimeMarkersAcrossTracesEnabled"
     static let waveformTimeMarkerStyleKey = "waveformTimeMarkerStyle.v1"
+    static let waveformZeroLineColorKey = "waveformZeroLineColor.v1"
 
     /// Starting display scale for a newly-opened recording, stored in **physical
     /// units** rather than as raw `amplitudeScale` / `timeScale`.
@@ -74,6 +75,67 @@ nonisolated enum EVAGeneralPreferences {
     /// never opens the panel.
     static let defaultSensitivity: Double = 8.1
     static let defaultSweep: Double = 70.6
+}
+
+/// A portable RGB override for the horizontal zero-amplitude guide drawn in
+/// every channel row. `nil` components mean "use the adaptive system color",
+/// preserving EVA's established gray/white appearance across light and dark
+/// mode until the user explicitly chooses a color.
+nonisolated struct WaveformZeroLineColor: Codable, Equatable {
+    var red: Double?
+    var green: Double?
+    var blue: Double?
+
+    static let defaultValue = WaveformZeroLineColor()
+
+    init(red: Double? = nil, green: Double? = nil, blue: Double? = nil) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+    }
+
+    var customRGB: (red: Double, green: Double, blue: Double)? {
+        guard let red, let green, let blue else { return nil }
+        return (
+            Self.clamped(red),
+            Self.clamped(green),
+            Self.clamped(blue)
+        )
+    }
+
+    static let defaultData: Data = (try? JSONEncoder().encode(defaultValue)) ?? Data()
+
+    static func decoded(from data: Data) -> WaveformZeroLineColor {
+        guard !data.isEmpty,
+              let value = try? JSONDecoder().decode(WaveformZeroLineColor.self, from: data)
+        else { return defaultValue }
+        guard let rgb = value.customRGB else { return defaultValue }
+        return WaveformZeroLineColor(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    var encodedData: Data {
+        (try? JSONEncoder().encode(self)) ?? Self.defaultData
+    }
+
+    private static func clamped(_ value: Double) -> Double {
+        min(max(value, 0), 1)
+    }
+}
+
+/// Avoid decoding the same tiny preferences payload once per channel row on
+/// every parent view update. This mirrors `WaveformTimeMarkerStyleCache` below.
+@MainActor
+enum WaveformZeroLineColorCache {
+    private static var cachedData: Data?
+    private static var cachedColor = WaveformZeroLineColor.defaultValue
+
+    static func color(for data: Data) -> WaveformZeroLineColor {
+        if let cachedData, cachedData == data { return cachedColor }
+        let color = WaveformZeroLineColor.decoded(from: data)
+        cachedData = data
+        cachedColor = color
+        return color
+    }
 }
 
 nonisolated struct WaveformTimeMarkerStyle: Codable, Equatable {
@@ -265,6 +327,7 @@ private struct GeneralPreferencesView: View {
     @AppStorage(EVAGeneralPreferences.pixelAdaptiveWaveformRenderingKey) private var pixelAdaptiveWaveformRendering = true
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkersAcrossTracesKey) private var waveformTimeMarkersAcrossTraces = false
     @AppStorage(EVAGeneralPreferences.waveformTimeMarkerStyleKey) private var waveformTimeMarkerStyleData = WaveformTimeMarkerStyle.defaultData
+    @AppStorage(EVAGeneralPreferences.waveformZeroLineColorKey) private var waveformZeroLineColorData = WaveformZeroLineColor.defaultData
     @AppStorage(ToolbarButtonLabels.storageKey) private var showsToolbarButtonLabels = true
     @AppStorage(EVAGeneralPreferences.defaultSensitivityKey)
     private var defaultSensitivity = EVAGeneralPreferences.defaultSensitivity
@@ -286,6 +349,7 @@ private struct GeneralPreferencesView: View {
 
     var body: some View {
         let markerStyle = WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
+        let zeroLineColor = WaveformZeroLineColor.decoded(from: waveformZeroLineColorData)
 
         Form {
             Section {
@@ -362,6 +426,27 @@ private struct GeneralPreferencesView: View {
                      + "upward and downward, and more headroom costs fill rate on dense "
                      + "recordings. Clip marks are independent: there is always a "
                      + "ceiling, and they show where a trace hit it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                ColorPicker(
+                    "Zero line color",
+                    selection: Binding(
+                        get: { color(from: zeroLineColor) },
+                        set: { setWaveformZeroLineColor($0) }
+                    ),
+                    supportsOpacity: false
+                )
+                Button("Use System Color") {
+                    waveformZeroLineColorData = WaveformZeroLineColor.defaultData
+                }
+                .disabled(zeroLineColor.customRGB == nil)
+            } header: {
+                Text("Waveform Zero Line")
+            } footer: {
+                Text("Sets the horizontal 0 µV guide across waveform channel rows. The system color adapts automatically to light and dark mode.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -463,6 +548,22 @@ private struct GeneralPreferencesView: View {
         )
     }
 
+    private func color(from zeroLineColor: WaveformZeroLineColor) -> Color {
+        guard let rgb = zeroLineColor.customRGB else {
+            return Color(nsColor: .secondaryLabelColor)
+        }
+        return Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
+
+    private func setWaveformZeroLineColor(_ color: Color) {
+        guard let nsColor = NSColor(color).usingColorSpace(.deviceRGB) else { return }
+        waveformZeroLineColorData = WaveformZeroLineColor(
+            red: Double(nsColor.redComponent),
+            green: Double(nsColor.greenComponent),
+            blue: Double(nsColor.blueComponent)
+        ).encodedData
+    }
+
     private func setWaveformTimeMarkerColor(_ color: Color) {
         var style = WaveformTimeMarkerStyle.decoded(from: waveformTimeMarkerStyleData)
         guard let nsColor = NSColor(color).usingColorSpace(.deviceRGB) else { return }
@@ -554,19 +655,21 @@ private struct ProcessingDefaultsView: View {
             Section("BCG") {
                 Toggle("Auto-select proxy channel set on open", isOn: $defaults.bcgAutoSelectProxySet)
                 Picker("Default method", selection: $defaults.bcgDefaultMethod) {
-                    ForEach(BCGDetectionMethod.allCases) { Text($0.tabLabel).tag($0) }
+                    ForEach(BCGDetectionMethod.allCases.filter { $0 != .surrogatePCAS }) {
+                        Text($0.tabLabel).tag($0)
+                    }
                 }
             }
 
             Section("MRI Gradient Removal") {
                 Picker("Default family", selection: $defaults.gradientDefaultCategory) {
-                    ForEach(MRIGradientCategory.allCases) { Text($0.rawValue).tag($0) }
+                    ForEach(MRIGradientCategory.allCases) { Text($0.label).tag($0) }
                 }
                 .help("Which family the MR Gradient Removal sheet opens on for a newly-opened recording.")
                 Picker("Default Template method", selection: $defaults.gradientDefaultTemplateMethod) {
                     ForEach(MRIGradientCategory.template.methods) { Text($0.label).tag($0) }
                 }
-                Picker("Default FASTR method", selection: $defaults.gradientDefaultFASTRMethod) {
+                Picker("Default Slice-Based method", selection: $defaults.gradientDefaultFASTRMethod) {
                     ForEach(MRIGradientCategory.fastr.methods) { Text($0.label).tag($0) }
                 }
                 Picker("Compute backend", selection: $defaults.gradientComputeBackend) {
@@ -574,7 +677,7 @@ private struct ProcessingDefaultsView: View {
                 }
                 .disabled(!GradientTemplateCorrector.isMetalAvailable)
                 .help(GradientTemplateCorrector.isMetalAvailable
-                      ? "Applies to the FASTR family and to MAS/MAR/wAAS/wAAR. The GPU changes how fast a run is, never what it produces: every decision stays on the CPU and the backends are parity-tested. Falls back to the CPU on its own where a run is too small to be worth the round trip, or past what the kernels can hold."
+                      ? "Applies to the Slice-Based family and to MAS/MAR/wAAS/wAAR. The GPU changes how fast a run is, never what it produces: every decision stays on the CPU and the backends are parity-tested. Falls back to the CPU on its own where a run is too small to be worth the round trip, or past what the kernels can hold."
                       : "No compatible Metal GPU is available on this machine.")
                 Text("Fast AAS and Allen AAS have no GPU path and always run on the CPU.")
                     .font(.caption)
@@ -605,10 +708,18 @@ private struct ProcessingDefaultsView: View {
                 TimeFrequencyBandEditor(bands: $defaults.timeFrequencyBands)
             }
 
-            Section("Artifact Detection") {
-                Picker("Default method", selection: $defaults.artifactDetectionDefaultMethod) {
-                    ForEach(ArtifactDetectionMethod.selectableCases) { Text($0.rawValue).tag($0) }
+            Section("Rhythmicity Explorer") {
+                Picker("LAVI backend", selection: $defaults.rhythmicityUsesGPU) {
+                    Text("CPU (Accelerate FFT)").tag(false)
+                    Text("Automatic (Metal preferred)").tag(true)
                 }
+                .disabled(!RhythmicityMetalCoefficientProvider.isAvailable)
+                .help(RhythmicityMetalCoefficientProvider.isAvailable
+                      ? "Uses compiled Metal Morlet kernels when the selected workload is large enough to amortize GPU setup. Smaller work and any unsupported or failed GPU run automatically use the bounded Accelerate FFT path."
+                      : "No compatible Metal GPU or compiled Rhythmicity shader is available; the explorer uses bounded Accelerate FFT.")
+                Text("The result records the backend and precision actually used. Metal computes coefficient tiles in Float32; scientific boundaries are parity-tested against the Float64 CPU oracle.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section {

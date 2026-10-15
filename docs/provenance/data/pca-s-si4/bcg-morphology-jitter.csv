@@ -1,0 +1,6 @@
+axis,value,seeds,corrected_snr_mean,corrected_snr_sd,uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean
+bcg-morphology-jitter,0,30,2.722771,0.760230,0.991573,0.021576,14.242122,0.996626,0.577122,0.675546,15.907357
+bcg-morphology-jitter,0.1,30,2.585052,0.809274,1.091402,0.039563,14.395237,0.974675,0.558069,0.564308,15.907357
+bcg-morphology-jitter,0.2,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,15.907357
+bcg-morphology-jitter,0.4,30,1.509698,0.440387,1.554814,0.081912,14.201740,0.949261,0.629733,0.179797,15.907357
+bcg-morphology-jitter,0.8,30,1.183724,0.219699,1.946617,0.131796,13.516757,0.938702,0.756772,0.077037,15.907357

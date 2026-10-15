@@ -10,7 +10,7 @@
 //  may apply.
 //
 //  Triangle-triangle intersection and the self-intersection sweep the imported
-//  BEM quality gates use (EVA_RESOLVE2.md R3.1). A shell that folds through
+//  BEM quality gates use (ROADMAP.md Source & Forward Modeling, R3.1). A shell that folds through
 //  itself still solves and still produces a plausible-looking lead field, so this
 //  has to be checked rather than assumed.
 //

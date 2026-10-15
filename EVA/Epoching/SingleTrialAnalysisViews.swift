@@ -126,6 +126,7 @@ struct SingleTrialAnalysisSheet: View {
     }
 
     @State private var resultTab = ResultTab.trials
+    @State private var selectedMeasurementWindowID: UUID?
     @State private var trialSortOrder: [KeyPathComparator<SingleTrialAnalyzer.SingleTrialValue>] = [KeyPathComparator(\.trialIndex)]
     @State private var woodySortOrder: [KeyPathComparator<WoodyAlignmentAnalyzer.TrialShift>] = [KeyPathComparator(\.trialIndex)]
     @State private var rideSortOrder: [KeyPathComparator<RIDEAnalyzer.TrialLatency>] = [KeyPathComparator(\.trialIndex)]
@@ -217,8 +218,10 @@ struct SingleTrialAnalysisSheet: View {
         analysisSpan(fromWindows: viewModel.windows(for: .trialDiagnostics))
     }
 
-    /// The span Measurements/CWT/Woody run over: their own added window when one
-    /// exists, otherwise the dragged trace selection.
+    /// The bounding span used to decide whether Measurements/CWT/Woody are
+    /// runnable. Measurements computes every added window independently and CWT
+    /// passes every disjoint window to peak detection; only Woody truly consumes
+    /// this envelope (and it permits exactly one window).
     ///
     /// Unlike Trial Diagnostics, these three still fall back to the drag,
     /// because until a window is added the drag IS how the analysis span is set
@@ -238,6 +241,18 @@ struct SingleTrialAnalysisSheet: View {
         guard let start = valid.map(\.startMs).min(),
               let end = valid.map(\.endMs).max(), end > start else { return nil }
         return (start, end)
+    }
+
+    private var selectedMeasurementWindowResult: SingleTrialAnalyzer.WindowResult? {
+        if let selectedMeasurementWindowID,
+           let selected = viewModel.measurementWindowResults.first(where: { $0.id == selectedMeasurementWindowID }) {
+            return selected
+        }
+        return viewModel.measurementWindowResults.first
+    }
+
+    private var displayedMeasurementResult: SingleTrialAnalyzer.Result? {
+        selectedMeasurementWindowResult?.result ?? viewModel.result
     }
 
     private var activeRIDEComponentWindows: [TrialWindowSelection] {
@@ -327,9 +342,9 @@ struct SingleTrialAnalysisSheet: View {
                         setupSection
                         runBar
 
-                        if viewModel.analysisMode == .measurements, let result = viewModel.result {
+                        if viewModel.analysisMode == .measurements, let result = displayedMeasurementResult {
                             Divider()
-                            resultsSection(result)
+                            measurementResultsSection(result)
                         } else if viewModel.analysisMode == .woody, let result = currentWoodyResult {
                             Divider()
                             woodyResultsSection(result)
@@ -1345,7 +1360,7 @@ struct SingleTrialAnalysisSheet: View {
                             .toggleStyle(.checkbox)
                             .help("After alignment, decompose the aligned trials into amplitude modes (functional PCA) to summarize residual variability.")
                     }
-                    Text("The highlighted window restricts where peaks are detected. Denoising → CWT ridge peaks → non-linear alignment. Net shift is each trial's dominant-deflection latency relative to the template.")
+                    Text("The highlighted windows restrict where peaks are detected; gaps between them stay excluded. Denoising → CWT ridge peaks → non-linear alignment. Net shift is each trial's dominant-deflection latency relative to the template.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1520,21 +1535,42 @@ struct SingleTrialAnalysisSheet: View {
 
         let trials = measurementTrials(category: category, rawSignal: rawSignal)
 
-        let result = SingleTrialAnalyzer.analyze(
+        let windows = viewModel.windows(for: .measurements).filter { $0.endMs > $0.startMs }
+        if windows.isEmpty {
+            let result = SingleTrialAnalyzer.analyze(
+                averageSamples: averageSamples,
+                averageStimulusOffsetSamples: averageSegment.stimulusOffsetSamples,
+                samplingRate: averageSignal.samplingRate,
+                trials: trials,
+                windowStartMs: span.startMs,
+                windowEndMs: span.endMs,
+                adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
+                splitCount: viewModel.splitCount,
+                outlierThresholdSD: viewModel.outlierThresholdSD,
+                distributionChunkCount: viewModel.distributionChunkCount
+            )
+            viewModel.measurementWindowResults = []
+            selectedMeasurementWindowID = nil
+            viewModel.result = result
+            viewModel.statusMessage = result == nil ? "Could not compute a result for this window." : nil
+            return
+        }
+
+        let results = SingleTrialAnalyzer.analyzeWindows(
             averageSamples: averageSamples,
             averageStimulusOffsetSamples: averageSegment.stimulusOffsetSamples,
             samplingRate: averageSignal.samplingRate,
             trials: trials,
-            windowStartMs: span.startMs,
-            windowEndMs: span.endMs,
+            windows: windows,
             adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
             splitCount: viewModel.splitCount,
             outlierThresholdSD: viewModel.outlierThresholdSD,
             distributionChunkCount: viewModel.distributionChunkCount
         )
-
-        viewModel.result = result
-        viewModel.statusMessage = result == nil ? "Could not compute a result for this window." : nil
+        viewModel.measurementWindowResults = results
+        viewModel.result = results.first?.result
+        selectedMeasurementWindowID = results.first?.id
+        viewModel.statusMessage = results.isEmpty ? "Could not compute results for these windows." : nil
     }
 
     /// Scores every trial against its category's leave-one-out average, and —
@@ -1603,20 +1639,104 @@ struct SingleTrialAnalysisSheet: View {
             return
         }
 
-        let reference = TrialSimilarityAnalyzer.average(input.trials, reference: .mean) ?? []
+        guard let selectedDiagnostics = diagnosticRows(
+            input: input,
+            scored: scored,
+            samplingRate: rawSignal.samplingRate,
+            windowStartMs: windowStart,
+            windowEndMs: windowEnd
+        ) else {
+            viewModel.diagnosticsRows = []
+            viewModel.statusMessage = "Could not assemble diagnostics for \(selected)."
+            return
+        }
+        let reference = selectedDiagnostics.reference
+        let rows = selectedDiagnostics.rows
+
+        let doubles = input.trials.map { $0.samples.map(Double.init) }
+        var dashboardCategories = [
+            TrialDiagnosticsCategory(
+                name: selected,
+                rows: rows,
+                residuals: TrialDriftStatistics.residuals(trials: doubles, reference: reference),
+                convergence: TrialDriftStatistics.convergence(trials: doubles),
+                windowSeries: windowSeries(
+                    trials: input.trials,
+                    reference: reference,
+                    samplingRate: rawSignal.samplingRate
+                ),
+                trialWaveforms: Dictionary(
+                    uniqueKeysWithValues: doubles.enumerated().map { ($0.offset, $0.element) }
+                ),
+                averageWaveform: reference,
+                samplingRate: rawSignal.samplingRate,
+                stimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0,
+                alignment: TrialAlignmentSummary.analyze(
+                    trials: input.trials,
+                    samplingRate: rawSignal.samplingRate
+                ),
+                channelResiduals: TrialChannelResidualAnalyzer.analyze(
+                    trials: channelResidualTrials(
+                        category: selected,
+                        rawSignal: rawSignal,
+                        channelIndices: selectedChannelIndices
+                    ),
+                    samplingRate: rawSignal.samplingRate,
+                    windows: viewModel.windows(for: .trialDiagnostics)
+                )
+            )
+        ]
+        // Lightweight rows for the other scored categories feed the compact
+        // drift small multiples. The selected category remains first and keeps
+        // the heavier waveform/alignment payload used by every other tab.
+        for otherInput in inputs where otherInput.name != selected {
+            guard let otherScored = similarity.first(where: { $0.name == otherInput.name }),
+                  let otherDiagnostics = diagnosticRows(
+                    input: otherInput,
+                    scored: otherScored,
+                    samplingRate: rawSignal.samplingRate,
+                    windowStartMs: windowStart,
+                    windowEndMs: windowEnd
+                  ) else { continue }
+            dashboardCategories.append(
+                TrialDiagnosticsCategory(name: otherInput.name, rows: otherDiagnostics.rows)
+            )
+        }
+        viewModel.diagnosticsRows = dashboardCategories
+
+        // SNR is a multichannel measure, so the selection panel needs the whole
+        // net rather than the channel-resolved series the scores were built on.
+        // Sliced once here; dragging a threshold only re-scores.
+        viewModel.selectionTrialMatrices = multichannelTrials(category: selected, rawSignal: rawSignal)
+        viewModel.selectionBaselineSampleCount = max(
+            Int((-min(windowStart, 0) / 1000 * rawSignal.samplingRate).rounded()),
+            0
+        )
+        refreshTrialSelection()
+        viewModel.statusMessage = nil
+        withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded = false }
+    }
+
+    private func diagnosticRows(
+        input: TrialSimilarityAnalyzer.CategoryInput,
+        scored: TrialSimilarityAnalyzer.CategoryResult,
+        samplingRate: Double,
+        windowStartMs: Double,
+        windowEndMs: Double
+    ) -> (reference: [Double], rows: [TrialDiagnosticsRow])? {
+        guard let reference = TrialSimilarityAnalyzer.average(input.trials, reference: .mean) else { return nil }
         let measures = SingleTrialAnalyzer.analyze(
             averageSamples: reference.map(Float.init),
             averageStimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0,
-            samplingRate: rawSignal.samplingRate,
+            samplingRate: samplingRate,
             trials: input.trials,
-            windowStartMs: windowStart,
-            windowEndMs: windowEnd,
+            windowStartMs: windowStartMs,
+            windowEndMs: windowEndMs,
             adaptiveHalfWidthMs: viewModel.adaptiveHalfWidthMs,
             splitCount: viewModel.diagnosticsGroupCount,
             outlierThresholdSD: viewModel.outlierThresholdSD,
             distributionChunkCount: viewModel.distributionChunkCount
         )
-
         let rows = scored.trials.map { similarity -> TrialDiagnosticsRow in
             let measured = measures?.trials.first { $0.trialIndex == similarity.trialIndex }
             return TrialDiagnosticsRow(
@@ -1644,39 +1764,7 @@ struct SingleTrialAnalysisSheet: View {
                 ]
             )
         }
-
-        let doubles = input.trials.map { $0.samples.map(Double.init) }
-        viewModel.diagnosticsRows = [
-            TrialDiagnosticsCategory(
-                name: selected,
-                rows: rows,
-                residuals: TrialDriftStatistics.residuals(trials: doubles, reference: reference),
-                convergence: TrialDriftStatistics.convergence(trials: doubles),
-                windowSeries: windowSeries(
-                    trials: input.trials,
-                    reference: reference,
-                    samplingRate: rawSignal.samplingRate
-                ),
-                trialWaveforms: Dictionary(
-                    uniqueKeysWithValues: doubles.enumerated().map { ($0.offset, $0.element) }
-                ),
-                averageWaveform: reference,
-                samplingRate: rawSignal.samplingRate,
-                stimulusOffsetSamples: input.trials.first?.stimulusOffsetSamples ?? 0
-            )
-        ]
-
-        // SNR is a multichannel measure, so the selection panel needs the whole
-        // net rather than the channel-resolved series the scores were built on.
-        // Sliced once here; dragging a threshold only re-scores.
-        viewModel.selectionTrialMatrices = multichannelTrials(category: selected, rawSignal: rawSignal)
-        viewModel.selectionBaselineSampleCount = max(
-            Int((-min(windowStart, 0) / 1000 * rawSignal.samplingRate).rounded()),
-            0
-        )
-        refreshTrialSelection()
-        viewModel.statusMessage = nil
-        withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded = false }
+        return (reference, rows)
     }
 
     // MARK: - Committing the review (ROADMAP TW-5)
@@ -1862,6 +1950,35 @@ struct SingleTrialAnalysisSheet: View {
                 guard lower <= upper else { return [Float]() }
                 return Array(channel[lower ... upper])
             }
+        }
+    }
+
+    /// The selected channels kept separate, rather than averaged into the one
+    /// waveform used by the ordinary similarity score. That distinction is
+    /// what makes channel-local residual attribution possible.
+    private func channelResidualTrials(
+        category: String,
+        rawSignal: MFFSignalData,
+        channelIndices: [Int]
+    ) -> [TrialChannelResidualAnalyzer.TrialInput] {
+        let validChannels = channelIndices.filter { rawSignal.data.indices.contains($0) }
+        return rawSegments.filter { $0.category == category }.enumerated().map { trialIndex, segment in
+            let channels = validChannels.compactMap { channelIndex -> TrialChannelResidualAnalyzer.ChannelInput? in
+                let series = rawSignal.data[channelIndex]
+                let lower = max(segment.startSample, 0)
+                let upper = min(segment.endSample, series.count - 1)
+                guard lower <= upper else { return nil }
+                return TrialChannelResidualAnalyzer.ChannelInput(
+                    channelIndex: channelIndex,
+                    channelName: channelName(channelIndex),
+                    samples: Array(series[lower ... upper])
+                )
+            }
+            return TrialChannelResidualAnalyzer.TrialInput(
+                trialIndex: trialIndex,
+                stimulusOffsetSamples: segment.stimulusOffsetSamples,
+                channels: channels
+            )
         }
     }
 
@@ -2110,9 +2227,15 @@ struct SingleTrialAnalysisSheet: View {
         config.appliesDenoising = viewModel.cwtAppliesDenoising
         config.peakSource = viewModel.cwtPeakSource
         config.engine = viewModel.cwtEngine
-        let span = primaryAnalysisSpan(for: .cwtRidge)
-        config.windowStartMs = span?.startMs
-        config.windowEndMs = span?.endMs
+        let windows = viewModel.windows(for: .cwtRidge).filter { $0.endMs > $0.startMs }
+        config.detectionWindows = windows.map {
+            CWTRidgePipeline.DetectionWindow(startMs: $0.startMs, endMs: $0.endMs)
+        }
+        if windows.isEmpty {
+            let span = primaryAnalysisSpan(for: .cwtRidge)
+            config.windowStartMs = span?.startMs
+            config.windowEndMs = span?.endMs
+        }
         config.sakoeChibaBand = max(2, viewModel.cwtSakoeChibaBand)
         config.maxShiftSamples = max(1, Int((viewModel.cwtMaxShiftMs / 1000.0 * samplingRate).rounded()))
         config.priorSigmaSamples = max(1, viewModel.cwtPriorSigmaMs / 1000.0 * samplingRate)
@@ -2284,6 +2407,31 @@ struct SingleTrialAnalysisSheet: View {
     }
 
     // MARK: - Results
+
+    @ViewBuilder
+    private func measurementResultsSection(_ fallback: SingleTrialAnalyzer.Result) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !viewModel.measurementWindowResults.isEmpty {
+                HStack(spacing: 10) {
+                    Text("Analysis window")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("Analysis window", selection: Binding(
+                        get: { selectedMeasurementWindowResult?.id },
+                        set: { selectedMeasurementWindowID = $0 }
+                    )) {
+                        ForEach(viewModel.measurementWindowResults) { windowResult in
+                            Text("\(windowResult.window.name)  \(Int(windowResult.window.startMs.rounded()))–\(Int(windowResult.window.endMs.rounded())) ms")
+                                .tag(Optional(windowResult.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 260)
+                }
+            }
+            resultsSection(selectedMeasurementWindowResult?.result ?? fallback)
+        }
+    }
 
     @ViewBuilder
     private func resultsSection(_ result: SingleTrialAnalyzer.Result) -> some View {
@@ -3079,7 +3227,7 @@ struct SingleTrialAnalysisSheet: View {
     // MARK: - Export
 
     private func exportTrialMatrix() {
-        guard let result = viewModel.result else { return }
+        guard let result = displayedMeasurementResult else { return }
         var lines = [
             "Trial\tTimeSeconds\tMean\tPeakAtAvgLatencyPositive\tPeakAtAvgLatencyNegative\t"
                 + "PeakOwnLatencyPositive\tPeakLatencyPositiveMs\tPeakOwnLatencyNegative\tPeakLatencyNegativeMs\t"
@@ -3109,7 +3257,8 @@ struct SingleTrialAnalysisSheet: View {
         panel.allowedContentTypes = [.commaSeparatedText, .plainText]
         panel.isExtensionHidden = false
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "SingleTrialValues (\(viewModel.selectedCategory ?? "category")).tsv"
+        let windowSuffix = selectedMeasurementWindowResult.map { " - \($0.window.name)" } ?? ""
+        panel.nameFieldStringValue = "SingleTrialValues (\(viewModel.selectedCategory ?? "category")\(windowSuffix)).tsv"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? data.write(to: url)
     }

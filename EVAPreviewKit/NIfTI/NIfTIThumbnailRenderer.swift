@@ -31,13 +31,14 @@ nonisolated struct NIfTIThumbnailRenderer: Sendable {
             context.fill(rect)
             guard let image = NIfTISliceRenderer.image(
                 for: model.slices[index],
-                window: model.intensityWindow
+                window: model.intensityWindow,
+                displayMode: model.displayMode
             ) else { continue }
             let fitted = aspectFit(
                 aspect: model.slices[index].physicalAspectRatio,
                 inside: rect.insetBy(dx: gap, dy: gap)
             )
-            context.interpolationQuality = .high
+            context.interpolationQuality = model.displayMode.isLabelMap ? .none : .high
             context.draw(image, in: fitted)
         }
 

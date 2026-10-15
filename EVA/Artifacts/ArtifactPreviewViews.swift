@@ -775,6 +775,311 @@ struct ArtifactOBSOptionsButton: View {
     }
 }
 
+struct ArtifactPCASOptionsButton: View {
+    @Binding var artifact: DefinedArtifact
+    let currentSignal: MFFSignalData
+    let hasBroadbandInput: Bool
+    let rWaveCount: Int
+    let hasCompleteGeometry: Bool
+    let onSettingsChange: () -> Void
+
+    @State private var showsOptions = false
+
+    var body: some View {
+        Button("Options...") {
+            showsOptions = true
+        }
+        .font(.caption)
+        .sheet(isPresented: $showsOptions) {
+            ArtifactPCASOptionsSheet(
+                artifact: $artifact,
+                currentSignal: currentSignal,
+                hasBroadbandInput: hasBroadbandInput,
+                rWaveCount: rWaveCount,
+                hasCompleteGeometry: hasCompleteGeometry,
+                onSettingsChange: onSettingsChange
+            )
+        }
+    }
+}
+
+struct ArtifactPCASOptionsSheet: View {
+    @Binding var artifact: DefinedArtifact
+    let currentSignal: MFFSignalData
+    let hasBroadbandInput: Bool
+    let rWaveCount: Int
+    let hasCompleteGeometry: Bool
+    let onSettingsChange: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    private var settings: BCGSurrogateSettings {
+        artifact.pcaSSettings ?? .default
+    }
+
+    private var selectedBeatCount: Int {
+        settings.beatSource == .rWaves ? rWaveCount : artifact.eventCount
+    }
+
+    private var isReady: Bool {
+        hasCompleteGeometry
+            && selectedBeatCount >= settings.minimumAcceptedBeats
+            && (settings.inputSource != .broadband || hasBroadbandInput)
+    }
+
+    private func settingBinding<Value>(
+        _ keyPath: WritableKeyPath<BCGSurrogateSettings, Value>
+    ) -> Binding<Value> {
+        Binding {
+            settings[keyPath: keyPath]
+        } set: { value in
+            var updated = settings
+            updated[keyPath: keyPath] = value
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    private var beatSourceBinding: Binding<BCGSurrogateBeatSource> {
+        Binding {
+            settings.beatSource
+        } set: { source in
+            guard source != .rWaves || rWaveCount > 0 else { return }
+            var updated = settings
+            updated.beatSource = source
+            if source == .rWaves, updated.patternSearch == .reviewedExemplar {
+                updated.patternSearch = .iterative
+            }
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    private var lowBandBinding: Binding<Double> {
+        Binding {
+            settings.bandLowHz
+        } set: { value in
+            var updated = settings
+            updated.bandLowHz = min(max(value, 0.1), max(updated.bandHighHz - 0.5, 0.1))
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    private var highBandBinding: Binding<Double> {
+        Binding {
+            settings.bandHighHz
+        } set: { value in
+            var updated = settings
+            let nyquist = max(currentSignal.samplingRate / 2 - 0.1, 1)
+            updated.bandHighHz = min(max(value, updated.bandLowHz + 0.5), nyquist)
+            artifact.pcaSSettings = updated
+            artifact.pcaSReport = nil
+            onSettingsChange()
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("PCA-S Options")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Label(
+                    isReady ? "Ready" : "Needs input",
+                    systemImage: isReady ? "checkmark.circle" : "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(isReady ? Color.secondary : Color.orange)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    GroupBox("Inputs") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Fit topographies from", selection: settingBinding(\.inputSource)) {
+                                ForEach(BCGSurrogateInputSource.allCases) { source in
+                                    Text(source.label).tag(source)
+                                }
+                            }
+                            Text(settings.inputSource == .broadband
+                                 ? "Fits the 1–20 Hz artifact evidence from the pre-filter signal, then applies the spatial operator to the current Clean Artifacts signal. The active temporal filter is preserved."
+                                 : "Fits and applies PCA-S using the signal currently entering Clean Artifacts. Use this when the active filter already contains the BCG morphology you want to model.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            if settings.inputSource == .broadband && !hasBroadbandInput {
+                                Label("Broadband pre-filter data is not available in this workflow.", systemImage: "exclamationmark.triangle")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+
+                            Divider()
+
+                            Picker("Beat anchors", selection: beatSourceBinding) {
+                                Text("Defined BCG matches (\(artifact.eventCount))")
+                                    .tag(BCGSurrogateBeatSource.artifactEvents)
+                                Text(rWaveCount > 0
+                                     ? "Detected R-waves (\(rWaveCount))"
+                                     : "Detected R-waves (run ECG detection first)")
+                                    .tag(BCGSurrogateBeatSource.rWaves)
+                                    .disabled(rWaveCount == 0)
+                            }
+
+                            if settings.beatSource == .rWaves {
+                                HStack {
+                                    Text("R-wave → BCG lag")
+                                    Spacer()
+                                    TextField(
+                                        "Seconds",
+                                        value: settingBinding(\.rWaveLagSeconds),
+                                        format: .number.precision(.fractionLength(3))
+                                    )
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                                    Text("s")
+                                        .foregroundStyle(.secondary)
+                                }
+                                Text("The lag shifts electrical R-wave anchors to the expected mechanical BCG complex before epochs are cut.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Label(
+                                "\(selectedBeatCount) anchors selected · \(settings.minimumAcceptedBeats) required",
+                                systemImage: selectedBeatCount >= settings.minimumAcceptedBeats
+                                    ? "checkmark.circle" : "exclamationmark.triangle"
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(selectedBeatCount >= settings.minimumAcceptedBeats ? Color.secondary : Color.orange)
+
+                            Label(
+                                hasCompleteGeometry ? "Complete 3D channel coordinates" : "Complete 3D coordinates required",
+                                systemImage: hasCompleteGeometry ? "checkmark.circle" : "exclamationmark.triangle"
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(hasCompleteGeometry ? Color.secondary : Color.orange)
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Artifact model") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Template band")
+                                Spacer()
+                                TextField("Low", value: lowBandBinding, format: .number.precision(.fractionLength(1)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 64)
+                                Text("–")
+                                TextField("High", value: highBandBinding, format: .number.precision(.fractionLength(1)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 64)
+                                Text("Hz")
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Picker("Pattern search", selection: settingBinding(\.patternSearch)) {
+                                ForEach(BCGArtifactPatternSearch.allCases) { mode in
+                                    Text(mode.label).tag(mode)
+                                }
+                            }
+
+                            HStack {
+                                Text("Beat match")
+                                Slider(value: settingBinding(\.correlationThreshold), in: 0.2...0.95)
+                                Text(settings.correlationThreshold, format: .number.precision(.fractionLength(2)))
+                                    .monospacedDigit()
+                                    .frame(width: 38)
+                            }
+                            .disabled(settings.patternSearch == .reviewedExemplar)
+
+                            HStack {
+                                Text("Component reliability")
+                                Slider(value: settingBinding(\.minimumComponentReliability), in: 0.3...0.99)
+                                Text(settings.minimumComponentReliability, format: .number.precision(.fractionLength(2)))
+                                    .monospacedDigit()
+                                    .frame(width: 38)
+                            }
+
+                            Stepper(
+                                "Minimum accepted beats: \(settings.minimumAcceptedBeats)",
+                                value: settingBinding(\.minimumAcceptedBeats),
+                                in: 4...100
+                            )
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    GroupBox("Source separation") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Head model", selection: settingBinding(\.headModel)) {
+                                ForEach(BCGSurrogateHeadModel.allCases) { model in
+                                    Text(model.displayName).tag(model)
+                                }
+                            }
+                            Text(settings.headModel.summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Stepper(
+                                "Regional sources: \(settings.regionalSourceCount)",
+                                value: settingBinding(\.regionalSourceCount),
+                                in: 8...60
+                            )
+
+                            HStack {
+                                Text("Brain regularization")
+                                Slider(value: settingBinding(\.brainRegularization), in: 0.002...0.1)
+                                Text(settings.brainRegularization, format: .number.precision(.fractionLength(3)))
+                                    .monospacedDigit()
+                                    .frame(width: 46)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+
+                    if let report = artifact.pcaSReport {
+                        GroupBox("Last run") {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(report.summary)
+                                Text("Reliability: " + report.artifactComponentReliabilities
+                                    .map { String(format: "%.2f", $0) }.joined(separator: ", "))
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 4)
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 620, height: 720)
+        .onAppear {
+            if artifact.pcaSSettings == nil {
+                artifact.pcaSSettings = .default
+            }
+            if settings.beatSource == .rWaves, rWaveCount == 0 {
+                var updated = settings
+                updated.beatSource = .artifactEvents
+                artifact.pcaSSettings = updated
+            }
+        }
+    }
+}
+
 struct ArtifactLocalTemplateOptionsButton: View {
     @Binding var artifact: DefinedArtifact
     let onSettingsChange: () -> Void
@@ -1560,12 +1865,19 @@ struct ArtifactOBSOptionsSheet: View {
 struct ArtifactCleaningPreviewData: Sendable {
     var beforeAverage: ArtifactTemplateAverage?
     var afterAverage: ArtifactTemplateAverage?
+    var removedAverage: ArtifactTemplateAverage?
     var beforeTopographyValues: [Double]?
     var afterTopographyValues: [Double]?
     var topographyScale: Double?
     var waveformScaleMicrovolts: Float?
     var afterScaleMicrovolts: Float?
     var reductionMetrics: ArtifactCleaningReductionMetrics?
+    var continuousRemovalMetrics: ArtifactCleaningContinuousRemovalMetrics?
+}
+
+struct ArtifactCleaningContinuousRemovalMetrics: Sendable {
+    var removedPeakMicrovolts: Float
+    var removedRMSMicrovolts: Float
 }
 
 struct ArtifactCleaningReductionMetrics: Sendable {
@@ -1622,7 +1934,9 @@ struct ArtifactCleaningPreview: View {
     }
 
     private var previewHeight: CGFloat {
-        artifact.topography != nil && layout != nil ? 540 : 285
+        if artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition { return 190 }
+        if artifact.isCorneoRetinalDefinition { return 390 }
+        return artifact.topography != nil && layout != nil ? 540 : 285
     }
 
     var body: some View {
@@ -1658,7 +1972,7 @@ struct ArtifactCleaningPreview: View {
             if let beforeAverage = previewData?.beforeAverage {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("Average Waveform")
+                        Text(artifact.isCorneoRetinalDefinition ? "Blink-mask aligned waveform" : "Average Waveform")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -1672,16 +1986,25 @@ struct ArtifactCleaningPreview: View {
                     if let metrics = previewData?.reductionMetrics {
                         reductionMetricsView(metrics)
                     }
+                    if artifact.isCorneoRetinalDefinition,
+                       let metrics = previewData?.continuousRemovalMetrics {
+                        HStack(spacing: 8) {
+                            metricChip(title: "Whole-recording removed peak", value: Self.microvoltString(metrics.removedPeakMicrovolts), reduction: nil)
+                            metricChip(title: "Whole-recording removed RMS", value: Self.microvoltString(metrics.removedRMSMicrovolts), reduction: nil)
+                        }
+                    }
                     HStack(spacing: 10) {
                         waveformPreview(
-                            title: "Before",
+                            title: artifact.type == .saccadicSpike ? "Subtracted SPs" : "Before",
                             subtitle: sharedScaleSubtitle,
-                            average: beforeAverage,
+                            average: artifact.type == .saccadicSpike
+                                ? (previewData?.removedAverage ?? beforeAverage)
+                                : beforeAverage,
                             scale: previewData?.waveformScaleMicrovolts
                         )
                         if let afterAverage = previewData?.afterAverage {
                             waveformPreview(
-                                title: "After",
+                                title: artifact.type == .saccadicSpike ? "With SPs removed" : "After",
                                 subtitle: afterWaveformSubtitle,
                                 average: afterAverage,
                                 scale: afterWaveformScale
@@ -1690,6 +2013,42 @@ struct ArtifactCleaningPreview: View {
                             missingPreview(title: "After")
                         }
                     }
+                    if artifact.isCorneoRetinalDefinition {
+                        Text("These windows are centered on the preliminary blink masks for verification. MAAC-2 removes the continuous eye-position field; it does not remove the eyelid blink waveform itself.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else if artifact.isMovementPCADefinition,
+                      let metrics = previewData?.continuousRemovalMetrics {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Whole-signal removal")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        metricChip(title: "Removed peak", value: Self.microvoltString(metrics.removedPeakMicrovolts), reduction: nil)
+                        metricChip(title: "Removed RMS", value: Self.microvoltString(metrics.removedRMSMicrovolts), reduction: nil)
+                    }
+                    Text("MAAC-3 evaluates and removes factors within each epoch independently; an event-locked average would hide that epoch-specific behavior.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if artifact.isMuscleBSSCCADefinition,
+                      let metrics = previewData?.continuousRemovalMetrics {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Whole-signal removal")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        metricChip(title: "Removed peak", value: Self.microvoltString(metrics.removedPeakMicrovolts), reduction: nil)
+                        metricChip(title: "Removed RMS", value: Self.microvoltString(metrics.removedRMSMicrovolts), reduction: nil)
+                    }
+                    Text("MAAC-4 estimates BSS-CCA sources per stored epoch or overlapped continuous window. Reviewable spectral suggestions determine which source back-projections are removed.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else if isLoadingPreview {
                 loadingPreview(title: "Average Waveform", height: 110)
@@ -1899,18 +2258,126 @@ struct ArtifactCleaningPreview: View {
         let beforeAverage = average(in: beforeSignal, artifact: artifact)
             ?? artifact.average.map(baselineAlignedAverage)
         let afterAverage = afterSignal.flatMap { average(in: $0, artifact: artifact) }
+        let removedAverage = difference(beforeAverage, afterAverage)
         let beforeTopographyValues = beforeAverage.flatMap(centerValues(from:))
         let afterTopographyValues = afterAverage.flatMap(centerValues(from:))
+        let previewTopographyScale = topographyScale(beforeTopographyValues, afterTopographyValues)
+        let previewWaveformScale = waveformScale(beforeAverage, afterAverage)
+        let previewAfterScale = waveformScale(afterAverage)
+        let previewReductionMetrics = reductionMetrics(
+            beforeAverage: beforeAverage,
+            afterAverage: afterAverage,
+            artifact: artifact
+        )
+        let continuousMetrics: ArtifactCleaningContinuousRemovalMetrics? = (artifact.isCorneoRetinalDefinition || artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition)
+            ? afterSignal.flatMap {
+                Self.continuousRemovalMetrics(
+                    before: beforeSignal,
+                    after: $0,
+                    preferredChannels: artifact.selectedChannelIndices
+                )
+            }
+            : nil
 
         return ArtifactCleaningPreviewData(
             beforeAverage: beforeAverage,
             afterAverage: afterAverage,
+            removedAverage: removedAverage,
             beforeTopographyValues: beforeTopographyValues,
             afterTopographyValues: afterTopographyValues,
-            topographyScale: topographyScale(beforeTopographyValues, afterTopographyValues),
-            waveformScaleMicrovolts: waveformScale(beforeAverage, afterAverage),
-            afterScaleMicrovolts: waveformScale(afterAverage),
-            reductionMetrics: reductionMetrics(beforeAverage: beforeAverage, afterAverage: afterAverage, artifact: artifact)
+            topographyScale: previewTopographyScale,
+            waveformScaleMicrovolts: previewWaveformScale,
+            afterScaleMicrovolts: previewAfterScale,
+            reductionMetrics: previewReductionMetrics,
+            continuousRemovalMetrics: continuousMetrics
+        )
+    }
+
+    nonisolated private static func continuousRemovalMetrics(
+        before: MFFSignalData,
+        after: MFFSignalData,
+        preferredChannels: [Int]
+    ) -> ArtifactCleaningContinuousRemovalMetrics? {
+        guard before.data.count == after.data.count,
+              let sampleCount = before.data.first?.count,
+              sampleCount > 0 else { return nil }
+        let preferred = preferredChannels.filter {
+            before.data.indices.contains($0)
+                && after.data.indices.contains($0)
+                && before.data[$0].count == sampleCount
+                && after.data[$0].count == sampleCount
+        }
+        let channels = preferred.isEmpty
+            ? before.data.indices.filter {
+                after.data.indices.contains($0)
+                    && before.data[$0].count == sampleCount
+                    && after.data[$0].count == sampleCount
+            }
+            : preferred
+        guard !channels.isEmpty else { return nil }
+        var peak: Float = 0
+        var squareSum = 0.0
+        var count = 0
+        for channel in channels {
+            for sample in 0..<sampleCount {
+                let removed = before.data[channel][sample] - after.data[channel][sample]
+                guard removed.isFinite else { continue }
+                peak = max(peak, abs(removed))
+                squareSum += Double(removed) * Double(removed)
+                count += 1
+            }
+        }
+        guard count > 0 else { return nil }
+        return ArtifactCleaningContinuousRemovalMetrics(
+            removedPeakMicrovolts: peak,
+            removedRMSMicrovolts: Float(sqrt(squareSum / Double(count)))
+        )
+    }
+
+    nonisolated private static func difference(
+        _ before: ArtifactTemplateAverage?,
+        _ after: ArtifactTemplateAverage?
+    ) -> ArtifactTemplateAverage? {
+        guard let before, let after,
+              before.allChannelSamples.count == after.allChannelSamples.count else { return nil }
+        var samples = before.allChannelSamples
+        for channel in samples.indices {
+            guard samples[channel].count == after.allChannelSamples[channel].count else { return nil }
+            for index in samples[channel].indices {
+                let beforeValue: Float = samples[channel][index]
+                let afterValue: Float = after.allChannelSamples[channel][index]
+                samples[channel][index] = beforeValue - afterValue
+            }
+        }
+        var summaries: [ArtifactTemplateChannelSummary] = []
+        summaries.reserveCapacity(samples.count)
+        for channel in samples.indices {
+            let values = samples[channel]
+            var peak: Float = 0
+            var squareSum: Double = 0
+            for value in values {
+                peak = max(peak, abs(value))
+                squareSum += Double(value) * Double(value)
+            }
+            let squareMean = values.isEmpty ? 0 : squareSum / Double(values.count)
+            summaries.append(ArtifactTemplateChannelSummary(
+                channelIndex: channel,
+                peakAbsoluteMicrovolts: peak,
+                rmsMicrovolts: Float(sqrt(squareMean))
+            ))
+        }
+        summaries.sort {
+            $0.peakAbsoluteMicrovolts == $1.peakAbsoluteMicrovolts
+                ? $0.channelIndex < $1.channelIndex
+                : $0.peakAbsoluteMicrovolts > $1.peakAbsoluteMicrovolts
+        }
+        return ArtifactTemplateAverage(
+            samplingRate: before.samplingRate,
+            windowSizeSeconds: before.windowSizeSeconds,
+            eventCount: min(before.eventCount, after.eventCount),
+            selectedChannelIndices: before.selectedChannelIndices,
+            allChannelSamples: samples,
+            channelSummaries: summaries
         )
     }
 
@@ -1990,15 +2457,25 @@ struct ArtifactCleaningPreview: View {
     }
 
     nonisolated private static func average(in signal: MFFSignalData, artifact: DefinedArtifact) -> ArtifactTemplateAverage? {
+        let events = artifact.isCorneoRetinalDefinition
+            ? (artifact.corneoRetinalBlinkEvents ?? [])
+            : artifact.events
         guard signal.samplingRate > 0,
               let sampleCount = signal.data.first?.count,
               sampleCount > 0,
-              !artifact.events.isEmpty else {
+              !events.isEmpty else {
             return nil
         }
 
+        let crdWindowSeconds = min(
+            max(0.6, (events.compactMap(\.durationSeconds).max() ?? 0) + 0.2),
+            2.0
+        )
+        let requestedWindowSeconds = artifact.isCorneoRetinalDefinition
+            ? crdWindowSeconds
+            : artifact.windowSizeSeconds
         let windowSamples = artifact.average?.allChannelSamples.first?.count
-            ?? max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
+            ?? max(Int((requestedWindowSeconds * signal.samplingRate).rounded()), 3)
         guard windowSamples > 1, sampleCount >= windowSamples else { return nil }
 
         let edgeSamples = previewBaselineEdgeSamples(windowSamples: windowSamples, samplingRate: signal.samplingRate)
@@ -2011,8 +2488,8 @@ struct ArtifactCleaningPreview: View {
         // original (serial, event-outer) accumulation semantics exactly.
         struct ValidWindow { let start: Int; let end: Int }
         var validWindows: [ValidWindow] = []
-        validWindows.reserveCapacity(artifact.events.count)
-        for event in artifact.events {
+        validWindows.reserveCapacity(events.count)
+        for event in events {
             let center = Int((event.centerTimeSeconds * signal.samplingRate).rounded())
             let start = center - windowSamples / 2
             let end = start + windowSamples

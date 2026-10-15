@@ -50,7 +50,7 @@
 import Foundation
 
 /// A concentric sphere stretched by a per-axis factor into an ellipsoid.
-nonisolated struct ForwardEllipsoidModel: Codable, Sendable, Equatable {
+nonisolated struct ForwardEllipsoidModel: Codable, Sendable, Hashable {
     var name: String
     /// The reference concentric sphere. All shells are warped by the same
     /// `axisScale`, so they stay nested and each keeps its conductivity.

@@ -76,7 +76,7 @@ nonisolated enum GradientTemplateCorrector {
         guard config.upsampleFactor >= 1 else {
             throw GradientCorrectionError.invalidConfiguration("upsampleFactor must be at least 1")
         }
-        guard config.numberOfSlices >= 1 else {
+        guard config.acquisitionSchedule != nil || config.numberOfSlices >= 1 else {
             throw GradientCorrectionError.invalidConfiguration("numberOfSlices must be at least 1")
         }
         guard (0...1).contains(config.relativeTriggerPosition) else {
@@ -84,13 +84,34 @@ nonisolated enum GradientTemplateCorrector {
         }
 
         let factor = config.upsampleFactor
-        let layout = try GradientEpochLayout.build(
+        let acquisitionSchedule = config.acquisitionSchedule
+            ?? .uniform(groupsPerVolume: config.numberOfSlices)
+        var layout = try GradientEpochLayout.build(
             volumeTriggers: volumeTriggers,
             sampleCount: sampleCount,
-            slicesPerVolume: config.numberOfSlices,
+            acquisitionSchedule: acquisitionSchedule,
+            samplingRate: samplingRate,
             upsampleFactor: factor,
             relativeTriggerPosition: config.relativeTriggerPosition
         )
+
+        // A recording that stops one period after its last trigger is short of
+        // the final window's closing sample — the next epoch's trigger, which
+        // was never recorded. Rather than drop that epoch, or leave the alignment
+        // search only shifts that move it off its own artifact (shift 0 does not
+        // fit), the missing sample repeats the recording's last one. It is
+        // cropped from the output again, so nothing outside the recording is
+        // ever returned.
+        let closingPadding = layout.lacksOnlyClosingSample ? 1 : 0
+        if closingPadding > 0 {
+            layout = layout.extended(bySamples: closingPadding, upsampleFactor: factor)
+        }
+        let workingCount = sampleCount + closingPadding
+        func working(_ channel: [Float]) -> [Float] {
+            closingPadding > 0
+                ? channel + [Float](repeating: channel[sampleCount - 1], count: closingPadding)
+                : channel
+        }
 
         var setupWarnings: [GradientCorrectionWarning] = []
 
@@ -148,12 +169,16 @@ nonisolated enum GradientTemplateCorrector {
             channels,
             excluding: config.excludedChannels
         )
+        let alignmentSignal = config.alignmentEnabled
+            ? GradientSincResampler.upsample(working(channels[diagnosticChannel]), factor: factor)
+            : []
         let searchRadius = config.alignmentEnabled
-            ? (config.alignmentSearchRadius ?? GradientEpochAligner.defaultSearchRadius(period: layout.period))
+            ? (config.alignmentSearchRadius
+                ?? GradientEpochAligner.defaultSearchRadius(referenceSignal: alignmentSignal, layout: layout))
             : 0
         let alignment = searchRadius > 0
             ? GradientEpochAligner.align(
-                referenceSignal: GradientSincResampler.upsample(channels[diagnosticChannel], factor: factor),
+                referenceSignal: alignmentSignal,
                 layout: layout,
                 searchRadius: searchRadius,
                 estimatesSubSample: config.subSampleAlignment
@@ -176,7 +201,7 @@ nonisolated enum GradientTemplateCorrector {
         func isEligible(_ epoch: Int) -> Bool { donorEligible[epoch] }
 
         let plan = GradientBatchPlan(
-            sampleCount: sampleCount,
+            sampleCount: workingCount,
             upsampleFactor: factor,
             epochCount: epochCount,
             windowLength: length,
@@ -264,7 +289,7 @@ nonisolated enum GradientTemplateCorrector {
             try Task.checkCancellation()
             let width = tile.count
             let slotCount = width * epochCount
-            let tileInputs = tile.map { channels[$0] }
+            let tileInputs = tile.map { working(channels[$0]) }
             let diagnosticSlot = tile.firstIndex(of: diagnosticChannel)
 
             // Stage 1 — upsample and lift every epoch onto the aligned grid.
@@ -493,7 +518,11 @@ nonisolated enum GradientTemplateCorrector {
                 }
             }
 
-            for slot in 0..<width { corrected[tile[slot]] = cleaned[slot] }
+            for slot in 0..<width {
+                corrected[tile[slot]] = closingPadding > 0
+                    ? Array(cleaned[slot].prefix(sampleCount))
+                    : cleaned[slot]
+            }
             advance()
         }
 
@@ -519,7 +548,8 @@ nonisolated enum GradientTemplateCorrector {
                 epochs: epochDiagnostics.sorted { $0.epoch < $1.epoch },
                 obsComponentCounts: obsComponentCounts,
                 ancAppliedChannels: ancAppliedChannels,
-                warnings: warnings
+                warnings: warnings,
+                upsampleFactor: factor
             )
         )
     }

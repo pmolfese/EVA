@@ -1,0 +1,4 @@
+axis,value,seeds,corrected_snr_mean,corrected_snr_sd,uncorrected_snr_mean,uncorrected_snr_sd,clean_distortion_db_mean,clean_distortion_db_sd,removed_variance_mean,accepted_beat_fraction_mean,nearest_source_mm_mean
+rate,250,30,2.079702,0.758668,1.255144,0.054120,14.302931,0.910890,0.569263,0.394363,15.907357
+rate,512,30,2.075436,0.744328,1.255356,0.054108,13.482390,1.182472,0.571196,0.391091,15.907357
+rate,1024,30,2.084146,0.761020,1.255419,0.054118,12.593051,1.177249,0.570704,0.389607,15.907357

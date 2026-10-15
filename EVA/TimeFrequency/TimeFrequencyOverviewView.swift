@@ -24,8 +24,9 @@ struct TFOverviewRender: Sendable {
     var timesMs: [Double]
     var measure: EpochingViewModel.TFMeasure
     var isDifference: Bool
+    var isBaselineSubtracted: Bool = false
 
-    nonisolated var isDiverging: Bool { measure == .power || isDifference }
+    nonisolated var isDiverging: Bool { measure == .power || isDifference || (measure == .wtpl && isBaselineSubtracted) }
 
     nonisolated func localIndex(for channel: Int) -> Int? {
         channelIndices.firstIndex(of: channel)
@@ -34,7 +35,7 @@ struct TFOverviewRender: Sendable {
     func detailRender(for channel: Int) -> TFRender? {
         guard let local = localIndex(for: channel) else { return nil }
         let grid = grids[local]
-        let values = grid.flatMap { $0 }
+        let values = grid.flatMap { $0 }.filter(\.isFinite)
         let range: ClosedRange<Double>
         if isDiverging {
             let extent = max(values.map(abs).max() ?? 1, 1e-6)
@@ -46,7 +47,8 @@ struct TFOverviewRender: Sendable {
             grid: grid, frequenciesHz: frequenciesHz, timesMs: timesMs,
             eventSampleIndex: timesMs.firstIndex(where: { $0 >= 0 }) ?? 0,
             valueRange: range, isDiverging: isDiverging, measure: measure,
-            isDifference: isDifference, trialCountA: 0, trialCountB: nil
+            isDifference: isDifference, isBaselineSubtracted: isBaselineSubtracted,
+            trialCountA: 0, trialCountB: nil
         )
     }
 }
@@ -97,7 +99,7 @@ private enum TFOverviewDisplayPreparation {
                 })
             }
 
-            let flat = grid.flatMap { $0 }
+            let flat = grid.flatMap { $0 }.filter(\.isFinite)
             let range: ClosedRange<Double>
             if overview.isDiverging {
                 let extent = max(flat.map(abs).max() ?? 1, 1e-6)
@@ -109,7 +111,8 @@ private enum TFOverviewDisplayPreparation {
                 grid: grid, frequenciesHz: overview.frequenciesHz, timesMs: overview.timesMs,
                 eventSampleIndex: overview.timesMs.firstIndex(where: { $0 >= 0 }) ?? 0,
                 valueRange: range, isDiverging: overview.isDiverging, measure: overview.measure,
-                isDifference: overview.isDifference, trialCountA: 0, trialCountB: nil
+                isDifference: overview.isDifference, isBaselineSubtracted: overview.isBaselineSubtracted,
+                trialCountA: 0, trialCountB: nil
             ))
         }
 
@@ -139,8 +142,11 @@ private enum TFOverviewDisplayPreparation {
         var total = 0.0, count = 0
         for frequency in frequencies where grid.indices.contains(frequency) {
             for time in times where grid[frequency].indices.contains(time) {
-                total += grid[frequency][time]
-                count += 1
+                let value = grid[frequency][time]
+                if value.isFinite {
+                    total += value
+                    count += 1
+                }
             }
         }
         return count > 0 ? total / Double(count) : 0
@@ -191,6 +197,7 @@ struct TimeFrequencyOverviewView: View {
     let progress: Double
     let progressStatus: String
     let setupNeedsRebuild: Bool
+    let bandResolution: TimeFrequencyBandResolution
 
     @State private var destination = "Scalp + detail"
     @State private var groupID = "all"
@@ -226,9 +233,23 @@ struct TimeFrequencyOverviewView: View {
 
             analysisControls
 
+            if let warning = bandResolution.warning {
+                Label(warning, systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.orange)
+                    .help(bandResolution.detectedBandSet?.provenanceDescription ?? warning)
+            }
+
             if !overviews.isEmpty {
-                controls(overviews)
-                dashboard
+                if frequencyBands.isEmpty {
+                    ContentUnavailableView(
+                        "Band source unavailable",
+                        systemImage: "exclamationmark.triangle",
+                        description: Text(bandResolution.warning ?? "Choose a band source with at least one valid band."))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    controls(overviews)
+                    dashboard
+                }
             } else {
             ContentUnavailableView(
                 "Overview not built",
@@ -247,6 +268,9 @@ struct TimeFrequencyOverviewView: View {
             if epoching.tfConditionB == nil || epoching.tfConditionB == a {
                 epoching.tfConditionB = conditions.first(where: { $0 != a })
             }
+        }
+        .onChange(of: bandResolutionKey) {
+            bandName = frequencyBands.first?.name ?? ""
         }
         .task(id: displayCacheKey) {
             let requestedKey = displayCacheKey
@@ -271,7 +295,12 @@ struct TimeFrequencyOverviewView: View {
 
     private var displayCacheKey: String {
         let renderIDs = overviews.map { $0.id.uuidString }.joined(separator: "|")
-        return "\(renderIDs)|\(groupID)|\(bandName)|\(windowStartMs)|\(windowEndMs)"
+        return "\(renderIDs)|\(groupID)|\(bandName)|\(windowStartMs)|\(windowEndMs)|\(bandResolutionKey)"
+    }
+
+    private var bandResolutionKey: String {
+        let ranges = bandResolution.bands.map { "\($0.name):\($0.lowHz)-\($0.highHz)" }.joined(separator: ";")
+        return "\(bandResolution.source.rawValue)|\(bandResolution.detectedBandSet?.id.uuidString ?? "none")|\(ranges)"
     }
 
     private var analysisControls: some View {
@@ -282,7 +311,7 @@ struct TimeFrequencyOverviewView: View {
                     Picker("", selection: $epoching.tfMeasure) {
                         ForEach(EpochingViewModel.TFMeasure.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    .labelsHidden().pickerStyle(.segmented).frame(width: 145)
+                    .labelsHidden().pickerStyle(.segmented).frame(width: 210)
                 }
                 if epoching.tfMeasure == .power {
                     HStack(spacing: 6) {
@@ -302,9 +331,23 @@ struct TimeFrequencyOverviewView: View {
                         ForEach(TFMethod.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden().pickerStyle(.segmented).frame(width: 190)
+                    .disabled(epoching.tfMeasure == .wtpl)
                 }
                 Toggle("A − B", isOn: $epoching.tfShowsDifference)
                     .toggleStyle(.switch).fixedSize()
+                HStack(spacing: 6) {
+                    Text("Band source").fixedSize()
+                    Picker("Band source", selection: $epoching.tfBandSource) {
+                        ForEach(TimeFrequencyBandSource.allCases) { source in
+                            if source == .rhythmicityExplorer, let set = bandResolution.detectedBandSet {
+                                Text("Rhythmicity Explorer: \(set.resultDescription)").tag(source)
+                            } else {
+                                Text(source.rawValue).tag(source)
+                            }
+                        }
+                    }
+                    .labelsHidden().frame(width: 245)
+                }
                 if epoching.tfShowsDifference {
                     HStack(spacing: 4) {
                         Text("A").fixedSize()
@@ -329,6 +372,21 @@ struct TimeFrequencyOverviewView: View {
                         }
                         .labelsHidden().frame(width: 120)
                     }
+                }
+                if epoching.tfMeasure == .wtpl {
+                    Toggle("ΔWTPL", isOn: $epoching.tfWTPLShowsDelta)
+                        .toggleStyle(.switch).fixedSize()
+                    LabeledContent("WTPL baseline") {
+                        HStack(spacing: 3) {
+                            TextField("start", value: $epoching.tfWTPLBaselineStartMs, format: .number)
+                                .frame(width: 58)
+                            Text("to")
+                            TextField("end", value: $epoching.tfWTPLBaselineEndMs, format: .number)
+                                .frame(width: 58)
+                            Text("ms")
+                        }
+                    }
+                    .help("WTPL uses the complete explicit interval and never silently shortens it.")
                 }
                 LabeledContent("Hz") {
                     HStack(spacing: 3) {
@@ -497,7 +555,10 @@ struct TimeFrequencyOverviewView: View {
                             Button("Open full detail") { selectChannel(selectedChannel, overview: overview) }
                                 .controlSize(.small)
                         }
-                        TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
+                        TFHeatmap(
+                            render: cached?.channelRenders[safe: local] ?? channelRender(local, overview),
+                            rhythmicityBands: bandResolution.detectedBandSet
+                        )
                             .frame(minWidth: 300, maxWidth: .infinity, minHeight: 190)
                         Text("Selected: \(overview.channelNames[local])")
                         Text(String(format: "ROI value: %.3f %@", cached?.roiByLocal[safe: local] ?? roiValue(local, overview), unitLabel(overview)))
@@ -605,7 +666,10 @@ struct TimeFrequencyOverviewView: View {
                 Button { selectChannel(overview.channelIndices[local], overview: overview) } label: {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(overview.channelNames[local]).font(.caption.weight(.semibold))
-                        TFHeatmap(render: cached?.channelRenders[safe: local] ?? channelRender(local, overview))
+                        TFHeatmap(
+                            render: cached?.channelRenders[safe: local] ?? channelRender(local, overview),
+                            rhythmicityBands: bandResolution.detectedBandSet
+                        )
                             .aspectRatio(1 / 0.76, contentMode: .fit)
                     }
                 }
@@ -661,7 +725,7 @@ struct TimeFrequencyOverviewView: View {
     }
 
     private var frequencyBands: [EEGFrequencyBand] {
-        ProcessingDefaults.shared.timeFrequencyBands
+        bandResolution.bands
     }
 
     private var availableTimeRange: ClosedRange<Double> {

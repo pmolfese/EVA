@@ -43,7 +43,8 @@ enum ProcessingAuditLog {
         bcg: BCGDetectionViewModel,
         epoching: EpochingViewModel,
         channels: ChannelModel,
-        cleaningVariance: CleaningVarianceLedger
+        cleaningVariance: CleaningVarianceLedger,
+        artifacts: [DefinedArtifact] = []
     ) -> [String] {
         var lines: [String] = []
 
@@ -55,6 +56,16 @@ enum ProcessingAuditLog {
         // (ROADMAP SI-3). The settings live in `eva.xml`; these are the
         // subject-specific facts that cannot.
         lines.append(contentsOf: bcg.surrogateAuditLogLines)
+
+        // PCA-S can also enter through Define Artifact → Clean Artifacts. Its
+        // portable settings and reviewed event times live in eva.xml / the JSON
+        // sidecar; these fitted per-recording facts belong in the audit log.
+        for artifact in artifacts where artifact.appliedMethod == .pcaS {
+            guard let report = artifact.pcaSReport else { continue }
+            lines.append(contentsOf: report.auditLogLines.map {
+                "artifactCleaning[\(artifact.name)] \($0)"
+            })
+        }
 
         // What each cleaning stage removed, in the order the stages ran. One
         // ledger rather than a question per stage: see `CleaningVarianceLedger`.

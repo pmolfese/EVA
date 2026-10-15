@@ -45,6 +45,7 @@ enum ArtifactCleaningCore {
     static func commit(
         cleanedSignal: MFFSignalData,
         summaries: [ArtifactCleaningSummary],
+        metrics: ArtifactCleanRunMetrics? = nil,
         appliedAt now: Date = Date(),
         statusMessage: String,
         artifactVM: ArtifactViewModel,
@@ -54,6 +55,7 @@ enum ArtifactCleaningCore {
         store: RecordingStore
     ) {
         artifactVM.cleanedSignal = cleanedSignal
+        artifactVM.runMetrics = metrics
         artifactVM.cleaningIsEnabled = true
         artifactVM.cleaningSummaries = summaries
 

@@ -59,11 +59,16 @@ import Foundation
 /// take the others down with it.
 nonisolated struct ArtifactReplayPayload: Codable, Sendable {
     static let fileName = "eva_artifacts.json"
-    static let currentSchemaVersion = 1
+    /// v2 adds the manual-exemplar PCA-S method, portable surrogate settings,
+    /// and the saved versioned exemplar/matching definition. v3 adds PCA-S
+    /// fitting-signal and beat-anchor source selection.
+    static let currentSchemaVersion = 3
 
     var schemaVersion: Int = ArtifactReplayPayload.currentSchemaVersion
     var createdAt: Date = Date()
-    /// Definitions only — `average` and `topography` are stripped on the way in.
+    /// Definitions only — derived averages and ordinary topographies are
+    /// stripped on the way in. A saccadic-spike topography is the spatial
+    /// filter itself, so it remains part of that definition.
     var artifacts: [DefinedArtifact]
 
     /// Strips the derived fields from `artifacts` and keeps the rest.
@@ -78,11 +83,14 @@ nonisolated struct ArtifactReplayPayload: Codable, Sendable {
         self.artifacts = artifacts.map { artifact in
             var stripped = artifact
             stripped.average = nil
-            stripped.topography = nil
+            if artifact.type != .saccadicSpike {
+                stripped.topography = nil
+            }
             // Applied-state stamps describe a run, not a definition. The commit
             // re-stamps them from the summaries it actually produces.
             stripped.appliedMethod = nil
             stripped.cleanedAt = nil
+            stripped.pcaSReport = nil
             return stripped
         }
     }
@@ -134,6 +142,13 @@ nonisolated struct ArtifactReplayPayload: Codable, Sendable {
             let parameters = artifact.processingParameters(prefix: "a")
             for key in parameters.keys.sorted() {
                 put("\(key)=\(parameters[key] ?? "")")
+            }
+            if artifact.type == .saccadicSpike, let topography = artifact.topography {
+                let mapped = zip(topography.channelIndices, topography.channelValues)
+                    .sorted { $0.0 < $1.0 }
+                    .map { "\($0.0):\(String(format: "%.9g", $0.1))" }
+                    .joined(separator: ",")
+                put("spatialFilter=\(mapped)")
             }
         }
         return out

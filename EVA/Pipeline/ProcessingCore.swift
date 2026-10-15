@@ -207,6 +207,12 @@ final class ProcessingCore {
             switch step.operation {
             case .mriGradientCorrection:
                 gradient.apply(parameters: step.parameters)
+                // Motion is the operator's to supply — a headless run has no
+                // way to load it — so a step that needs it stops here rather
+                // than running as a different method (ROADMAP MRI-1).
+                if gradient.missingRequiredMotion != nil {
+                    return Result(signal: current, remainingSteps: Array(steps[index...]))
+                }
                 await gradient.apply(to: current, pnsSignal: pnsSignal) { [self] in
                     // The base signal changed. This used to clear only ICA and
                     // filter output here, while the interactive path also cleared
@@ -223,7 +229,14 @@ final class ProcessingCore {
                         segHealth: segHealth
                     )
                 }
-                current = gradient.correctedSignal ?? current
+                // A run that failed leaves `correctedSignal` unset. Carrying on
+                // with the uncorrected signal would export a file whose own
+                // script claims gradient correction — the same reason PCA-S
+                // stops below.
+                guard !gradient.statusIsError, let corrected = gradient.correctedSignal else {
+                    return Result(signal: current, remainingSteps: Array(steps[index...]))
+                }
+                current = corrected
 
             case .bcgCorrection:
                 // PCA-S is portable settings plus this file's own evidence: its
@@ -278,6 +291,13 @@ final class ProcessingCore {
                     // batch that silently skipped the correction would emit a
                     // file whose own script claims it was corrected.
                     bcg.status = error.localizedDescription
+                    // Hand the history layer a recorded-refusal grade to hang one
+                    // step back (see `recordProcessingHistory`). Never persisted
+                    // and pruned on the next commit.
+                    let grade = (error as? BCGSurrogateError).map(PCASRunGrade.grade(refusal:))
+                        ?? StepQuality(grade: .poor, summary: error.localizedDescription, metrics: [])
+                    bcg.surrogatePendingRefusal = (grade, step.parameters)
+                    bcg.surrogateRefusalToken &+= 1
                     return Result(signal: current, remainingSteps: Array(steps[index...]))
                 }
 
@@ -372,15 +392,29 @@ final class ProcessingCore {
                 // drawn on. See `ArtifactReplayPayload`.
                 let artifacts = artifactPayload.artifacts(rederivedAgainst: current)
                 template.definedArtifacts = artifacts
-                let outcome = ArtifactCleaner.cleanedSignal(
+                let excludedFromCleaning = store.channels.bad.union(store.channels.interpolated.keys)
+                let outcome = await ArtifactCleaningExecutor.cleanedSignal(
                     from: current,
                     artifacts: artifacts,
-                    excluding: store.channels.bad.union(store.channels.interpolated.keys)
+                    excluding: excludedFromCleaning,
+                    geometry: electrodeGeometry,
+                    availableBandwidthHz: filter.output == nil ? nil : filter.lowPassCutoff
                 )
+                for index in template.definedArtifacts.indices {
+                    let id = template.definedArtifacts[index].id
+                    template.definedArtifacts[index].pcaSReport = outcome.pcaSReports[id]
+                }
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
                     summaries: outcome.summaries,
-                    statusMessage: "Cleaned \(outcome.summaries.count) artifact(s).",
+                    metrics: ArtifactCleanRunMetrics.measure(
+                        original: current.data, cleaned: outcome.signal.data,
+                        artifacts: artifacts, summaries: outcome.summaries,
+                        excludedChannels: excludedFromCleaning
+                    ),
+                    statusMessage: outcome.failures.isEmpty
+                        ? "Cleaned \(outcome.summaries.count) artifact(s)."
+                        : "Cleaned \(outcome.summaries.count) artifact(s); \(outcome.failures.count) failed.",
                     artifactVM: artifactVM,
                     template: template,
                     epoching: epoching,
@@ -444,7 +478,6 @@ final class ProcessingCore {
                 }
 
             case .thresholdArtifactDetection:
-                artifactVM.detectionMethod = .threshold
                 artifactVM.blinkThresholdConfig = .fromFlatParameters(
                     step.parameters, prefix: "blink", base: artifactVM.blinkThresholdConfig)
                 artifactVM.movementThresholdConfig = .fromFlatParameters(
@@ -544,6 +577,12 @@ final class ProcessingCore {
                 kind: .movement, channels: signal.data, samplingRate: signal.samplingRate,
                 duration: signal.duration, sensorLayoutName: sensorLayoutName,
                 configuration: artifactVM.movementThresholdConfig)
+        }
+        // The gradient step's unreliable spans ride on the signal's own events,
+        // exactly as the interactive `psaArtifactEventsForRejectionByLabel`
+        // reads them.
+        if epoching.skipUnreliableMRI {
+            events += signal.events.filter { $0.code == GradientCoverage.unreliableEventCode }
         }
         return events
     }

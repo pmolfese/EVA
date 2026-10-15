@@ -57,6 +57,13 @@ final class BCGDetectionViewModel {
     var method = BCGDetectionMethod.periodicity
     var eventCode = "BCG"
     var windowSeconds = 0.700
+    /// When enabled, the detector's point-like beat anchors are followed by a
+    /// split-half recurrence pass that estimates the common BCG interval.
+    /// `windowSeconds` remains the editable fallback and records the accepted
+    /// estimate after a successful run.
+    var estimatesWindowFromPattern = true
+    /// Fitted to the current recording; never serialized as a portable setting.
+    var durationEstimate: BCGDurationEstimate?
     var thresholdSD = 2.5
 
     // MARK: Heart-rate / band parameters
@@ -112,6 +119,13 @@ final class BCGDetectionViewModel {
     var isRunning = false
     var progress: Double?
     var status: String?
+    /// Set by `ProcessingCore` when a PCA-S run refuses: the Poor grade and the
+    /// step parameters, so the history layer can mint a recorded-refusal node
+    /// one step back and then clear this. Session-only; never persisted here.
+    var surrogatePendingRefusal: (quality: StepQuality, parameters: [String: String])?
+    /// Bumped alongside `surrogatePendingRefusal` so a view `.onChange` can mint
+    /// the refusal node: the tuple is not `Equatable`, but this token is.
+    var surrogateRefusalToken = 0
     var refinedTemplate: [Float]?
     var refinedKeptCount: Int?
     var isRefining = false
@@ -129,6 +143,7 @@ final class BCGDetectionViewModel {
         status = nil
         refinedTemplate = nil
         refinedKeptCount = nil
+        durationEstimate = nil
         isRefining = false
         isEstimating = false
         algorithmResults = [:]
@@ -165,6 +180,7 @@ final class BCGDetectionViewModel {
             "method": method.rawValue,
             "eventCode": eventCode,
             "windowSeconds": String(format: "%.6f", windowSeconds),
+            "estimatesWindowFromPattern": "\(estimatesWindowFromPattern)",
             "thresholdSD": String(format: "%.6f", thresholdSD),
             "minHR": String(format: "%.6f", minHR),
             "maxHR": String(format: "%.6f", maxHR),

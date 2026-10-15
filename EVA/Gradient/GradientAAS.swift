@@ -197,7 +197,7 @@ nonisolated enum GradientAAS {
             upsampleFactor = max(1, factor)
         }
 
-        let layout = try GradientEpochLayout.build(
+        var layout = try GradientEpochLayout.build(
             volumeTriggers: volumeTriggers,
             sampleCount: sampleCount,
             slicesPerVolume: config.epochUnit == .slice ? max(1, config.slicesPerVolume) : 1,
@@ -205,9 +205,25 @@ nonisolated enum GradientAAS {
             relativeTriggerPosition: config.relativeTriggerPosition
         )
 
-        let workingChannels = upsampleFactor > 1
-            ? channels.map { GradientSincResampler.upsample($0, factor: upsampleFactor) }
+        // A recording that stops one period after its last trigger lacks only
+        // the final window's closing sample (the next trigger, never recorded).
+        // Without it the whole final TR was left uncorrected — every sample of
+        // it still carrying the full artifact — which is what made Allen IAR
+        // read ~100× worse than local-median on clock-synced data (ROADMAP
+        // MRI-1, 2026-09-26). Same remedy as `GradientTemplateCorrector`: repeat
+        // the last sample once, correct, and crop it from the output.
+        let closingPadding = layout.lacksOnlyClosingSample ? 1 : 0
+        if closingPadding > 0 {
+            layout = layout.extended(bySamples: closingPadding, upsampleFactor: upsampleFactor)
+        }
+        let finalizedLayout = layout
+        let paddedChannels = closingPadding > 0
+            ? channels.map { $0 + [Float](repeating: $0[sampleCount - 1], count: closingPadding) }
             : channels
+
+        let workingChannels = upsampleFactor > 1
+            ? paddedChannels.map { GradientSincResampler.upsample($0, factor: upsampleFactor) }
+            : paddedChannels
         let workingRate = samplingRate * Double(upsampleFactor)
         let representative = 0
 
@@ -255,11 +271,11 @@ nonisolated enum GradientAAS {
             // each time it is someone's donor. With a donor window of eight that
             // was nine passes over the same samples; the values are identical
             // either way, so this is pure redundancy.
-            var epochCache = [[Float]?](repeating: nil, count: layout.count)
-            for epoch in 0..<layout.count {
-                guard let epochStart = layout.windowStart(of: epoch) else { continue }
+            var epochCache = [[Float]?](repeating: nil, count: finalizedLayout.count)
+            for epoch in 0..<finalizedLayout.count {
+                guard let epochStart = finalizedLayout.windowStart(of: epoch) else { continue }
                 epochCache[epoch] = preprocess(
-                    Array(channel[epochStart..<(epochStart + layout.length)]),
+                    Array(channel[epochStart..<(epochStart + finalizedLayout.length)]),
                     mode: config.detrendMode
                 )
             }
@@ -268,12 +284,12 @@ nonisolated enum GradientAAS {
             var artifact = [Float](repeating: 0, count: channel.count)
 
             for plan in plans {
-                guard let start = layout.windowStart(of: plan.epoch) else {
+                guard let start = finalizedLayout.windowStart(of: plan.epoch) else {
                     warnings.append(.epochOutOfBounds(epoch: plan.epoch))
                     if channelIndex == representative {
                         diagnostics.append(diagnostic(
                             epoch: plan.epoch,
-                            layout: layout,
+                            layout: finalizedLayout,
                             donors: [],
                             corrected: false
                         ))
@@ -285,7 +301,7 @@ nonisolated enum GradientAAS {
                     if channelIndex == representative {
                         diagnostics.append(diagnostic(
                             epoch: plan.epoch,
-                            layout: layout,
+                            layout: finalizedLayout,
                             donors: [],
                             corrected: false
                         ))
@@ -307,7 +323,7 @@ nonisolated enum GradientAAS {
                     continue
                 }
 
-                let length = vDSP_Length(layout.length)
+                let length = vDSP_Length(finalizedLayout.length)
                 template.withUnsafeBufferPointer { source in
                     artifact.withUnsafeMutableBufferPointer { destination in
                         let slot = destination.baseAddress! + start
@@ -328,7 +344,7 @@ nonisolated enum GradientAAS {
                 if channelIndex == representative {
                     diagnostics.append(diagnostic(
                         epoch: plan.epoch,
-                        layout: layout,
+                        layout: finalizedLayout,
                         donors: plan.donorIndices,
                         corrected: true
                     ))
@@ -338,7 +354,7 @@ nonisolated enum GradientAAS {
             if config.anc {
                 let cutoff = GradientANC.cutoffHz(
                     policy: config.ancHighPass,
-                    epochPeriodSamples: max(1, layout.period),
+                    epochPeriodSamples: max(1, finalizedLayout.period),
                     samplingRate: workingRate
                 )
                 let anc = GradientANC.apply(
@@ -380,7 +396,9 @@ nonisolated enum GradientAAS {
         if upsampleFactor > 1 {
             output = correctedWorking.map { downsample($0, factor: upsampleFactor, targetCount: sampleCount) }
         } else {
-            output = correctedWorking
+            output = closingPadding > 0
+                ? correctedWorking.map { Array($0.prefix(sampleCount)) }
+                : correctedWorking
         }
 
         return GradientCorrectionResult(
@@ -396,7 +414,8 @@ nonisolated enum GradientAAS {
                 epochs: diagnostics.sorted { $0.epoch < $1.epoch },
                 obsComponentCounts: [],
                 ancAppliedChannels: ancApplied,
-                warnings: warnings
+                warnings: warnings,
+                upsampleFactor: upsampleFactor
             )
         )
     }

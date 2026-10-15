@@ -70,6 +70,29 @@ struct TrialDriftStatisticsTests {
         #expect(result.isSignificant == false)
     }
 
+    @Test func benjaminiHochbergAdjustsTheDisplayedFamilyAndPreservesOrder() {
+        let adjusted = TrialDriftStatistics.benjaminiHochbergAdjustedPValues(
+            [0.01, 0.04, 0.03, 0.20]
+        )
+
+        #expect(abs(adjusted[0] - 0.04) < 1e-12)
+        #expect(abs(adjusted[1] - (0.04 * 4 / 3)) < 1e-12)
+        #expect(abs(adjusted[2] - (0.04 * 4 / 3)) < 1e-12)
+        #expect(abs(adjusted[3] - 0.20) < 1e-12)
+    }
+
+    @Test func benjaminiHochbergIsMonotoneByRawPAndClamped() {
+        let raw = [0.9, 0.001, 0.02, 1.4, -0.2]
+        let adjusted = TrialDriftStatistics.benjaminiHochbergAdjustedPValues(raw)
+        let ordered = raw.indices.sorted { raw[$0] < raw[$1] }
+
+        #expect(zip(ordered, ordered.dropFirst()).allSatisfy {
+            adjusted[$0.0] <= adjusted[$0.1]
+        })
+        #expect(adjusted.allSatisfy { (0 ... 1).contains($0) })
+        #expect(TrialDriftStatistics.benjaminiHochbergAdjustedPValues([]).isEmpty)
+    }
+
     @Test func aDecliningMeasureGivesANegativeRho() throws {
         let order = (0 ..< 15).map(Double.init)
         let values = order.map { 100 - $0 * 3 }

@@ -675,38 +675,13 @@ nonisolated enum ChannelHealthAnalyzer {
         low: Double,
         high: Double
     ) -> Double? {
-        guard high > low, binHz > 0 else { return nil }
-        let half = spectrum.count
-        let lowBin = max(Int((low / binHz).rounded(.down)), 1)
-        let highBin = min(Int((high / binHz).rounded(.up)), half - 1)
-        guard highBin > lowBin else { return nil }
-
-        var xs: [Double] = []
-        var ys: [Double] = []
-        for bin in lowBin...highBin {
-            let freq = Double(bin) * binHz
-            // Skip ±2 Hz around each 60 Hz harmonic.
-            let nearLine = stride(from: 60.0, through: high, by: 60.0).contains { abs(freq - $0) <= 2 }
-            if nearLine { continue }
-            let power = spectrum[bin]
-            guard power > 0 else { continue }
-            xs.append(log10(freq))
-            ys.append(log10(power))
-        }
-        guard xs.count >= 8 else { return nil }
-
-        let n = Double(xs.count)
-        let meanX = xs.reduce(0, +) / n
-        let meanY = ys.reduce(0, +) / n
-        var sxx = 0.0
-        var sxy = 0.0
-        for i in xs.indices {
-            let dx = xs[i] - meanX
-            sxx += dx * dx
-            sxy += dx * (ys[i] - meanY)
-        }
-        guard sxx > 1e-12 else { return nil }
-        return sxy / sxx
+        let exclusions = stride(from: 60.0, through: high, by: 60.0).map { ($0 - 2)...($0 + 2) }
+        return AperiodicSpectrumEstimator.logLogExponent(
+            power: spectrum,
+            binHz: binHz,
+            fitRangeHz: low...high,
+            excludedRangesHz: exclusions
+        )
     }
 
     /// Largest local SNR among the fundamental and its harmonics: peak power at
@@ -775,48 +750,17 @@ nonisolated enum ChannelHealthAnalyzer {
         var segment = 16
         while segment * 2 <= target { segment *= 2 }
         guard count >= segment,
-              let dft = try? vDSP.DiscreteFourierTransform(
-                previous: nil,
-                count: segment,
-                direction: .forward,
-                transformType: .complexComplex,
-                ofType: Float.self
+              let spectrum = try? AperiodicSpectrumEstimator.welch(
+                samples: samples.map(Double.init),
+                samplingRate: samplingRate,
+                segments: [0..<count],
+                windowSamples: segment,
+                overlapFraction: 0.5,
+                includeNyquist: false
               ) else {
             return nil
         }
-
-        let window = vDSP.window(
-            ofType: Float.self,
-            usingSequence: .hanningDenormalized,
-            count: segment,
-            isHalfWindow: false
-        )
-        let imaginaryInput = [Float](repeating: 0, count: segment)
-        let half = segment / 2
-        var averagePower = [Double](repeating: 0, count: half)
-        var segmentCount = 0
-        let step = max(segment / 2, 1)
-
-        var start = 0
-        while start + segment <= count {
-            var realInput = Array(samples[start..<start + segment])
-            let mean = vDSP.mean(realInput)
-            realInput = vDSP.add(-mean, realInput)
-            realInput = vDSP.multiply(realInput, window)
-
-            let output = dft.transform(real: realInput, imaginary: imaginaryInput)
-            for bin in 0..<half {
-                let re = Double(output.real[bin])
-                let im = Double(output.imaginary[bin])
-                averagePower[bin] += re * re + im * im
-            }
-            segmentCount += 1
-            start += step
-        }
-
-        guard segmentCount > 0 else { return nil }
-        for bin in 0..<half { averagePower[bin] /= Double(segmentCount) }
-        return (averagePower, samplingRate / Double(segment))
+        return (spectrum.power, samplingRate / Double(segment))
     }
 
     /// Mean power across the FFT bins spanning `low...high` Hz.
