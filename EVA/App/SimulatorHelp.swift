@@ -474,10 +474,11 @@ enum SimulatorHelp {
         guidance: """
         This is the single most important knob on this tab. Template subtraction \
         assumes every slice artifact lands at the same place relative to the \
-        sample grid; the clock drift means it does not, and the mismatch is what \
-        survives correction. Set it to 0 and average artifact subtraction looks \
-        perfect — which is exactly why no honest benchmark uses 0. The default \
-        152 µs/s is what the paper measured on their own rig.
+        sample grid; clock drift means it does not, and the mismatch is what \
+        survives correction. The app starts at 0 so its untouched scenario is a \
+        subtraction sanity check for both volume and slice templates. Use the \
+        paper-default preset for the measured 152 µs/s stress test, and select \
+        FASTR's Independent clocks synchronization profile when correcting it.
         """
     )
 

@@ -60,10 +60,18 @@ final class SimulatorController {
 
     /// The scenario being authored. Starts from the same defaults the CLI uses
     /// with no flags (`SimulationConfig.default`), so an unedited Generate
-    /// reproduces the tool's out-of-the-box recording — with one deliberate
-    /// exception, below.
+    /// starts from the CLI's model, with a few deliberate GUI exceptions below.
+    /// The untouched app scenario is a correction sanity check: its scanner and
+    /// EEG clocks are locked, its gradient amplitude is steady, and its slice
+    /// interval is an integer number of samples, so ordinary volume and slice
+    /// template subtraction both have a clean expected result. The bundled
+    /// paper preset retains the measured 41-slice acquisition, 152 µs/s drift,
+    /// and 10% slow modulation for evaluating drift-aware methods.
     var config: SimulationConfig = {
         var config = SimulationConfig.default
+        config.slicesPerVolume = 30
+        config.clockOffsetMicrosecondsPerSecond = 0
+        config.slowModulationFraction = 0
         // The modelled motion sensor is off here but on in the CLI. It exists
         // for reference-channel correction research, and someone who wants it
         // knows to ask; for everyone else it is an unexplained extra PNS trace

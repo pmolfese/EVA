@@ -553,7 +553,7 @@ private struct GradientTab: View {
                           help: SimulatorHelp.slowModulation)
             }
             .disabled(!simulator.config.gradientEnabled)
-            Text("A non-integer clock offset is what makes gradient residuals realistic — the scanner and amplifier clocks drift.")
+            Text("The zero-drift default is a subtraction sanity check. Add clock offset for an independent-clock stress test.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
