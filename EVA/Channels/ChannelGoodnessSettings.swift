@@ -11,13 +11,13 @@
 //
 //  Sticky, app-wide configuration for the channel-goodness fit metrics. The
 //  spectral and neighbor-prediction detectors run as part of the default health
-//  pass; the wavelet burden detector is run on demand. All knobs are grouped in
+//  pass; the wavelet burden detector runs automatically unless disabled. All knobs are grouped in
 //  Channels -> "Channel Goodness Settings..." and persisted to user defaults.
 //
 
 import SwiftUI
 
-/// Configuration for the on-demand wavelet channel-burden detector.
+/// Configuration for the wavelet channel-burden detector.
 struct ChannelWaveletGoodnessSettings: Codable, Sendable {
     var family: WaveletReductionFamily = .bior44
     var levelCount: Int = 8
@@ -35,23 +35,28 @@ struct ChannelWaveletGoodnessSettings: Codable, Sendable {
 @MainActor
 @Observable
 final class ChannelGoodnessSettings {
+    var runWaveletsAutomatically: Bool { didSet { save() } }
     var base: ChannelBaseMetricSettings { didSet { save() } }
     var impedance: ChannelImpedanceSettings { didSet { save() } }
     var spectral: ChannelSpectralConfiguration { didSet { save() } }
     var ransac: ChannelRansacConfiguration { didSet { save() } }
     var wavelet: ChannelWaveletGoodnessSettings { didSet { save() } }
 
+    private let defaults: UserDefaults
     private static let storageKey = "ChannelGoodnessSettings.v1"
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: Self.storageKey),
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let data = defaults.data(forKey: Self.storageKey),
            let stored = try? JSONDecoder().decode(Stored.self, from: data) {
+            runWaveletsAutomatically = stored.runWaveletsAutomatically
             base = stored.base
             impedance = stored.impedance
             spectral = stored.spectral
             ransac = stored.ransac
             wavelet = stored.wavelet
         } else {
+            runWaveletsAutomatically = true
             base = .defaults
             impedance = .defaults
             spectral = .happeStandard
@@ -61,6 +66,7 @@ final class ChannelGoodnessSettings {
     }
 
     func restoreDefaults() {
+        runWaveletsAutomatically = true
         base = .defaults
         impedance = .defaults
         spectral = .happeStandard
@@ -71,6 +77,7 @@ final class ChannelGoodnessSettings {
     /// Forward/backward-compatible: any field missing from stored JSON falls
     /// back to its default rather than failing the whole decode.
     private struct Stored: Codable {
+        var runWaveletsAutomatically: Bool
         var base: ChannelBaseMetricSettings
         var impedance: ChannelImpedanceSettings
         var spectral: ChannelSpectralConfiguration
@@ -78,12 +85,14 @@ final class ChannelGoodnessSettings {
         var wavelet: ChannelWaveletGoodnessSettings
 
         init(
+            runWaveletsAutomatically: Bool,
             base: ChannelBaseMetricSettings,
             impedance: ChannelImpedanceSettings,
             spectral: ChannelSpectralConfiguration,
             ransac: ChannelRansacConfiguration,
             wavelet: ChannelWaveletGoodnessSettings
         ) {
+            self.runWaveletsAutomatically = runWaveletsAutomatically
             self.base = base
             self.impedance = impedance
             self.spectral = spectral
@@ -93,6 +102,7 @@ final class ChannelGoodnessSettings {
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            runWaveletsAutomatically = try container.decodeIfPresent(Bool.self, forKey: .runWaveletsAutomatically) ?? true
             base = try container.decodeIfPresent(ChannelBaseMetricSettings.self, forKey: .base) ?? .defaults
             impedance = try container.decodeIfPresent(ChannelImpedanceSettings.self, forKey: .impedance) ?? .defaults
             spectral = try container.decodeIfPresent(ChannelSpectralConfiguration.self, forKey: .spectral) ?? .happeStandard
@@ -102,9 +112,9 @@ final class ChannelGoodnessSettings {
     }
 
     private func save() {
-        let stored = Stored(base: base, impedance: impedance, spectral: spectral, ransac: ransac, wavelet: wavelet)
+        let stored = Stored(runWaveletsAutomatically: runWaveletsAutomatically, base: base, impedance: impedance, spectral: spectral, ransac: ransac, wavelet: wavelet)
         if let data = try? JSONEncoder().encode(stored) {
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            defaults.set(data, forKey: Self.storageKey)
         }
     }
 }
@@ -129,7 +139,7 @@ private enum GoodnessSettingsTool: String, CaseIterable, Identifiable {
         case .ransac:
             return "Reconstructs each channel from its nearest neighbors and flags channels whose median windowed correlation falls below the minimum. Runs by default. Spirit of clean_rawdata's ChannelCriterion."
         case .wavelet:
-            return "Scores each channel by its multiscale transient (artifact) burden. Runs on demand from the \u{201C}Wavelet...\u{201D} button in Channel Goodness Details."
+            return "Scores each channel by its multiscale transient (artifact) burden. Runs automatically when enabled below, or manually with Run Wavelets in Channels → Health."
         }
     }
 }
@@ -167,7 +177,11 @@ struct ChannelGoodnessSettingsView: View {
                 case .impedance: impedanceSection(settings: settings)
                 case .spectral: spectralSection(settings: settings)
                 case .ransac: ransacSection(settings: settings)
-                case .wavelet: waveletSection(settings: settings)
+                case .wavelet:
+                    ScrollView {
+                        waveletSection(settings: settings)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 230, alignment: .topLeading)
@@ -182,7 +196,7 @@ struct ChannelGoodnessSettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 460, height: 470)
+        .frame(width: 460, height: 570)
     }
 
     private func restoreCurrentTool() {
@@ -191,7 +205,9 @@ struct ChannelGoodnessSettingsView: View {
         case .impedance: settings.impedance = .defaults
         case .spectral: settings.spectral = .happeStandard
         case .ransac: settings.ransac = .happeStandard
-        case .wavelet: settings.wavelet = .defaults
+        case .wavelet:
+            settings.runWaveletsAutomatically = true
+            settings.wavelet = .defaults
         }
     }
 
@@ -360,58 +376,63 @@ struct ChannelGoodnessSettingsView: View {
     @ViewBuilder
     private func waveletSection(settings: ChannelGoodnessSettings) -> some View {
         @Bindable var settings = settings
-        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-            GridRow {
-                MetricHelpLabel(name: "Wavelet", help: FieldHelp.waveletFamily)
-                Picker("", selection: $settings.wavelet.family) {
-                    ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
+        VStack(alignment: .leading, spacing: 14) {
+            Toggle("Run wavelets automatically in Channel Health", isOn: $settings.runWaveletsAutomatically)
+                .toggleStyle(.checkbox)
+                .help("Include wavelet burden when running or refreshing Channel Health / Goodness. When off, use Run Wavelets beside Refresh in Channels → Health.")
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    MetricHelpLabel(name: "Wavelet", help: FieldHelp.waveletFamily)
+                    Picker("", selection: $settings.wavelet.family) {
+                        ForEach(WaveletReductionFamily.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
                 }
-                .labelsHidden()
-                .frame(width: 150)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Cleaning mode", help: FieldHelp.waveletCleaningMode)
-                Picker("", selection: $settings.wavelet.cleaningMode) {
-                    ForEach(WaveletCleaningMode.allCases) { Text($0.displayName).tag($0) }
+                GridRow {
+                    MetricHelpLabel(name: "Cleaning mode", help: FieldHelp.waveletCleaningMode)
+                    Picker("", selection: $settings.wavelet.cleaningMode) {
+                        ForEach(WaveletCleaningMode.allCases) { Text($0.displayName).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 180)
                 }
-                .labelsHidden()
-                .frame(width: 180)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Threshold model", help: FieldHelp.waveletThresholdModel)
-                Picker("", selection: $settings.wavelet.thresholdModel) {
-                    ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
+                GridRow {
+                    MetricHelpLabel(name: "Threshold model", help: FieldHelp.waveletThresholdModel)
+                    Picker("", selection: $settings.wavelet.thresholdModel) {
+                        ForEach(WaveletCleaningThresholdModel.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
                 }
-                .labelsHidden()
-                .frame(width: 150)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Threshold rule", help: FieldHelp.waveletThresholdRule)
-                Picker("", selection: $settings.wavelet.thresholdRule) {
-                    ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
+                GridRow {
+                    MetricHelpLabel(name: "Threshold rule", help: FieldHelp.waveletThresholdRule)
+                    Picker("", selection: $settings.wavelet.thresholdRule) {
+                        ForEach(WaveletCleaningThresholdRule.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 150)
                 }
-                .labelsHidden()
-                .frame(width: 150)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Levels", help: FieldHelp.waveletLevelCount)
-                Stepper("\(settings.wavelet.levelCount)", value: $settings.wavelet.levelCount, in: 1...WaveletArtifactAnalyzer.maximumLevelCount)
-                    .frame(width: 120)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Intensity", help: FieldHelp.waveletIntensity)
-                TextField("x", value: $settings.wavelet.intensity, format: .number.precision(.fractionLength(2)))
-                    .frame(width: 90)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Downsample (Hz)", help: FieldHelp.waveletDownsampleRate)
-                TextField("Hz", value: $settings.wavelet.downsampleRate, format: .number.precision(.fractionLength(0)))
-                    .frame(width: 90)
-            }
-            GridRow {
-                MetricHelpLabel(name: "Weight", help: FieldHelp.weight)
-                TextField("x", value: $settings.wavelet.weight, format: .number.precision(.fractionLength(1)))
-                    .frame(width: 90)
+                GridRow {
+                    MetricHelpLabel(name: "Levels", help: FieldHelp.waveletLevelCount)
+                    Stepper("\(settings.wavelet.levelCount)", value: $settings.wavelet.levelCount, in: 1...WaveletArtifactAnalyzer.maximumLevelCount)
+                        .frame(width: 120)
+                }
+                GridRow {
+                    MetricHelpLabel(name: "Intensity", help: FieldHelp.waveletIntensity)
+                    TextField("x", value: $settings.wavelet.intensity, format: .number.precision(.fractionLength(2)))
+                        .frame(width: 90)
+                }
+                GridRow {
+                    MetricHelpLabel(name: "Downsample (Hz)", help: FieldHelp.waveletDownsampleRate)
+                    TextField("Hz", value: $settings.wavelet.downsampleRate, format: .number.precision(.fractionLength(0)))
+                        .frame(width: 90)
+                }
+                GridRow {
+                    MetricHelpLabel(name: "Weight", help: FieldHelp.weight)
+                    TextField("x", value: $settings.wavelet.weight, format: .number.precision(.fractionLength(1)))
+                        .frame(width: 90)
+                }
             }
         }
     }

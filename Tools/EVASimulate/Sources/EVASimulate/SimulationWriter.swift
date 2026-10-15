@@ -363,6 +363,7 @@ nonisolated enum SimulationWriter {
         motion: [Double]?,
         veog: [Double]?,
         heog: [Double]?,
+        gsr: [Double]? = nil,
         config: SimulationConfig,
         packageURL: URL
     ) -> MFFSignalData? {
@@ -388,6 +389,12 @@ nonisolated enum SimulationWriter {
             channels.append(heog)
             names.append("HEOG")
         }
+        var units = [String](repeating: "uV", count: channels.count)
+        if let gsr {
+            channels.append(gsr)
+            names.append("GSR")
+            units.append("uS")
+        }
         guard !channels.isEmpty else { return nil }
 
         return MFFSignalData(
@@ -399,7 +406,8 @@ nonisolated enum SimulationWriter {
             recordingStartTime: recordingStart,
             events: [],
             data: channels.map { channel in channel.map { Float($0) } },
-            channelNames: names
+            channelNames: names,
+            channelUnits: units
         )
     }
 

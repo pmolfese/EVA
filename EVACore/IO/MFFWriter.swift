@@ -218,6 +218,7 @@ nonisolated enum MFFWriter {
         var body = ""
         for index in 0..<pns.numberOfChannels {
             let name = (names != nil && index < names!.count) ? names![index] : "PNS \(index + 1)"
+            let unit = pns.channelUnits.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? "uV"
             // Only emit <positiveUp> when the signal carries a flag for this
             // channel. Defaulting to true would invent metadata: a source with
             // no flags reads back as nil, and writing "true" makes every
@@ -233,7 +234,7 @@ nonisolated enum MFFWriter {
     <sensor>
       <name>\(xmlEscape(name))</name>
       <number>\(index)</number>
-      <unit>uV</unit>
+      <unit>\(xmlEscape(unit))</unit>
       <psgType>0</psgType>
       <mapping>\(index + 1)</mapping>
       <samplingRate>0</samplingRate>

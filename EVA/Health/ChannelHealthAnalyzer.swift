@@ -1162,7 +1162,7 @@ nonisolated enum ChannelHealthAnalyzer {
         metrics.append(metric(
             name: "Kurtosis",
             score: HealthScoring.scoreUpperRatio(kurtosis, green: 5, red: 20),
-            detail: String(format: "excess kurtosis %.1f", summary.excessKurtosis),
+            detail: String(format: "excess kurtosis %.1f (≤5 good; ≥20 poor)", summary.excessKurtosis),
             weight: 1.0
         ))
 

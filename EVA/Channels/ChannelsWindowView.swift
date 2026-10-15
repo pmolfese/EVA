@@ -166,6 +166,11 @@ private struct ChannelDiagnosticsView: View {
                     .controlSize(.small)
             }
             if tab == .health {
+                Button("Run Wavelets") {
+                    model.requestHealthWavelets()
+                }
+                .help("Score wavelet burden for Channel Goodness using your preferences.")
+                .disabled(model.isAnalyzingHealth || model.activeSignal == nil)
                 Button("Refresh") {
                     model.requestHealthRefresh()
                 }
@@ -432,7 +437,7 @@ private struct ChannelDiagnosticsView: View {
             ForEach(result.metrics) { metric in
                 diagnosticMetric(
                     metric.name,
-                    value: "\(metric.grade.displayName) · \(Int((metric.score * 100).rounded()))%",
+                    value: "\(metric.grade.displayName) · \(Int((metric.score * 100).rounded()))% good",
                     detail: metric.detail,
                     color: metric.grade.channelsColor
                 )

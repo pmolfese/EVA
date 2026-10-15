@@ -81,7 +81,7 @@ nonisolated enum AdditionalArtifactModel {
         if let model = config.sweat {
             var source = GaussianSource(seed: SimulationSeedStreams.sweat(base: config.seed))
             truth.sweatEpisodes = injectSweat(
-                into: &channels, config: config, model: model, source: &source
+                into: &channels, config: config, montage: montage, model: model, source: &source
             )
         }
         if includeBadReference {
@@ -244,42 +244,134 @@ nonisolated enum AdditionalArtifactModel {
 
     private static func injectSweat(
         into channels: inout [[Double]], config: SimulationConfig,
-        model: SweatConfig, source: inout GaussianSource
+        montage: Montage, model: SweatConfig, source: inout GaussianSource
     ) -> [ArtifactEpisodeTruth] {
         let schedule = episodes(
             ratePerMinute: model.episodesPerMinute, meanDuration: model.durationSeconds,
-            recordingDuration: config.durationSeconds, source: &source
+            recordingDuration: config.durationSeconds, source: &source,
+            allowOverlap: model.allowOverlap == true
         )
         var truth: [ArtifactEpisodeTruth] = []
+        let placement = model.placement ?? .anywhere
+        let positions = montage.positions
         for (episodeIndex, episode) in schedule.enumerated() {
-            var available = Array(channels.indices)
+            var available = sweatEligibleChannels(model: model, montage: montage)
+            guard !available.isEmpty else { break }
             var selected: [Int] = []
-            for _ in 0..<min(model.affectedChannelCount, available.count) {
-                let draw = min(available.count - 1, Int(source.uniform() * Double(available.count)))
-                selected.append(available.remove(at: draw))
+            var center: Int?
+            let clustered = placement == .frontalBiased || placement == .frontalOnly
+            if clustered {
+                let frontal = available.filter { positions[$0].y > 0.35 }
+                let preferFrontal = source.uniform() < (model.frontalPreference ?? 0.85)
+                let centers = placement == .frontalBiased && preferFrontal && !frontal.isEmpty
+                    ? frontal : available
+                let draw = min(centers.count - 1, Int(source.uniform() * Double(centers.count)))
+                center = centers[draw]
+                selected.append(center!)
+                available.removeAll { $0 == center! }
+            }
+            let count = min(model.affectedChannelCount, available.count + selected.count)
+            while selected.count < count {
+                if let center {
+                    let probabilities = available.map {
+                        max(1e-12, sweatSpatialWeight(positions[$0], center: positions[center],
+                                                     spreadDegrees: model.spreadDegrees ?? 35))
+                    }
+                    var draw = source.uniform() * probabilities.reduce(0, +)
+                    var choice = available.count - 1
+                    for index in available.indices {
+                        draw -= probabilities[index]
+                        if draw <= 0 { choice = index; break }
+                    }
+                    selected.append(available.remove(at: choice))
+                } else {
+                    let draw = min(available.count - 1, Int(source.uniform() * Double(available.count)))
+                    selected.append(available.remove(at: draw))
+                }
             }
             let amplitude = model.amplitudeMicrovolts * max(0.3, 1 + 0.2 * source.gaussian())
             let sign = source.uniform() < 0.5 ? -1.0 : 1.0
+            var weights = [Double](repeating: 0, count: channels.count)
             for channel in selected {
-                injectWindow(
-                    into: &channels, onset: episode.onset, duration: episode.duration,
-                    samplingRate: config.samplingRate,
-                    weights: channels.indices.map { $0 == channel ? 1.0 : 0.0 }
-                ) { _, phase in sign * amplitude * pow(sin(Double.pi * phase), 2) }
+                let taper = center.map {
+                    0.3 + 0.7 * sweatSpatialWeight(positions[channel], center: positions[$0],
+                                                 spreadDegrees: model.spreadDegrees ?? 35)
+                } ?? 1
+                let variation = model.varyAcrossChannels == true
+                    ? (0.5 + source.uniform()) * (source.uniform() < 0.5 ? -1 : 1) : 1
+                weights[channel] = taper * variation
             }
+            injectWindow(
+                into: &channels, onset: episode.onset, duration: episode.duration,
+                samplingRate: config.samplingRate, weights: weights
+            ) { _, phase in sign * amplitude * pow(sin(Double.pi * phase), 2) }
             truth.append(ArtifactEpisodeTruth(
                 id: String(format: "sweat-%04d", episodeIndex + 1), kind: "sweat",
                 onsetSeconds: episode.onset, durationSeconds: episode.duration,
                 amplitudeMicrovolts: sign * amplitude,
-                affectedChannels: selected.map { $0 + 1 }.sorted()
+                affectedChannels: selected.map { $0 + 1 }.sorted(),
+                topography: model.varyAcrossChannels == true || clustered ? weights : nil
             ))
         }
         return truth
     }
 
+    /// Frontal means normalized +y > 0.35 in the montage's nose-forward frame.
+    /// Geometry, rather than labels or channel numbers, supports dense/imported caps.
+    static func sweatEligibleChannels(model: SweatConfig, montage: Montage) -> [Int] {
+        let placement = model.placement ?? .anywhere
+        let positions = montage.positions
+        var eligible = Array(positions.indices)
+        if placement == .frontalOnly { eligible = eligible.filter { positions[$0].y > 0.35 } }
+        if placement == .selected {
+            let requested = Set(model.selectedChannels ?? [])
+            eligible = eligible.filter { requested.contains($0 + 1) }
+        }
+        // Preserve the legacy anywhere RNG ordering. Spatial modes use a
+        // canonical coordinate order so reordering channels does not move artifacts.
+        if placement != .anywhere {
+            eligible.sort {
+                let a = positions[$0], b = positions[$1]
+                if a.y != b.y { return a.y > b.y }
+                if a.x != b.x { return a.x < b.x }
+                if a.z != b.z { return a.z > b.z }
+                return $0 < $1
+            }
+        }
+        return eligible
+    }
+
+    private static func sweatSpatialWeight(
+        _ position: (x: Double, y: Double, z: Double),
+        center: (x: Double, y: Double, z: Double), spreadDegrees: Double
+    ) -> Double {
+        let dot = max(-1, min(1, position.x * center.x + position.y * center.y + position.z * center.z))
+        let angle = acos(dot) * 180 / Double.pi
+        return exp(-0.5 * pow(angle / max(1e-6, spreadDegrees), 2))
+    }
+
+    /// Controlled conductance proxy: positive responses share the exact onset,
+    /// duration, and envelope of the EEG sweat episodes. EEG polarity and the
+    /// recording reference do not change this separate auxiliary sensor.
+    static func gsrChannel(episodes: [ArtifactEpisodeTruth], config: SimulationConfig) -> [Double]? {
+        guard let model = config.gsr else { return nil }
+        var result = [[Double]](repeating: [Double](
+            repeating: model.baselineMicrosiemens, count: config.sampleCount
+        ), count: 1)
+        let nominal = max(1e-12, config.sweat?.amplitudeMicrovolts ?? 500)
+        for episode in episodes {
+            let amplitude = model.responseMicrosiemens * abs(episode.amplitudeMicrovolts) / nominal
+            injectWindow(
+                into: &result, onset: episode.onsetSeconds, duration: episode.durationSeconds,
+                samplingRate: config.samplingRate, weights: [1]
+            ) { _, phase in amplitude * pow(sin(Double.pi * phase), 2) }
+        }
+        return result[0]
+    }
+
     private static func episodes(
         ratePerMinute: Double, meanDuration: Double, recordingDuration: Double,
-        source: inout GaussianSource
+        source: inout GaussianSource, allowOverlap: Bool = false
     ) -> [(onset: Double, duration: Double)] {
         guard ratePerMinute > 0 else { return [] }
         let meanInterval = 60 / ratePerMinute
@@ -291,7 +383,7 @@ nonisolated enum AdditionalArtifactModel {
             guard duration >= 0.05 else { break }
             result.append((onset, duration))
             let interval = -meanInterval * log(max(1e-12, source.uniform()))
-            onset += max(duration + 0.25, interval)
+            onset += max(allowOverlap ? 0.25 : duration + 0.25, interval)
         }
         return result
     }

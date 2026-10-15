@@ -122,6 +122,7 @@ final class ChannelModel {
     var healthProgress = 0.0
     /// Incremented by menu commands to force a new health scan.
     var healthRefreshToken = 0
+    var healthWaveletToken = 0
 
     func clearHealthResults() {
         healthResults.removeAll()
