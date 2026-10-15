@@ -2374,7 +2374,7 @@ already showed is not a neutral pin.
     repeated-seed matrix.
 
   The resumable engineering and publication plan, including the proposed first
-  matrix and analysis, is [`paper_plan_pca-s.md`](paper_plan_pca-s.md).
+  matrix and analysis, is [`paper_plan_pca-s.md`](https://github.com/pmolfese/EVA/blob/main/paper_plan_pca-s.md).
 - **D.** Reporting: a figure script, and the docs in
   `Tools/EVASimulate/README.md` and `docs/`.
 

@@ -137,6 +137,6 @@ a policy that is excellent for isolated blinks may be harmful for focal
 electrode pops.
 
 The first full campaign and its interpretation are recorded in
-[W-ICA campaign — 2026-09-14](../../provenance/wica-campaign-2026-09-14.md).
+[W-ICA campaign — 2026-09-14](https://github.com/pmolfese/EVA/blob/main/docs/provenance/wica-campaign-2026-09-14.md).
 The paired solver follow-up is recorded in
-[W-ICA ICA algorithm comparison — 2026-09-14](../../provenance/wica-ica-algorithm-comparison-2026-09-14.md).
+[W-ICA ICA algorithm comparison — 2026-09-14](https://github.com/pmolfese/EVA/blob/main/docs/provenance/wica-ica-algorithm-comparison-2026-09-14.md).
