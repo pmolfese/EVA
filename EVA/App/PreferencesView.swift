@@ -276,7 +276,7 @@ struct PreferencesView: View {
             QuickLookPreferencesView()
                 .tabItem { Label("Quick Look", systemImage: "eye") }
         }
-        .frame(width: 720, height: 560)
+        .frame(width: 720, height: 660)
     }
 }
 

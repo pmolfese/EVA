@@ -804,6 +804,30 @@ enum SimulatorHelp {
         ]
     )
 
+    static let sweat = HelpTopic(
+        title: "Sweat / slow drift",
+        summary: "Adds large, smooth baseline shifts to selected electrodes. Each episode rises and returns over tens of seconds, with a randomly positive or negative excursion.",
+        guidance: "Defaults to 500 µV over about 30 seconds on one electrode. Use Large, widespread shifts for 1500 µV, six episodes per minute, and up to eight electrodes. Allow overlapping shifts lets long episodes coexist. Vary amplitude and polarity by channel prevents broad shifts from being identical and cancelling under average reference. Amplitude is measured before referencing."
+    )
+
+    static let gsr = HelpTopic(
+        title: "GSR channel",
+        summary: "Writes an optional GSR auxiliary channel in µS, aligned to the same sweat episodes as the EEG drift.",
+        guidance: "GSR starts at the baseline conductance and rises positively with each episode, regardless of EEG polarity. Responses add during overlapping episodes. Response sets the increase for a nominal-amplitude sweat episode. This is a controlled synthetic proxy using the sweat envelope, rather than a fitted model of a real GSR sensor. Enabling it also enables sweat; disabling sweat afterward leaves baseline conductance only."
+    )
+
+    static let sweatPlacement = HelpTopic(
+        title: "Sweat placement",
+        summary: "New sweat configurations prefer frontal clusters, identified from electrode coordinates rather than names or channel numbers.",
+        options: [
+            .init(name: "Frontal-biased clusters", detail: "Frontal preference is the probability of choosing a cluster center from frontal electrodes; otherwise the center can be anywhere. Larger spread reaches farther from the center, with weaker drift toward the edges."),
+            .init(name: "Frontal only", detail: "Restricts every affected electrode to the frontal region. If fewer electrodes qualify than requested, the episode uses all eligible electrodes."),
+            .init(name: "Anywhere", detail: "Selects electrodes uniformly across the cap, retaining the original simulator behavior."),
+            .init(name: "Selected electrodes", detail: "Select the eligible channel numbers. Each episode randomly chooses up to Channels per episode from this set.")
+        ],
+        guidance: "Frontal means normalized nose-forward y > 0.35. New runs use 85% frontal preference and 35° spread. These are adjustable model settings. Placement describes injection before referencing; average reference can spread smaller shifts into other channels. Older scenarios without placement retain Anywhere."
+    )
+
     static let badChannelPlacement = HelpTopic(
         title: "Placement",
         summary: """

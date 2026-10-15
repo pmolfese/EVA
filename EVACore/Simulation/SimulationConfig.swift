@@ -359,6 +359,8 @@ nonisolated struct SimulationConfig: Codable, Sendable {
     var swallowing: SwallowingConfig? = nil
     var cableMovement: CableMovementConfig? = nil
     var sweat: SweatConfig? = nil
+    /// Optional auxiliary conductance trace driven by the sweat episode truth.
+    var gsr: GSRConfig? = nil
 
     // MARK: Non-additive recording artifacts
 
@@ -679,11 +681,32 @@ nonisolated struct CableMovementConfig: Codable, Sendable {
     var oscillationHz: Double = 0.8
 }
 
+nonisolated enum SweatPlacement: String, Codable, Sendable, CaseIterable {
+    case frontalBiased = "frontal-biased"
+    case frontalOnly = "frontal-only"
+    case anywhere
+    case selected
+}
+
 nonisolated struct SweatConfig: Codable, Sendable {
     var episodesPerMinute: Double = 1
-    var amplitudeMicrovolts: Double = 100
-    var durationSeconds: Double = 15
+    var amplitudeMicrovolts: Double = 500
+    var durationSeconds: Double = 30
     var affectedChannelCount: Int = 1
+    /// Missing values retain the original non-overlapping, uniform model.
+    var allowOverlap: Bool? = nil
+    var varyAcrossChannels: Bool? = nil
+    /// New runs prefer frontal clusters; absent in older scenarios means anywhere.
+    var placement: SweatPlacement? = .frontalBiased
+    var frontalPreference: Double? = 0.85
+    var spreadDegrees: Double? = 35
+    /// Eligible 1-based channels for selected placement.
+    var selectedChannels: [Int]? = nil
+}
+
+nonisolated struct GSRConfig: Codable, Sendable {
+    var baselineMicrosiemens: Double = 2
+    var responseMicrosiemens: Double = 1
 }
 
 nonisolated struct ChannelBridge: Codable, Sendable, Hashable {

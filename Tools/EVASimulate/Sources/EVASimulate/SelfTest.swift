@@ -2038,7 +2038,256 @@ nonisolated enum SelfTest {
                 expectation: "movement weights every channel; sweat changes exactly its recorded channels"
             ))
 
+            // Exercise the same scenario -> CLI -> MFF path used by the GUI.
+            // Reconstruct every sweat sample from truth, so a marker-only or
+            // wrong-amplitude injection cannot pass a locality check alone.
+            var sweatRecordingConfig = SimulationConfig.default
+            sweatRecordingConfig.channelCount = 4
+            sweatRecordingConfig.samplingRate = 100
+            sweatRecordingConfig.durationSeconds = 40
+            sweatRecordingConfig.gradientEnabled = false
+            sweatRecordingConfig.bcgEnabled = false
+            sweatRecordingConfig.includeECG = false
+            sweatRecordingConfig.includeMotionSensor = false
+            sweatRecordingConfig.impedanceNoise = nil
+            sweatRecordingConfig.recordingReference = .average
+            var recordingSweat = SweatConfig()
+            recordingSweat.episodesPerMinute = 20
+            recordingSweat.affectedChannelCount = 4
+            recordingSweat.allowOverlap = true
+            recordingSweat.varyAcrossChannels = true
+            sweatRecordingConfig.sweat = recordingSweat
+            sweatRecordingConfig.gsr = GSRConfig()
+            let sweatDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("eva-sweat-contract-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: sweatDirectory) }
+            let scenarioURL = sweatDirectory.appendingPathComponent("scenario.json")
+            try FileManager.default.createDirectory(at: sweatDirectory, withIntermediateDirectories: true)
+            try SimulationScenarioFile.write(
+                config: sweatRecordingConfig, to: scenarioURL,
+                name: "Sweat contract", description: "Sweat MFF round trip"
+            )
+            let loadedSweatConfig = try SimulationScenarioFile.load(from: scenarioURL).config
+            _ = try runGenerate(
+                config: loadedSweatConfig, arguments: Arguments(["--prefix", "sweat"]),
+                outputDirectory: sweatDirectory
+            )
+            let savedTruth = try JSONDecoder().decode(
+                SimulationTruth.self,
+                from: Data(contentsOf: sweatDirectory.appendingPathComponent("sweat_truth.json"))
+            )
+            let recordedSweat = savedTruth.sweatEpisodes ?? []
+            let largestSweatExcursion = recordedSweat.map { abs($0.amplitudeMicrovolts) }.max() ?? 0
+            outcomes.append(Outcome(
+                name: "Sweat defaults produce large drift over tens of seconds",
+                snr: largestSweatExcursion,
+                passed: largestSweatExcursion > 250
+                    && (recordedSweat.first?.durationSeconds ?? 0) >= 20,
+                expectation: "unreferenced drift exceeds 250 µV and the first episode lasts at least 20 s"
+            ))
+            let sweatReader = MFFReader()
+            let cleanSweatSignal = try sweatReader.loadSignal(
+                from: sweatDirectory.appendingPathComponent("sweat_clean.mff")
+            )
+            let noisySweatSignal = try sweatReader.loadSignal(
+                from: sweatDirectory.appendingPathComponent("sweat_noisy.mff")
+            )
+            var expectedSweat = [[Double]](
+                repeating: [Double](repeating: 0, count: sweatRecordingConfig.sampleCount), count: 4
+            )
+            var expectedGSR = [Double](repeating: 2, count: sweatRecordingConfig.sampleCount)
+            for episode in recordedSweat {
+                let start = Int((episode.onsetSeconds * 100).rounded())
+                let end = min(sweatRecordingConfig.sampleCount,
+                              start + max(2, Int((episode.durationSeconds * 100).rounded())))
+                for sample in start..<end {
+                    let phase = Double(sample - start) / Double(end - start - 1)
+                    let envelope = pow(sin(.pi * phase), 2)
+                    expectedGSR[sample] += abs(episode.amplitudeMicrovolts)
+                        / recordingSweat.amplitudeMicrovolts * envelope
+                    for channel in episode.affectedChannels {
+                        let weight = episode.topography?[channel - 1] ?? 1
+                        expectedSweat[channel - 1][sample] += episode.amplitudeMicrovolts * weight * envelope
+                    }
+                }
+            }
+            var maximumSweatError = 0.0
+            // Average referencing spreads the local electrode drift into the
+            // shared reference; the saved EEG must contain that same mixture.
+            let expectedSweatMean = (0..<sweatRecordingConfig.sampleCount).map { sample in
+                expectedSweat.reduce(0.0) { $0 + $1[sample] } / Double(expectedSweat.count)
+            }
+            for channel in expectedSweat.indices {
+                for sample in expectedSweat[channel].indices {
+                    let actual = Double(noisySweatSignal.data[channel][sample])
+                        - Double(cleanSweatSignal.data[channel][sample])
+                    let expected = expectedSweat[channel][sample] - expectedSweatMean[sample]
+                    maximumSweatError = max(maximumSweatError, abs(actual - expected))
+                }
+            }
+            let sweatMarkers = noisySweatSignal.events.filter { $0.code == "swet" }
+            let markersMatch = sweatMarkers.count == recordedSweat.count
+                && zip(sweatMarkers, recordedSweat).allSatisfy { marker, episode in
+                    abs(marker.beginTimeSeconds - episode.onsetSeconds) <= 0.0051
+                        && abs((marker.durationSeconds ?? -1) - episode.durationSeconds) < 1e-6
+                }
+            outcomes.append(Outcome(
+                name: "Sweat scenario writes slow local drift and matching MFF markers",
+                snr: maximumSweatError,
+                passed: !recordedSweat.isEmpty && maximumSweatError < 1e-3 && markersMatch
+                    && recordedSweat.allSatisfy { $0.affectedChannels.count == 4 },
+                expectation: "saved samples match average-referenced signed truth within Float precision; swet times/durations match"
+            ))
+
+            let hasOverlap = zip(recordedSweat, recordedSweat.dropFirst()).contains { first, second in
+                second.onsetSeconds < first.onsetSeconds + first.durationSeconds
+            }
+            let hasVariedWeights = recordedSweat.contains { episode in
+                guard let weights = episode.topography else { return false }
+                return Set(weights).count > 1
+            }
+            outcomes.append(Outcome(
+                name: "Frequent widespread sweat overlaps and survives average reference",
+                snr: Double(recordedSweat.count),
+                passed: recordedSweat.count > 4 && hasOverlap && hasVariedWeights
+                    && noisySweatSignal.data != cleanSweatSignal.data,
+                expectation: "overlapping episodes vary across all electrodes rather than cancelling under average reference"
+            ))
+
+            let gsrSignal = try sweatReader.loadPNSSignal(
+                from: sweatDirectory.appendingPathComponent("sweat_noisy.mff")
+            )
+            let gsrSamples = gsrSignal?.data.first ?? []
+            let gsrMatches = gsrSamples.count == expectedGSR.count
+                && zip(gsrSamples, expectedGSR).allSatisfy { abs(Double($0) - $1) < 1e-5 }
+            let gsrRoundTripURL = sweatDirectory.appendingPathComponent("gsr-roundtrip.mff")
+            try MFFWriter.write(
+                signal: noisySweatSignal, pnsSignal: gsrSignal, segments: [], kind: .continuous,
+                to: gsrRoundTripURL, preserveSourceFileInfo: false
+            )
+            let roundTripGSR = try sweatReader.loadPNSSignal(from: gsrRoundTripURL)
+            outcomes.append(Outcome(
+                name: "Optional GSR follows sweat timing and preserves conductance units",
+                snr: Double(gsrSamples.max() ?? 0),
+                passed: gsrMatches && gsrSignal?.channelNames == ["GSR"]
+                    && gsrSignal?.channelUnits == ["uS"]
+                    && roundTripGSR?.channelUnits == ["uS"] && roundTripGSR?.data == gsrSignal?.data,
+                expectation: "positive µS responses add for overlapping sweat episodes; MFF import/export preserves samples and units"
+            ))
+            var noGSRConfig = loadedSweatConfig
+            noGSRConfig.gsr = nil
+            _ = try runGenerate(
+                config: noGSRConfig, arguments: Arguments(["--prefix", "no-gsr"]),
+                outputDirectory: sweatDirectory
+            )
+            let noGSRURL = sweatDirectory.appendingPathComponent("no-gsr_noisy.mff")
+            let noGSRSignal = try sweatReader.loadSignal(from: noGSRURL)
+            let disabledGSR = try sweatReader.loadPNSSignal(from: noGSRURL)
+            outcomes.append(Outcome(
+                name: "GSR toggle leaves EEG unchanged and removes only the auxiliary channel",
+                snr: 0,
+                passed: disabledGSR == nil && noGSRSignal.data == noisySweatSignal.data
+                    && AdditionalArtifactModel.gsrChannel(episodes: recordedSweat, config: noGSRConfig) == nil,
+                expectation: "identical EEG samples with GSR on/off; no PNS signal when no auxiliary sensors are enabled"
+            ))
+
             // ---------------------------------------------------------------
+            // Geometry-aware sweat placement, including legacy scenario behavior.
+            let placementMontage = Montage.standard(count: 20)
+            var placementSweat = SweatConfig()
+            placementSweat.episodesPerMinute = 120
+            placementSweat.durationSeconds = 0.5
+            placementSweat.allowOverlap = true
+            placementSweat.frontalPreference = 1
+            func sweatPlacementRun(_ model: SweatConfig, montage: Montage) -> ([[Double]], [ArtifactEpisodeTruth]) {
+                var config = SimulationConfig.default
+                config.channelCount = 20
+                config.samplingRate = 50
+                config.durationSeconds = 60
+                config.sweat = model
+                var samples = [[Double]](repeating: [Double](repeating: 0, count: config.sampleCount), count: 20)
+                let truth = AdditionalArtifactModel.injectAdditive(into: &samples, config: config, montage: montage)
+                return (samples, truth.sweatEpisodes)
+            }
+            let frontalIndices = Set(placementMontage.positions.indices.filter { placementMontage.positions[$0].y > 0.35 })
+            let (_, frontalCenters) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            var anywhereSweat = placementSweat
+            anywhereSweat.placement = .anywhere
+            let (_, anywhereEpisodes) = sweatPlacementRun(anywhereSweat, montage: placementMontage)
+            outcomes.append(Outcome(
+                name: "Frontal sweat preference uses geometry rather than uniform channel selection",
+                snr: Double(frontalCenters.count),
+                passed: frontalCenters.count > 20
+                    && frontalCenters.allSatisfy { frontalIndices.contains($0.affectedChannels[0] - 1) }
+                    && anywhereEpisodes.contains { !frontalIndices.contains($0.affectedChannels[0] - 1) },
+                expectation: "100% frontal preference selects only frontal centers; Anywhere also selects posterior sites"
+            ))
+            placementSweat.affectedChannelCount = 4
+            placementSweat.spreadDegrees = 5
+            let (_, narrowEpisodes) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            placementSweat.spreadDegrees = 180
+            let (_, broadEpisodes) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            func meanSweatDistance(_ episodes: [ArtifactEpisodeTruth]) -> Double {
+                var total = 0.0
+                var count = 0
+                let positions = placementMontage.positions
+                for episode in episodes {
+                    guard let weights = episode.topography,
+                          let center = weights.indices.max(by: { weights[$0] < weights[$1] }) else { continue }
+                    for channel in episode.affectedChannels where channel - 1 != center {
+                        let a = positions[channel - 1], b = positions[center]
+                        total += acos(max(-1, min(1, a.x * b.x + a.y * b.y + a.z * b.z)))
+                        count += 1
+                    }
+                }
+                return total / Double(max(1, count))
+            }
+            outcomes.append(Outcome(
+                name: "Sweat spread controls the spatial extent of clusters",
+                snr: meanSweatDistance(broadEpisodes) / max(1e-12, meanSweatDistance(narrowEpisodes)),
+                passed: meanSweatDistance(narrowEpisodes) < meanSweatDistance(broadEpisodes),
+                expectation: "5° clusters stay closer to their center than 180° clusters"
+            ))
+            placementSweat.spreadDegrees = 35
+            placementSweat.varyAcrossChannels = true
+            let (orderedSweat, _) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            var renamedReversed = placementMontage
+            renamedReversed.electrodes.reverse()
+            for index in renamedReversed.electrodes.indices { renamedReversed.electrodes[index].name = "E\(index + 1)" }
+            let (reorderedSweat, _) = sweatPlacementRun(placementSweat, montage: renamedReversed)
+            outcomes.append(Outcome(
+                name: "Sweat clusters follow electrode positions when names and ordering change",
+                snr: 0,
+                passed: orderedSweat == Array(reorderedSweat.reversed()),
+                expectation: "identical physical-electrode traces after reversing and renaming the montage"
+            ))
+            placementSweat.placement = .frontalOnly
+            placementSweat.affectedChannelCount = 20
+            let (_, restrictedEpisodes) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            placementSweat.placement = .selected
+            placementSweat.selectedChannels = [2, 19]
+            let (_, selectedEpisodes) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            outcomes.append(Outcome(
+                name: "Restricted sweat placements stay inside eligible electrodes",
+                snr: Double(frontalIndices.count),
+                passed: !restrictedEpisodes.isEmpty && !selectedEpisodes.isEmpty
+                    && restrictedEpisodes.allSatisfy { Set($0.affectedChannels.map { $0 - 1 }) == frontalIndices }
+                    && selectedEpisodes.allSatisfy { Set($0.affectedChannels) == Set([2, 19]) },
+                expectation: "Frontal only and Selected cap the count to eligible electrodes without spilling elsewhere"
+            ))
+            var legacyObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(anywhereSweat)) as! [String: Any]
+            for key in ["placement", "frontalPreference", "spreadDegrees", "selectedChannels"] {
+                legacyObject.removeValue(forKey: key)
+            }
+            let legacySweat = try JSONDecoder().decode(SweatConfig.self, from: JSONSerialization.data(withJSONObject: legacyObject))
+            let (legacySamples, _) = sweatPlacementRun(legacySweat, montage: placementMontage)
+            let (anywhereSamples, _) = sweatPlacementRun(anywhereSweat, montage: placementMontage)
+            outcomes.append(Outcome(
+                name: "Legacy sweat scenarios retain the original Anywhere behavior",
+                snr: 0, passed: legacySweat.placement == nil && legacySamples == anywhereSamples,
+                expectation: "missing spatial fields decode and produce the same samples as explicit Anywhere"
+            ))
+
             // Roadmap 5.1: the BCG as physical generators.
             // ---------------------------------------------------------------
 

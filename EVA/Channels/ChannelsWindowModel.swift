@@ -49,6 +49,7 @@ final class ChannelsWindowModel {
         var isAnalyzingHealth: Bool
         var healthProgress: Double
         var refreshHealth: () -> Void
+        var runHealthWavelets: () -> Void
     }
 
     static let shared = ChannelsWindowModel()
@@ -81,6 +82,7 @@ final class ChannelsWindowModel {
     @ObservationIgnored private var analyzedHealthResults = [Int: ChannelHealthResult]()
     @ObservationIgnored private var diagnosticTask: Task<Void, Never>?
     @ObservationIgnored private var healthRefreshAction: (() -> Void)?
+    @ObservationIgnored private var healthWaveletAction: (() -> Void)?
     @ObservationIgnored private var recordingContexts = [UUID: RecordingContext]()
 
     private init() {}
@@ -95,7 +97,8 @@ final class ChannelsWindowModel {
         healthResults: [Int: ChannelHealthResult],
         isAnalyzingHealth: Bool,
         healthProgress: Double,
-        refreshHealth: @escaping () -> Void
+        refreshHealth: @escaping () -> Void,
+        runHealthWavelets: @escaping () -> Void
     ) {
         let context = RecordingContext(
             name: name,
@@ -106,7 +109,8 @@ final class ChannelsWindowModel {
             healthResults: healthResults,
             isAnalyzingHealth: isAnalyzingHealth,
             healthProgress: healthProgress,
-            refreshHealth: refreshHealth
+            refreshHealth: refreshHealth,
+            runHealthWavelets: runHealthWavelets
         )
         recordingContexts[id] = context
         if activeRecordingID == nil || activeRecordingID == id {
@@ -133,6 +137,7 @@ final class ChannelsWindowModel {
         isAnalyzingHealth = context.isAnalyzingHealth
         healthProgress = context.healthProgress
         healthRefreshAction = context.refreshHealth
+        healthWaveletAction = context.runHealthWavelets
 
         if signalChanged {
             clearDiagnostics()
@@ -189,6 +194,7 @@ final class ChannelsWindowModel {
         isAnalyzingHealth = false
         healthProgress = 0
         healthRefreshAction = nil
+        healthWaveletAction = nil
         clearDiagnostics()
     }
 
@@ -200,6 +206,10 @@ final class ChannelsWindowModel {
         selectedTab = tab
         selectedChannel = channel
         selectedRelationshipID = relationshipID
+    }
+
+    func requestHealthWavelets() {
+        healthWaveletAction?()
     }
 
     func requestHealthRefresh() {

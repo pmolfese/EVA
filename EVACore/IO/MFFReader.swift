@@ -102,6 +102,8 @@ nonisolated struct MFFSignalData: Sendable {
     /// negative-up. `nil` when the signal has no PNS sensor metadata (e.g. EEG,
     /// or PNS imported from a non-MFF source).
     let positiveUpFlags: [Bool]?
+    /// Per-channel physical units from PNS metadata (for example uV or uS).
+    let channelUnits: [String]?
     /// Immutable provenance for the physical acquisition reference, when the
     /// source format declares it.
     let acquisitionReference: EEGAcquisitionReference?
@@ -125,6 +127,7 @@ nonisolated struct MFFSignalData: Sendable {
         isGrandAverage: Bool = false,
         impedancesKOhm: [Float]? = nil,
         positiveUpFlags: [Bool]? = nil,
+        channelUnits: [String]? = nil,
         acquisitionReference: EEGAcquisitionReference? = nil,
         referenceState: EEGReferenceState = .unknown
     ) {
@@ -144,6 +147,7 @@ nonisolated struct MFFSignalData: Sendable {
         self.isGrandAverage = isGrandAverage
         self.impedancesKOhm = impedancesKOhm
         self.positiveUpFlags = positiveUpFlags
+        self.channelUnits = channelUnits
         self.acquisitionReference = acquisitionReference
         self.referenceState = referenceState
     }
@@ -176,6 +180,7 @@ nonisolated struct MFFSignalData: Sendable {
             isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm,
             positiveUpFlags: positiveUpFlags,
+            channelUnits: channelUnits,
             acquisitionReference: acquisitionReference,
             referenceState: referenceState
         )
@@ -203,6 +208,7 @@ nonisolated struct MFFSignalData: Sendable {
             isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm,
             positiveUpFlags: positiveUpFlags,
+            channelUnits: channelUnits,
             acquisitionReference: acquisitionReference,
             referenceState: referenceState
         )
@@ -244,6 +250,7 @@ nonisolated struct MFFSignalData: Sendable {
             isGrandAverage: newIsGrandAverage,
             impedancesKOhm: impedancesKOhm,
             positiveUpFlags: positiveUpFlags,
+            channelUnits: channelUnits,
             acquisitionReference: acquisitionReference,
             referenceState: referenceState
         )
@@ -287,6 +294,7 @@ nonisolated struct MFFSignalData: Sendable {
             isGrandAverage: isGrandAverage,
             impedancesKOhm: restoredImpedances,
             positiveUpFlags: restoredPositiveUp,
+            channelUnits: channelUnits.map { $0 + ["uV"] },
             acquisitionReference: EEGAcquisitionReference(
                 channelIndex: reference.channelIndex,
                 name: reference.name,
@@ -314,6 +322,7 @@ nonisolated struct MFFSignalData: Sendable {
             isGrandAverage: isGrandAverage,
             impedancesKOhm: impedancesKOhm,
             positiveUpFlags: positiveUpFlags,
+            channelUnits: channelUnits,
             acquisitionReference: acquisitionReference,
             referenceState: state
         )
@@ -1220,13 +1229,18 @@ nonisolated final class MFFReader {
             events: [],   // events belong to the primary (EEG) signal
             data: samples,
             channelNames: channelNames,
-            positiveUpFlags: positiveUpFlags
+            positiveUpFlags: positiveUpFlags,
+            channelUnits: parsePNSChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels,
+                                             elementName: "unit", defaultValue: "uV")
         )
     }
 
     /// Parses PNS channel names from `pnsSet.xml`, keyed by the sensor `<number>`
     /// (0-based, matching the data channel order).
-    private func parsePNSChannelNames(in packageURL: URL, expectedCount: Int) -> [String]? {
+    private func parsePNSChannelNames(
+        in packageURL: URL, expectedCount: Int,
+        elementName: String = "name", defaultValue: String? = nil
+    ) -> [String]? {
         let url = packageURL.appendingPathComponent("pnsSet.xml")
         guard expectedCount > 0, FileManager.default.fileExists(atPath: url.path),
               let document = try? loadXMLDocument(at: url),
@@ -1242,7 +1256,7 @@ nonisolated final class MFFReader {
                 .stringValue
                 .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
             let name = children
-                .first { sanitizedTagName($0.name) == "name" }?
+                .first { sanitizedTagName($0.name) == elementName }?
                 .stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard let number, (0..<expectedCount).contains(number),
@@ -1252,7 +1266,7 @@ nonisolated final class MFFReader {
 
         guard names.contains(where: { !$0.isEmpty }) else { return nil }
         return names.enumerated().map { index, name in
-            name.isEmpty ? "PNS \(index + 1)" : name
+            name.isEmpty ? (defaultValue ?? "PNS \(index + 1)") : name
         }
     }
 

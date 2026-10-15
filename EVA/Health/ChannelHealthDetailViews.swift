@@ -66,10 +66,10 @@ extension WaveformView {
     }
 
     @MainActor
-    func runWaveletChannelGoodness(for signal: MFFSignalData) {
+    func runWaveletChannelGoodness(for signal: MFFSignalData, forceBase: Bool = false) {
         guard !channels.isAnalyzingHealth else { return }
         let signature = channelHealthSignature(for: signal)
-        let shouldRefreshBase = chanHealth.signature != signature || channels.healthResults.isEmpty
+        let shouldRefreshBase = forceBase || chanHealth.signature != signature || channels.healthResults.isEmpty
         let existingResults = channels.healthResults
         let layout = recording.sensorLayout
         let impedances = recording.signal?.impedancesKOhm
@@ -281,7 +281,11 @@ extension WaveformView {
             return
         }
         channels.showsHealth = true
-        startChannelHealthScan(for: signal, signature: signature)
+        if goodnessSettings.runWaveletsAutomatically {
+            runWaveletChannelGoodness(for: signal, forceBase: true)
+        } else {
+            startChannelHealthScan(for: signal, signature: signature)
+        }
     }
 
     /// Updates channel health after an interpolation change, touching only the
