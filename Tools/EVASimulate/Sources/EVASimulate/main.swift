@@ -286,9 +286,20 @@ func usage() -> String {
         --cable-amplitude <uv>      Default 150.
         --cable-duration <s>        Default 3.
         --sweat <episodes/min>      Very-low-frequency local drift.
-        --sweat-amplitude <uv>      Default 100.
-        --sweat-duration <s>        Default 15.
+        --sweat-amplitude <uv>      Default 500 (before referencing).
+        --sweat-duration <s>        Default 30.
         --sweat-channels <n>        Channels per episode (default 1).
+        --sweat-placement <mode>   frontal-biased (default), frontal-only,
+                                    anywhere, or selected.
+        --sweat-frontal-preference <0..1>  Frontal-center preference (default 0.85).
+        --sweat-spread <degrees>   Cluster spread, 5..180 (default 35).
+        --sweat-selected-channels <n,...>  Eligible 1-based channels; selects selected mode.
+        --sweat-overlap            Allow simultaneous sweat episodes.
+        --sweat-vary-channels      Vary drift amplitude and polarity by electrode.
+        --no-sweat-overlap/--no-sweat-vary-channels
+        --with-gsr/--no-gsr        Optional GSR conductance channel linked to sweat.
+        --gsr-baseline <us>        Baseline conductance (default 2 µS).
+        --gsr-response <us>        Response per nominal sweat episode (default 1 µS).
         --bridge <a:b,...>          Make channel pairs share their averaged signal.
         --bad-reference <uv>        Common 0.2-30 Hz reference contamination.
         --clip <uv>                 Apply symmetric hard amplifier rails.
@@ -581,6 +592,9 @@ let generateOptions: Set<String> = [
     "swallowing", "swallowing-amplitude", "swallowing-duration", "no-swallowing",
     "cable-movement", "cable-amplitude", "cable-duration", "no-cable-movement",
     "sweat", "sweat-amplitude", "sweat-duration", "sweat-channels", "no-sweat",
+    "sweat-placement", "sweat-frontal-preference", "sweat-spread", "sweat-selected-channels",
+    "sweat-overlap", "no-sweat-overlap", "sweat-vary-channels", "no-sweat-vary-channels",
+    "with-gsr", "no-gsr", "gsr-baseline", "gsr-response",
     "bridge", "no-bridges", "bad-reference", "no-bad-reference", "clip", "no-clipping",
     "bad-channels", "bad-channel-count", "bad-channel-kind",
     "bad-channel-placement", "bad-eog",
@@ -1060,8 +1074,41 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     if let value = try arguments.double("sweat-amplitude") { sweat.amplitudeMicrovolts = value; sweatChanged = true }
     if let value = try arguments.double("sweat-duration") { sweat.durationSeconds = value; sweatChanged = true }
     if let value = try arguments.int("sweat-channels") { sweat.affectedChannelCount = value; sweatChanged = true }
+    if let raw = arguments.string("sweat-selected-channels") {
+        sweat.selectedChannels = try raw.split(separator: ",", omittingEmptySubsequences: false).map {
+            guard let channel = Int($0.trimmingCharacters(in: .whitespaces)), channel > 0 else {
+                throw SimulateError.usage("--sweat-selected-channels expects comma-separated positive channel numbers")
+            }
+            return channel
+        }
+        sweat.placement = .selected
+        sweatChanged = true
+    }
+    if let raw = arguments.string("sweat-placement") {
+        guard let placement = SweatPlacement(rawValue: raw) else {
+            throw SimulateError.usage("--sweat-placement expects frontal-biased, frontal-only, anywhere, or selected")
+        }
+        sweat.placement = placement
+        sweatChanged = true
+    }
+    if let value = try arguments.double("sweat-frontal-preference") { sweat.frontalPreference = value; sweatChanged = true }
+    if let value = try arguments.double("sweat-spread") { sweat.spreadDegrees = value; sweatChanged = true }
+    if arguments.flag("sweat-overlap") { sweat.allowOverlap = true; sweatChanged = true }
+    if arguments.flag("no-sweat-overlap") { sweat.allowOverlap = false; sweatChanged = true }
+    if arguments.flag("sweat-vary-channels") { sweat.varyAcrossChannels = true; sweatChanged = true }
+    if arguments.flag("no-sweat-vary-channels") { sweat.varyAcrossChannels = false; sweatChanged = true }
     if arguments.flag("no-sweat") { config.sweat = nil }
     else if sweatChanged { config.sweat = sweat }
+
+    var gsr = config.gsr ?? GSRConfig()
+    var gsrChanged = arguments.flag("with-gsr")
+    if let value = try arguments.double("gsr-baseline") { gsr.baselineMicrosiemens = value; gsrChanged = true }
+    if let value = try arguments.double("gsr-response") { gsr.responseMicrosiemens = value; gsrChanged = true }
+    if arguments.flag("no-gsr") { config.gsr = nil }
+    else if gsrChanged {
+        config.gsr = gsr
+        if config.sweat == nil && !arguments.flag("no-sweat") { config.sweat = SweatConfig() }
+    }
 
     if arguments.flag("no-bridges") { config.bridgedChannelPairs = nil }
     else if let spec = arguments.string("bridge") {
@@ -1408,6 +1455,25 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
               sweat.affectedChannelCount <= config.channelCount else {
             throw SimulateError.usage("--sweat-channels must be between 1 and the EEG channel count")
         }
+        let preference = sweat.frontalPreference ?? 0.85
+        let spread = sweat.spreadDegrees ?? 35
+        guard preference.isFinite, (0...1).contains(preference),
+              spread.isFinite, (5...180).contains(spread) else {
+            throw SimulateError.usage("sweat frontal preference must be 0...1 and spread must be 5...180 degrees")
+        }
+        if sweat.placement == .selected {
+            let selected = sweat.selectedChannels ?? []
+            guard !selected.isEmpty, selected.allSatisfy({ (1...config.channelCount).contains($0) }),
+                  Set(selected).count == selected.count else {
+                throw SimulateError.usage("selected sweat placement requires distinct EEG channel numbers between 1 and the channel count")
+            }
+        }
+    }
+    if let gsr = config.gsr {
+        guard gsr.baselineMicrosiemens.isFinite, gsr.baselineMicrosiemens >= 0,
+              gsr.responseMicrosiemens.isFinite, gsr.responseMicrosiemens > 0 else {
+            throw SimulateError.usage("GSR baseline must be nonnegative and response must be positive (µS)")
+        }
     }
     if let pairs = config.bridgedChannelPairs {
         var used: Set<Int> = []
@@ -1494,6 +1560,18 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         montage = montage.jittered(
             degrees: jitter, seed: SimulationSeedStreams.montageJitter(base: config.seed)
         )
+    }
+
+    if let sweat = config.sweat {
+        let eligible = AdditionalArtifactModel.sweatEligibleChannels(model: sweat, montage: montage)
+        guard !eligible.isEmpty else {
+            throw SimulateError.usage("no electrodes qualify for the selected sweat placement in this montage")
+        }
+        if eligible.count < sweat.affectedChannelCount {
+            FileHandle.standardError.write(Data(
+                "note: sweat placement has only \(eligible.count) eligible electrodes; each episode uses that many\n".utf8
+            ))
+        }
     }
 
     // Expand the bad-channel and high-impedance counts into explicit channel
@@ -1820,6 +1898,7 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         pnsSignal: SimulationWriter.pnsSignal(
             ecg: ecg, motion: motion,
             veog: veog, heog: heog,
+            gsr: AdditionalArtifactModel.gsrChannel(episodes: additional.sweatEpisodes, config: config),
             config: config, packageURL: noisyURL
         ),
         segments: [],

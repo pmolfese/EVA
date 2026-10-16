@@ -701,7 +701,7 @@ struct ChannelHealthDetailsView: View {
                             Text("Good")
                             Text("Grade")
                             Text("Summary")
-                            Text("Weakest Metrics")
+                            Text("Weakest Metrics (goodness)")
                         }
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
@@ -722,7 +722,8 @@ struct ChannelHealthDetailsView: View {
                                 Text(weakestMetricText(result))
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+                                    .lineLimit(3)
+                                    .help(weakestMetricText(result))
                             }
                         }
                     }
@@ -737,7 +738,7 @@ struct ChannelHealthDetailsView: View {
 
     private func weakestMetricText(_ result: ChannelHealthResult) -> String {
         result.metrics.prefix(3).map {
-            "\($0.name) \(Int(($0.score * 100).rounded()))%"
+            "\($0.name) \(Int(($0.score * 100).rounded()))% good\($0.name == "Kurtosis" ? " (\($0.detail))" : "")"
         }
         .joined(separator: " | ")
     }

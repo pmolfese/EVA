@@ -1089,6 +1089,9 @@ struct WaveformView: View {
                 channelModel?.showsHealth = true
                 channelModel?.healthRefreshToken += 1
             },
+            runHealthWavelets: { [weak channelModel] in
+                channelModel?.healthWaveletToken += 1
+            },
             importLocations: { value in
                 try applyEEGLocationOverride(value)
             }
@@ -1650,6 +1653,9 @@ struct WaveformView: View {
         .onChange(of: chanHealth.detailsRequest) { _, _ in
             // Opening the details sheet runs health if it hasn't been yet.
             runChannelHealthOnDemand(for: continuousSignal)
+        }
+        .onChange(of: channels.healthWaveletToken) { _, _ in
+            runWaveletChannelGoodness(for: continuousSignal)
         }
         .onChange(of: channels.healthRefreshToken) { _, _ in
             // Menu "Run / Refresh Channel Health" forces a recompute.
@@ -3337,6 +3343,7 @@ struct WaveformView: View {
         channels.clearHealthResults()
         channels.showsHealth = false
         channels.healthRefreshToken = 0
+        channels.healthWaveletToken = 0
         electrodeGeometry = nil
         channelStatusMessage = nil
         channelStatusIsError = false

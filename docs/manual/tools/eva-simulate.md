@@ -351,7 +351,7 @@ Sweeps accept `--parameter emg-rate` and `--parameter emg-amplitude`.
 | Chewing | `--chewing <episodes/min>` | 100 µV, 4 s rhythmic temporalis episodes at 1.5 Hz. |
 | Swallowing | `--swallowing <events/min>` | 120 µV, 1 s double-lobed posterior-neck bursts. |
 | Cable movement | `--cable-movement <events/min>` | 150 µV, 3 s broad correlated sway at 0.8 Hz. |
-| Sweat | `--sweat <episodes/min>` | 100 µV, 15 s drift on one channel. |
+| Sweat | `--sweat <episodes/min>` | 500 µV, 30 s drift on one channel, before referencing. |
 | True bridge | `--bridge 3:4,8:9` | Each named pair is replaced by its shared mean signal. |
 | Bad reference | `--bad-reference <uv>` | Common 0.2-30 Hz contamination at the requested RMS. |
 | Saturation | `--clip <uv>` | Symmetric hard rails, applied after every additive artifact and bridge. |
@@ -361,6 +361,49 @@ Amplitude and duration controls use `--chewing-amplitude`,
 `--sweat-channels` controls locality. Matching `--no-*` flags clear scenario
 values. Episodic truth is available through `score-events --type chewing`,
 `swallowing`, `movement`, or `sweat`.
+
+Simulator Studio exposes sweat rate, drift amplitude, duration, and channels per
+episode in the Muscle tab. Amplitude is the nominal excursion before referencing;
+each episode varies in amplitude, duration, and polarity. Average referencing
+spreads a smaller opposite drift across the other electrodes.
+
+**Large, widespread shifts** sets 1500 µV, six episodes per minute, 30-second
+durations, and up to eight electrodes. **Allow overlapping shifts** lets the
+requested rate create new episodes during ongoing drift. **Vary amplitude and
+polarity by channel** keeps broad shifts from cancelling as a common signal
+under average reference. CLI equivalents are `--sweat-overlap` and
+`--sweat-vary-channels`, with matching `--no-*` flags.
+
+**GSR channel (linked to sweat)** adds a separate auxiliary conductance channel
+in µS. The positive GSR responses follow the EEG sweat episode onsets and smooth
+envelopes, scale with absolute episode amplitude, and add when episodes overlap.
+The baseline and nominal response default to 2 µS and 1 µS. This is a controlled
+synthetic proxy; EEG polarity and referencing do not alter it. Enabling GSR also
+enables default sweat when needed; disabling sweat afterward leaves a flat GSR
+baseline. CLI controls are `--with-gsr`, `--no-gsr`, `--gsr-baseline`, and
+`--gsr-response`. Explicit `--no-sweat` allows baseline-only GSR. Disabling GSR
+leaves EEG generation unchanged.
+
+Sweat **Placement** defaults to **Frontal-biased clusters** for new configurations.
+The GUI also offers **Frontal only**, **Anywhere**, and **Selected electrodes**.
+Frontal preference defaults to 85%: that probability selects the cluster center
+from frontal electrodes; otherwise the center is drawn from the full cap. Spread
+defaults to 35° and controls the reach and taper of neighboring electrodes.
+Frontal classification uses normalized nose-forward y > 0.35, rather than
+channel labels, so it also supports imported and dense montages. These thresholds
+and defaults are simulation choices.
+
+Frontal-only and selected modes use up to the requested channel count from the
+eligible set. Selected electrodes are edited with GUI checkboxes in recording
+channel order. Generation reports when the eligible set is smaller than requested
+and rejects an empty set. Existing scenarios without placement retain Anywhere.
+
+CLI controls are `--sweat-placement frontal-biased|frontal-only|anywhere|selected`,
+`--sweat-frontal-preference 0.85`, `--sweat-spread 35`, and
+`--sweat-selected-channels 1,2,5` (which enables selected mode). Placement specifies
+the electrodes receiving drift **before referencing**; amplitude remains fully
+adjustable. Cluster weights and the actual affected channels are saved in truth.
+GSR follows the same sweat episodes for every placement.
 
 ### Recording defects
 

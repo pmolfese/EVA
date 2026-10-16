@@ -617,7 +617,7 @@ The rest of roadmap item 2.1 is also opt-in:
 | Chewing | `--chewing <episodes/min>` | Rhythmic temporalis EMG episodes, `chew` duration markers. |
 | Swallowing | `--swallowing <events/min>` | Stereotyped double-lobed posterior-neck EMG, `swal` markers. |
 | Cable movement | `--cable-movement <events/min>` | Broad, correlated low-frequency sway around a recorded channel center, `move` markers. |
-| Sweat | `--sweat <episodes/min>` | Very slow drift on `--sweat-channels` explicit electrodes, `swet` markers. |
+| Sweat | `--sweat <episodes/min>` | Large, slow drift (default 500 µV over 30 s, before referencing) on `--sweat-channels` explicit electrodes, `swet` markers. |
 | True bridge | `--bridge 3:4,8:9` | Each pair is replaced by its shared mean signal; exact pairs are retained in truth. |
 | Bad reference | `--bad-reference <uv>` | The same 0.2-30 Hz contamination is added to every channel at the requested RMS. |
 | Saturation | `--clip <uv>` | Symmetric hard rails applied last, with clipped-sample counts per channel. |
@@ -627,6 +627,52 @@ Amplitude and duration controls follow the obvious names (`--chewing-amplitude`,
 `--no-*` flags remove artifacts loaded from a scenario. `score-events` accepts
 `chewing`, `swallowing`, `movement`, and `sweat`; bridges, reference corruption,
 and clipping are sample-level defects rather than onset-detection targets.
+
+For larger shifts on more electrodes, raise `--sweat-amplitude` and
+`--sweat-channels`. `--sweat-overlap` allows new episodes to start while earlier
+ones are still active; otherwise long durations limit the realized event rate.
+`--sweat-vary-channels` gives affected electrodes different gains and polarities,
+so widespread sweat does not become a uniform signal removed by average reference.
+Both options have matching `--no-*` flags and retain their original off behavior
+in older scenarios.
+
+New sweat configurations use **frontal-biased clusters**. Placement uses electrode
+coordinates (+y toward the nose), including for numbered or imported montages:
+
+| Placement | CLI | Behavior |
+| --- | --- | --- |
+| Frontal-biased clusters | `--sweat-placement frontal-biased` | Default: 85% chance of drawing the cluster center from frontal electrodes; otherwise draw from the full cap. Nearby electrodes are favored and the drift tapers toward the cluster edge. |
+| Frontal only | `--sweat-placement frontal-only` | Restrict all affected electrodes to normalized y > 0.35. |
+| Anywhere | `--sweat-placement anywhere` | Original uniform channel selection without spatial clustering. |
+| Selected electrodes | `--sweat-selected-channels 1,2,5` | Randomly choose from these eligible 1-based channels. |
+
+`--sweat-frontal-preference` adjusts the frontal-center preference from 0 to 1;
+`--sweat-spread` adjusts cluster spread from 5 to 180 degrees (default 35).
+Frontal-only and selected placement use up to the requested channel count,
+capped by the eligible set; generation reports when fewer qualify. An empty
+eligible set is an error. Old scenarios without a placement field retain
+Anywhere for reproducibility. All placement controls are available in Simulator
+Studio, including checkboxes for selected electrodes. The amplitude control is
+applied before referencing; average reference can create smaller shifts outside
+the directly affected channels. Truth records the actual affected channels and
+cluster weights.
+
+`--with-gsr` adds an optional **GSR** PNS channel in **µS**, aligned to the same
+sweat episodes. It enables default sweat when none is configured, unless
+`--no-sweat` is explicit. `--gsr-baseline` defaults to 2 µS; `--gsr-response`
+defaults to a 1 µS rise for a nominal-amplitude episode. Responses scale with
+the absolute realized episode amplitude, use the same smooth envelope, and add
+during overlap. This is a controlled conductance proxy, not an independently
+validated physiological sensor model. EEG polarity and referencing do not affect
+GSR. `--no-gsr` omits the auxiliary channel without changing EEG samples.
+
+```sh
+Tools/EVASimulate/.build/eva-simulate generate \
+  --output /private/tmp/eva-sweat-gsr --duration 120 --channels 20 \
+  --no-gradient --no-bcg --no-impedance-noise \
+  --sweat 6 --sweat-amplitude 1500 --sweat-duration 30 --sweat-channels 8 \
+  --sweat-overlap --sweat-vary-channels --with-gsr
+```
 
 ## Impedance-coupled noise
 

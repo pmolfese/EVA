@@ -59,4 +59,19 @@ struct ChannelHealthAnalyzerTests {
         let analysis = ChannelHealthAnalyzer.analyze(signal: empty, layout: nil)
         #expect(analysis.resultsByChannel.isEmpty)
     }
+    @Test func kurtosisGoodnessDistinguishesTypicalSignalsFromSpikes() throws {
+        let clean = cleanChannel(seed: 1, frequency: 10)
+        var spiky = clean
+        spiky[100] = 10000
+        let analysis = ChannelHealthAnalyzer.analyze(
+            signal: SyntheticSignal.make([clean, spiky], samplingRate: samplingRate), layout: nil
+        )
+        let cleanMetric = try #require(analysis.resultsByChannel[0]?.metrics.first { $0.name == "Kurtosis" })
+        let spikyMetric = try #require(analysis.resultsByChannel[1]?.metrics.first { $0.name == "Kurtosis" })
+        #expect(cleanMetric.score == 1)
+        #expect(spikyMetric.score == 0)
+        #expect(spikyMetric.detail.contains("excess kurtosis"))
+        #expect(spikyMetric.detail.contains("≤5 good; ≥20 poor"))
+    }
+
 }

@@ -50,6 +50,7 @@ final class ChannelsWindowModel {
         var isAnalyzingHealth: Bool
         var healthProgress: Double
         var refreshHealth: () -> Void
+        var runHealthWavelets: () -> Void
         var importLocations: ((EEGLocationOverride) throws -> Void)?
     }
 
@@ -84,6 +85,7 @@ final class ChannelsWindowModel {
     @ObservationIgnored private var analyzedHealthResults = [Int: ChannelHealthResult]()
     @ObservationIgnored private var diagnosticTask: Task<Void, Never>?
     @ObservationIgnored private var healthRefreshAction: (() -> Void)?
+    @ObservationIgnored private var healthWaveletAction: (() -> Void)?
     @ObservationIgnored private var recordingContexts = [UUID: RecordingContext]()
 
     private init() {}
@@ -100,6 +102,7 @@ final class ChannelsWindowModel {
         isAnalyzingHealth: Bool,
         healthProgress: Double,
         refreshHealth: @escaping () -> Void,
+        runHealthWavelets: @escaping () -> Void = {},
         importLocations: ((EEGLocationOverride) throws -> Void)? = nil
     ) {
         let context = RecordingContext(
@@ -113,6 +116,7 @@ final class ChannelsWindowModel {
             isAnalyzingHealth: isAnalyzingHealth,
             healthProgress: healthProgress,
             refreshHealth: refreshHealth,
+            runHealthWavelets: runHealthWavelets,
             importLocations: importLocations
         )
         recordingContexts[id] = context
@@ -141,6 +145,7 @@ final class ChannelsWindowModel {
         isAnalyzingHealth = context.isAnalyzingHealth
         healthProgress = context.healthProgress
         healthRefreshAction = context.refreshHealth
+        healthWaveletAction = context.runHealthWavelets
 
         if signalChanged {
             clearDiagnostics()
@@ -198,6 +203,7 @@ final class ChannelsWindowModel {
         isAnalyzingHealth = false
         healthProgress = 0
         healthRefreshAction = nil
+        healthWaveletAction = nil
         clearDiagnostics()
     }
 
@@ -209,6 +215,10 @@ final class ChannelsWindowModel {
         selectedTab = tab
         selectedChannel = channel
         selectedRelationshipID = relationshipID
+    }
+
+    func requestHealthWavelets() {
+        healthWaveletAction?()
     }
 
     func requestHealthRefresh() {

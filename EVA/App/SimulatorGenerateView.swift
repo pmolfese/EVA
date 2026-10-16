@@ -681,7 +681,34 @@ private struct MuscleTab: View {
             Toggle("Chewing", isOn: optionalToggle(\.chewing, make: ChewingConfig()))
             Toggle("Swallowing", isOn: optionalToggle(\.swallowing, make: SwallowingConfig()))
             Toggle("Cable movement", isOn: optionalToggle(\.cableMovement, make: CableMovementConfig()))
-            Toggle("Sweat / drift", isOn: optionalToggle(\.sweat, make: SweatConfig()))
+            ToggleRow(title: "Sweat / slow drift",
+                      isOn: optionalToggle(\.sweat, make: SweatConfig()), help: SimulatorHelp.sweat)
+            if simulator.config.sweat != nil {
+                Button("Large, widespread shifts") {
+                    var model = SweatConfig()
+                    model.episodesPerMinute = 6
+                    model.amplitudeMicrovolts = 1500
+                    model.affectedChannelCount = min(8, simulator.config.channelCount)
+                    model.allowOverlap = true
+                    model.varyAcrossChannels = true
+                    simulator.config.sweat = model
+                }
+                DoubleRow(title: "Sweat episodes / min", value: sweatBinding(\.episodesPerMinute))
+                DoubleRow(title: "Drift amplitude", value: sweatBinding(\.amplitudeMicrovolts), unit: "µV")
+                DoubleRow(title: "Drift duration", value: sweatBinding(\.durationSeconds), unit: "s")
+                IntRow(title: "Channels per episode", value: sweatBinding(\.affectedChannelCount),
+                       range: 1...max(1, simulator.config.channelCount))
+                sweatPlacementControls
+                Toggle("Allow overlapping shifts", isOn: sweatFlag(\.allowOverlap))
+                Toggle("Vary amplitude and polarity by channel", isOn: sweatFlag(\.varyAcrossChannels))
+                Text("Drift amplitude is applied before referencing. Average reference can produce smaller shifts in other channels.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ToggleRow(title: "GSR channel (linked to sweat)", isOn: gsrEnabled, help: SimulatorHelp.gsr)
+            if simulator.config.gsr != nil {
+                DoubleRow(title: "GSR baseline", value: gsrBinding(\.baselineMicrosiemens), unit: "µS")
+                DoubleRow(title: "GSR response", value: gsrBinding(\.responseMicrosiemens), unit: "µS")
+            }
 
             SectionHeader(title: "Other")
             LabeledContent {
@@ -708,10 +735,108 @@ private struct MuscleTab: View {
             set: { if simulator.config.emg != nil { simulator.config.emg![keyPath: keyPath] = $0 } }
         )
     }
+    private var sweatPlacementControls: some View {
+        Group {
+            LabeledContent {
+                Picker("Sweat placement", selection: sweatPlacement) {
+                    Text("Frontal-biased clusters").tag(SweatPlacement.frontalBiased)
+                    Text("Frontal only").tag(SweatPlacement.frontalOnly)
+                    Text("Anywhere").tag(SweatPlacement.anywhere)
+                    Text("Selected electrodes").tag(SweatPlacement.selected)
+                }.labelsHidden().frame(maxWidth: 240)
+            } label: {
+                RowLabel(title: "Placement", help: SimulatorHelp.sweatPlacement)
+            }
+            if simulator.config.sweat?.placement == .frontalBiased {
+                LabeledContent("Frontal preference") {
+                    HStack {
+                        Slider(value: sweatSpatialBinding(\.frontalPreference, fallback: 0.85), in: 0...1)
+                            .frame(maxWidth: 160)
+                        Text((simulator.config.sweat?.frontalPreference ?? 0.85).formatted(.percent.precision(.fractionLength(0))))
+                            .font(.caption.monospacedDigit())
+                    }
+                }
+            }
+            if simulator.config.sweat?.placement == .frontalBiased
+                || simulator.config.sweat?.placement == .frontalOnly {
+                DoubleRow(title: "Cluster spread", value: sweatSpatialBinding(\.spreadDegrees, fallback: 35), unit: "°")
+            }
+            if simulator.config.sweat?.placement == .selected {
+                DisclosureGroup("Eligible electrodes (\(simulator.config.sweat?.selectedChannels?.count ?? 0) selected)") {
+                    ScrollView {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110))], alignment: .leading) {
+                            ForEach(1...max(1, simulator.config.channelCount), id: \.self) { number in
+                                Toggle("Channel \(number)", isOn: selectedSweatChannel(number))
+                                    .toggleStyle(.checkbox)
+                            }
+                        }
+                    }.frame(maxHeight: 160)
+                }
+            }
+            if simulator.config.sweat?.placement == .frontalOnly || simulator.config.sweat?.placement == .selected {
+                Text("Each episode uses up to the requested channel count from eligible electrodes. Channel numbers follow the EEG recording order.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private var sweatPlacement: Binding<SweatPlacement> {
+        Binding(
+            get: { simulator.config.sweat?.placement ?? .anywhere },
+            set: {
+                simulator.config.sweat?.placement = $0
+                if $0 == .selected && (simulator.config.sweat?.selectedChannels ?? []).isEmpty {
+                    simulator.config.sweat?.selectedChannels = [1]
+                }
+            }
+        )
+    }
+    private func sweatSpatialBinding(_ path: WritableKeyPath<SweatConfig, Double?>, fallback: Double) -> Binding<Double> {
+        Binding(
+            get: { simulator.config.sweat?[keyPath: path] ?? fallback },
+            set: { simulator.config.sweat?[keyPath: path] = $0 }
+        )
+    }
+    private func selectedSweatChannel(_ number: Int) -> Binding<Bool> {
+        Binding(
+            get: { simulator.config.sweat?.selectedChannels?.contains(number) == true },
+            set: { selected in
+                var channels = Set(simulator.config.sweat?.selectedChannels ?? [])
+                if selected { channels.insert(number) } else { channels.remove(number) }
+                simulator.config.sweat?.selectedChannels = channels.sorted()
+            }
+        )
+    }
     private func optionalToggle<T>(_ keyPath: WritableKeyPath<SimulationConfig, T?>, make: @autoclosure @escaping () -> T) -> Binding<Bool> {
         Binding(
             get: { simulator.config[keyPath: keyPath] != nil },
             set: { simulator.config[keyPath: keyPath] = $0 ? make() : nil }
+        )
+    }
+    private func sweatBinding<T>(_ keyPath: WritableKeyPath<SweatConfig, T>) -> Binding<T> {
+        Binding(
+            get: { (simulator.config.sweat ?? SweatConfig())[keyPath: keyPath] },
+            set: { if simulator.config.sweat != nil { simulator.config.sweat![keyPath: keyPath] = $0 } }
+        )
+    }
+    private func sweatFlag(_ keyPath: WritableKeyPath<SweatConfig, Bool?>) -> Binding<Bool> {
+        Binding(
+            get: { simulator.config.sweat?[keyPath: keyPath] ?? false },
+            set: { if simulator.config.sweat != nil { simulator.config.sweat![keyPath: keyPath] = $0 } }
+        )
+    }
+    private var gsrEnabled: Binding<Bool> {
+        Binding(
+            get: { simulator.config.gsr != nil },
+            set: {
+                simulator.config.gsr = $0 ? GSRConfig() : nil
+                if $0 && simulator.config.sweat == nil { simulator.config.sweat = SweatConfig() }
+            }
+        )
+    }
+    private func gsrBinding(_ keyPath: WritableKeyPath<GSRConfig, Double>) -> Binding<Double> {
+        Binding(
+            get: { (simulator.config.gsr ?? GSRConfig())[keyPath: keyPath] },
+            set: { if simulator.config.gsr != nil { simulator.config.gsr![keyPath: keyPath] = $0 } }
         )
     }
     private var clipBinding: Binding<Double> {
