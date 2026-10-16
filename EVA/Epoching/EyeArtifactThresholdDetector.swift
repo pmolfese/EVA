@@ -17,7 +17,7 @@
 
 import Foundation
 
-nonisolated enum EyeArtifactKind {
+nonisolated enum EyeArtifactKind: String, Codable, Sendable {
     case blink
     case movement
 
@@ -36,6 +36,16 @@ nonisolated enum EyeArtifactKind {
     }
 }
 
+/// Exact threshold-run bounds are separate from the peak-anchored display event.
+/// The end is exclusive, matching sample ranges used by the cleaning engine.
+nonisolated struct ThresholdOcularCandidate: Identifiable, Codable, Equatable, Sendable {
+    var event: MFFEvent
+    var startTimeSeconds: Double
+    var endTimeSeconds: Double
+    var peakMicrovolts: Float
+    var id: String { event.id }
+}
+
 nonisolated enum EyeArtifactThresholdDetector {
     /// Source tag stamped on detected events; also marks them as "centered"
     /// (flag at the peak, window symmetric) for the waveform highlight.
@@ -49,6 +59,19 @@ nonisolated enum EyeArtifactThresholdDetector {
         sensorLayoutName: String? = nil,
         configuration: EyeArtifactThresholdConfiguration? = nil
     ) -> [MFFEvent] {
+        detectCandidates(kind: kind, channels: channels, samplingRate: samplingRate,
+                         duration: duration, sensorLayoutName: sensorLayoutName,
+                         configuration: configuration).map(\.event)
+    }
+
+    static func detectCandidates(
+        kind: EyeArtifactKind,
+        channels: [[Float]],
+        samplingRate: Double,
+        duration: TimeInterval,
+        sensorLayoutName: String? = nil,
+        configuration: EyeArtifactThresholdConfiguration? = nil
+    ) -> [ThresholdOcularCandidate] {
         guard samplingRate > 0, duration > 0, let sampleCount = channels.first?.count, sampleCount > 0 else {
             return []
         }
@@ -165,7 +188,7 @@ nonisolated enum EyeArtifactThresholdDetector {
             // Flag sits at the peak (centered for OBS); the window span is carried
             // as duration so the UI can highlight the section the artifact covers.
             let windowSeconds = Double(interval.upperBound - interval.lowerBound + 1) / samplingRate
-            return MFFEvent(
+            let event = MFFEvent(
                 id: "artifact-\(kind.idComponent)-threshold-\(index)-\(peakSample)",
                 code: kind.eventCode,
                 beginTimeSeconds: time,
@@ -173,6 +196,12 @@ nonisolated enum EyeArtifactThresholdDetector {
                 sourceFile: sourceFile,
                 durationSeconds: windowSeconds,
                 timeAnchor: .peak
+            )
+            return ThresholdOcularCandidate(
+                event: event,
+                startTimeSeconds: Double(interval.lowerBound) / samplingRate,
+                endTimeSeconds: Double(interval.upperBound + 1) / samplingRate,
+                peakMicrovolts: drive[peakSample]
             )
         }
     }

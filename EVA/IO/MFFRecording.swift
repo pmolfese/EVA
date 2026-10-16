@@ -76,6 +76,28 @@ final class MFFRecording: Identifiable {
     private(set) var pnsSignal: MFFSignalData?
     private(set) var sensorLayout: SensorLayout?
     private(set) var electrodeGeometry: ElectrodeGeometry?
+    private(set) var locationOverride: EEGLocationOverride?
+
+    /// Applies only metadata to the open recording; its source package remains
+    /// read-only. The override travels with MFF exports and window forks.
+    @MainActor
+    func applyLocationOverride(_ value: EEGLocationOverride) throws {
+        guard let signal, value.channelNames.count == signal.numberOfChannels,
+              signal.channelNames == nil || signal.channelNames == value.channelNames else {
+            throw BVEFError.invalid("The recording's channels changed. Import the electrode file again.")
+        }
+        locationOverride = value
+        sensorLayout = value.layout
+        electrodeGeometry = value.layoutOverride == nil ? value.geometry : nil
+    }
+
+    private func updateLocationOverrideAfterRoleEdit() {
+        guard let current = locationOverride, let signal else { return }
+        locationOverride = EEGLocationOverride(sourceName: current.sourceName, matching: current.matching,
+            channelNames: signal.channelNames ?? (0..<signal.numberOfChannels).map { "Ch \($0 + 1)" },
+            geometry: electrodeGeometry ?? ElectrodeGeometry(name: current.sourceName, positions: [:]),
+            layoutOverride: current.layoutOverride == nil ? nil : sensorLayout)
+    }
     private(set) var antiAliasTimingCorrection: MFFAntiAliasTimingCorrection?
     /// Per-category grand-average noise band from a combined package's
     /// `eva_noise.json` sidecar (empty for ordinary recordings).
@@ -298,6 +320,7 @@ final class MFFRecording: Identifiable {
         pnsSignal = pnsSignalWithAppendedChannel(samples: movedSamples, name: movedName, basedOn: currentSignal)
         sensorLayout = sensorLayout?.removingChannel(index)
         electrodeGeometry = electrodeGeometry?.removingChannel(index)
+        updateLocationOverrideAfterRoleEdit()
         return movedName
     }
 
@@ -391,6 +414,8 @@ final class MFFRecording: Identifiable {
             positions[newIndex] = origin
             electrodeGeometry = ElectrodeGeometry(name: electrodeGeometry?.name ?? "", positions: positions)
         }
+
+        updateLocationOverrideAfterRoleEdit()
 
         return movedName
     }

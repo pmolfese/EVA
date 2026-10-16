@@ -29,7 +29,7 @@ nonisolated enum ArtifactCleaningExecutor {
         progress: (@Sendable (ArtifactCleaningProgress) -> Void)? = nil
     ) async -> ArtifactCleaningExecutionResult {
         let ordered = ArtifactCleaner.orderedArtifacts(artifacts, ordering: ordering).filter {
-            let settings = $0.pcaSSettings ?? .default
+            let settings = $0.effectivePCASSettings
             let hasPCASAnchors = $0.cleaningMethod == .pcaS
                 && settings.beatSource == .rWaves
                 && !rWaveTimes.isEmpty
@@ -40,7 +40,7 @@ nonisolated enum ArtifactCleaningExecutor {
                     || $0.cleaningMethod == .bssCCA)
         }
         func workloadCount(for artifact: DefinedArtifact) -> Int {
-            let settings = artifact.pcaSSettings ?? .default
+            let settings = artifact.effectivePCASSettings
             if artifact.cleaningMethod == .pcaS, settings.beatSource == .rWaves {
                 return max(rWaveTimes.count, 1)
             }
@@ -59,9 +59,12 @@ nonisolated enum ArtifactCleaningExecutor {
             let completedBeforeArtifact = completedEvents
 
             if artifact.cleaningMethod != .pcaS {
+                let resolved = artifact.reviewState != nil && artifact.cleaningMethod == .regression
+                    ? ArtifactReplayPayload(artifacts: [artifact]).artifacts(rederivedAgainst: current)[0]
+                    : artifact
                 let outcome = ArtifactCleaner.cleanedSignal(
                     from: current,
-                    artifacts: [artifact],
+                    artifacts: [resolved],
                     excluding: excludedChannels,
                     availableBandwidthHz: availableBandwidthHz,
                     progress: { local in
@@ -103,7 +106,7 @@ nonisolated enum ArtifactCleaningExecutor {
                 continue
             }
 
-            var settings = artifact.pcaSSettings ?? BCGSurrogateSettings.default
+            var settings = artifact.effectivePCASSettings
             let halfWindow = max(artifact.windowSizeSeconds, 0.02) / 2
             settings.windowStartSeconds = -halfWindow
             settings.windowEndSeconds = halfWindow

@@ -20,6 +20,23 @@ group reads MNE `.fif`; `NIfTI/` and `GIFTI/` read MRI volumes and surfaces;
 | `MFFFileType.swift` | MFF file-type/UTI identification. |
 | `EGISensorXMLParser.swift` | Parses EGI `sensorLayout.xml` (note the historical y-flip fix). |
 
+## BioSemi BDF / BDF+
+
+`BDFRecording.swift` validates the BioSemi signature and per-channel headers,
+decodes little-endian signed 24-bit analog samples and unsigned raw Status,
+applies calibration in native physical units, and extracts lower-16-bit trigger
+transitions at the original Status rate. It supports unknown record counts and
+contiguous BDF+ record clocks (including fractional origins and four-digit dates).
+Actual gaps/overlaps are refused because the app's continuous processing model
+cannot represent them safely. `EDFAnnotationDecoder.swift` shares TAL decoding
+between EDF+ and BDF+, optionally exposing timekeeping TALs to validate clocks.
+
+The app's `BDFSignalReader` chooses channel roles, converts voltage units, and
+upsamples mixed rates independently within the EEG/PNS groups. Native-rate
+channels are preserved; digital Status uses zero-order hold. BDF has no embedded
+sensor coordinates, so the normal location-sidecar/standard-name path applies.
+See `Tools/bdf-import/README.md` for sample-by-sample MNE and vendor validation.
+
 ## FIF (MNE) — `EVACore/IO/FIF`
 
 | File | Synopsis |

@@ -15,6 +15,120 @@ When defining an artifact, consider:
 - Whether waveform shape, topography, or both should guide matching
 - Whether similar-looking neural activity could be mistaken for artifact
 
+## Review Artifacts
+
+The artifact window has **Define**, **Review**, and **Clean** tabs in one shared
+window. All three use the same window size, keeping the tabs in place as you
+switch. Define retains its existing authoring options. Clean contains the existing
+treatment settings and Apply controls. Both waveform and topography definitions
+use a settings inspector beside a larger preview. The two columns scroll
+independently, keeping the template visible while you adjust settings. Run
+comparison and footer actions remain accessible at the bottom. The bright content
+surfaces adapt to Dark Mode. Clean fills the workspace with its artifact list.
+After detection, switch to Review, or choose
+**Artifacts → Review Artifacts…** between Define Artifact and Clean Artifacts.
+Threshold blinks/eye movements, BCG detections, and ordinary defined artifacts
+share this review workspace.
+
+Click the **?** buttons beside review headings and controls for explanations of
+similarity, rules, decisions, correction windows, class averages, and splitting.
+Examples appear in sets of eighteen, in three columns. With multiple sets, arrow buttons and left/right
+keys go to the previous or next set and select its first example. Click an
+individual tile to inspect it. With only one set, the detail arrows and keys move
+one example at a time. Click a tile or navigation arrow to focus keyboard
+navigation; Space toggles Include/Exclude for the selected example.
+
+Switch **Waveforms / Topomaps** above the exemplar grid to inspect the same
+events as traces or scalp maps. A topomap shows peak global field power within
+the core: the per-channel core mean is removed and the finite mapped good channels
+are average-referenced for display. The eighteen maps share a color scale per
+page. Selecting a map shows an enlarged view, peak time, and scale. Missing sensor
+layout, insufficient finite sensors, flat spatial fields, or incomplete cores show
+**Unavailable**. The switch changes the preview only: ordering, groups, rules,
+and match-confidence scores remain waveform-based (tiles label these **Wave**
+when viewing maps).
+
+The event detail view defaults to **Top 3** impacted channels. Choose **Single**,
+**Top 3**, or **Top 5**, and select **Context** from 0.25 to 2 seconds on each side
+of the padded correction window. Stacked traces share the same time and µV scales.
+Channels are ranked for the selected event by peak-to-peak amplitude inside the
+core, across good recording channels. Bad/interpolated, flat, nonfinite-core, and
+incomplete-core channels are omitted. Each row shows its channel name and core
+amplitude. Class averages overlay definition channels; other channels are marked
+**Event only**. **Overview** selects the channel for thumbnails, similarity cards,
+the class-average preview, and Single mode. Changing display channels or context
+does not change scoring, decisions, or cleaning. Context outside the recording is
+left blank; scroll down to see all traces.
+
+Each example also shows **Waveform similarity**, a **shape-match score**
+from 0–100: positive signed correlation × 100, rounded (r = 0.92 gives 92/100;
+opposite polarity gives 0). It is not a probability that an event is an artifact.
+The detail panel explains the score and how many other reference examples were
+used. One or two reference examples are marked **Limited reference**. Incomplete
+correction windows, unusable waveforms, missing comparison examples, and undefined
+correlations show **Unavailable**. Scores update with the class analysis and do
+not apply decisions or cleaning.
+
+Select an artifact class on the left. **Spatial groups** previews families of
+similar signed peak-field topographies. Move **Broader / Finer** to combine or
+separate families, then click a card to browse its examples. Each card shows a
+representative real event, its count, and the minimum spatial correlation to the
+group center. Amplitude is normalized away; opposite polarities stay separate.
+The displayed r setting is spatial cohesion, not artifact confidence. Fine
+settings can produce single examples, which do not establish a new artifact type.
+Missing layouts, flat maps, incomplete windows, and insufficient shared sensor
+coverage leave events **Unassigned**. Click **All** to clear the preview filter.
+Spatial groups are preview-only: they do not change decisions, cleaning, or
+create classes. Building runs in the background; Broader/Finer reuses the cached
+tree without rescanning the recording. The session cache is refreshed when the
+signal, definition, or eligible sensor mask changes.
+
+Select a spatial group to reveal **Waveform subgroups** beneath it. These compare
+aligned temporal shapes only inside that spatial family. Use the second
+**Broader / Finer** slider, then click a **Shape** card to filter the examples
+further. **Whole spatial family** clears just the waveform filter; **All** clears
+both filters. Blue shows the normalized aligned subgroup mean and gray shows a
+representative event on the labeled preview channel. The channel list and maximum
+alignment shift are shown below the cards.
+
+The analysis uses up to five consistently selected definition channels with the
+strongest typical energy in that family. Amplitude is normalized, relative
+channel strengths and polarity are retained, and shifts are limited to 20 ms
+without time stretching. Duration/shape differences can therefore form separate
+subgroups. Missing, flat, incomplete, or nonfinite waveforms stay **Waveform
+unassigned** within the spatial family. Subgroup cohesion includes the same
+members used to form the group; it is not independent confidence. All subgroup
+browsing is preview-only and leaves the original match scores, review decisions,
+and cleaning unchanged. Subgroup features/trees are cached per family, and
+building or switching families supports cancellation in the background.
+
+Choose **Waveform bands** to return to the existing similarity bands. They show close matches,
+shape variations, and low-similarity examples relative to its average. Select an
+example to compare its waveform and average, inspect its measured span/core/taper
+window, and include, exclude, or hold it. Left/right arrows navigate examples
+when the event area has keyboard focus; Space toggles include/exclude. Examples
+without explicit review choices retain their existing inclusion and are counted
+as unreviewed.
+
+**Auto-selection** previews decisions from correlation thresholds and optional
+peak, duration, and window limits. Apply rules to commit the preview. Middle
+scores remain on hold; hold and excluded events are omitted from cleaning.
+**Keep manual decisions** is enabled by default, and **Undo rules** preserves
+manual edits made after the automatic pass. These thresholds are adjustable
+review criteria, not a guarantee that an event is artifact or brain activity.
+
+Choose a similarity band and **Split group into class…** to move its examples
+into a separately named artifact with its own average, window, and treatment.
+The parent no longer contains those events. **Rebuild from included** updates a
+class's reference explicitly; changing inclusion alone keeps the reference
+stable. Each class is then available in Clean Artifacts for its own treatment
+and options. Reviewed BCG PCA-S uses the included artifact events as beat
+anchors.
+
+Rerunning a detector with changed inputs resets its review and split classes;
+identical threshold refreshes preserve them. Existing continuous MAAC tools
+retain their dedicated review workflows.
+
 ## Preview Cleaning
 
 EVA includes several cleaning approaches, including regression, OBS, SSP/PCA, and averaging-based methods. Preview the result before applying a cleaning step.

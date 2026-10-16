@@ -317,8 +317,28 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     /// Versioned exemplar and matching parameters captured when this definition
     /// was accepted. Persisted with the exact events in `eva_artifacts.json`.
     var savedTemplate: SavedArtifactTemplate? = nil
+    /// Identifies definitions owned by threshold detection, independently of user names.
+    var thresholdOcularKind: EyeArtifactKind? = nil
+    var thresholdOcularConfiguration: EyeArtifactThresholdConfiguration? = nil
+    var thresholdOcularCandidates: [ThresholdOcularCandidate]? = nil
+    var thresholdOcularExcludedEventIDs: Set<String>? = nil
+    var thresholdOcularSourceRevision: UUID? = nil
+    /// nil preserves the historical two-component SSP limit in older payloads.
+    var sspPCAComponentCount: Int? = nil
+    var reviewState: ArtifactReviewState? = nil
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
+
+    nonisolated var hasReviewedEventSelection: Bool {
+        guard let reviewState else { return false }
+        return !reviewState.choices.isEmpty || reviewState.sourceArtifactID != nil || reviewState.partitionsSource == true
+    }
+
+    nonisolated var effectivePCASSettings: BCGSurrogateSettings {
+        var settings = pcaSSettings ?? .default
+        if hasReviewedEventSelection { settings.beatSource = .artifactEvents }
+        return settings
+    }
 
     nonisolated var eventCount: Int {
         isCorneoRetinalDefinition ? (corneoRetinalBlinkEvents?.count ?? 0) : events.count
@@ -359,6 +379,7 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
         }
         obsStrategy = previous.obsStrategy
         obsPCAComponentCount = previous.obsPCAComponentCount
+        sspPCAComponentCount = previous.sspPCAComponentCount
         obsEdgeTaperSeconds = previous.obsEdgeTaperSeconds
         obsPreservesLocalBaseline = previous.obsPreservesLocalBaseline
         obsUsesOverlapAdd = previous.obsUsesOverlapAdd
@@ -568,6 +589,9 @@ extension DefinedArtifact {
             params[key("topographyPresent")] = "false"
         }
 
+        if let count = sspPCAComponentCount {
+            params[key("sspPCAComponentCount")] = String(count)
+        }
         return params
     }
 }
@@ -2520,7 +2544,8 @@ nonisolated enum ArtifactCleaner {
         }
 
         let ordered = eigen.values.indices.sorted { eigen.values[$0] > eigen.values[$1] }
-        let componentCount = min(2, ordered.filter { eigen.values[$0] > 1e-9 }.count)
+        let componentCount = min(max(artifact.sspPCAComponentCount ?? 2, 0),
+                                 ordered.filter { eigen.values[$0] > 1e-9 }.count)
         guard componentCount > 0 else { return 0 }
 
         let components = ordered.prefix(componentCount).map { component in
@@ -2746,7 +2771,10 @@ nonisolated enum ArtifactCleaner {
     // MARK: - Window helpers
 
     private static func windowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {
-        if let count = artifact.average?.allChannelSamples.first?.count, count > 1 {
+        // Threshold definitions own an explicit editable window; a replay-
+        // derived average must not silently override a later window change.
+        if artifact.thresholdOcularKind == nil, artifact.reviewState == nil,
+           let count = artifact.average?.allChannelSamples.first?.count, count > 1 {
             return count
         }
         return max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
@@ -2760,6 +2788,25 @@ nonisolated enum ArtifactCleaner {
     private static func milliseconds(for sampleCount: Int, samplingRate: Double) -> Int {
         guard samplingRate > 0 else { return 0 }
         return Int((Double(sampleCount) / samplingRate * 1000).rounded())
+    }
+
+    static func correctionWindow(
+        for event: MFFEvent, artifact: DefinedArtifact, signal: MFFSignalData,
+        includesTaper: Bool = true,
+        requiresCompleteWindow: Bool = true
+    ) -> Range<Int>? {
+        let core = windowSamples(for: artifact, signal: signal)
+        let padding = includesTaper
+            ? obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: core) : 0
+        if !requiresCompleteWindow {
+            guard signal.samplingRate > 0 else { return nil }
+            let count = core + 2 * padding
+            let center = Int((event.centerTimeSeconds * signal.samplingRate).rounded())
+            return (center - count / 2)..<(center - count / 2 + count)
+        }
+        return eventWindow(event: event, windowSamples: core + 2 * padding,
+                           sampleCount: signal.data.first?.count ?? 0,
+                           samplingRate: signal.samplingRate)
     }
 
     private static func obsPaddedWindowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {

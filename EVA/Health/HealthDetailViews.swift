@@ -458,6 +458,9 @@ struct ChannelHealthBadge: View {
     var onActivate: (() -> Void)? = nil
     @State private var showsDetails = false
     @State private var pinsDetails = false
+    @State private var isBadgeHovered = false
+    @State private var isPopoverHovered = false
+    @State private var dismissalTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -490,14 +493,12 @@ struct ChannelHealthBadge: View {
         )
         .onHover { hovering in
             guard result != nil else { return }
-            if hovering {
-                showsDetails = true
-            } else if !pinsDetails {
-                showsDetails = false
-            }
+            isBadgeHovered = hovering
+            updateHoverVisibility()
         }
         .onTapGesture {
             if result != nil {
+                dismissalTask?.cancel()
                 pinsDetails.toggle()
                 showsDetails = pinsDetails
             } else if !isAnalyzing {
@@ -508,15 +509,43 @@ struct ChannelHealthBadge: View {
         .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
             if let result {
                 ChannelHealthPopover(result: result)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        isPopoverHovered = hovering
+                        updateHoverVisibility()
+                    }
             }
         }
         .onChange(of: showsDetails) { _, isShowing in
             if !isShowing {
                 pinsDetails = false
+                isPopoverHovered = false
+                dismissalTask?.cancel()
             }
+        }
+        .onDisappear {
+            dismissalTask?.cancel()
         }
         .accessibilityLabel(result.map { "Channel health \($0.goodPercentage) percent good" } ?? "Channel health, not yet run, click to run")
     }
+
+    private func updateHoverVisibility() {
+        dismissalTask?.cancel()
+        guard !pinsDetails else { return }
+        if isBadgeHovered || isPopoverHovered {
+            showsDetails = true
+            return
+        }
+        // Allow the pointer to cross the gap between the badge and popover.
+        // Entering either surface cancels dismissal; clicking still pins it.
+        dismissalTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(220))
+            guard !Task.isCancelled, !pinsDetails,
+                  !isBadgeHovered, !isPopoverHovered else { return }
+            showsDetails = false
+        }
+    }
+
 }
 
 private enum ChannelHealthSort: String, CaseIterable, Identifiable {

@@ -31,6 +31,12 @@ final class ArtifactTemplateViewModel {
     }
 
     // MARK: Sheet / definition
+    enum WorkspaceTab: String, CaseIterable, Identifiable {
+        case define = "Define", review = "Review", clean = "Clean"
+        var id: String { rawValue }
+    }
+    var workspaceTab = WorkspaceTab.define
+    var reviewArtifactID: UUID?
     var showsSheet = false
     var selectionRange: ClosedRange<Int>?
     var clickedChannel: Int?
@@ -102,6 +108,8 @@ final class ArtifactTemplateViewModel {
 
     func resetForClose() {
         showsSheet = false
+        workspaceTab = .define
+        reviewArtifactID = nil
         selectionRange = nil
         clickedChannel = nil
         definedArtifactID = nil

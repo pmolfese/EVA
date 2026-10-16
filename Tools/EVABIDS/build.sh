@@ -23,6 +23,7 @@ swiftc -O \
   "$ROOT/EVACore/Pipeline/EVAProcessingScript.swift" \
   "$ROOT/EVACore/IO/MFFWriter.swift" \
   "$ROOT/EVACore/Channels/SensorLayout.swift" \
+  "$ROOT/EVACore/Channels/BVEFMontage.swift" \
   "$ROOT/EVACore/Channels/ElectrodeGeometry.swift" \
   -o "$OUT"
 

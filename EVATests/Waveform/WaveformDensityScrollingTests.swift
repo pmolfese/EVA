@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Combine
 import Testing
 @testable import EVA
 

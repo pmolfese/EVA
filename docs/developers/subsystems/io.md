@@ -14,7 +14,8 @@ UI-free format readers themselves live in `EVACore/IO`
 
 | File | Synopsis |
 |---|---|
-| `SignalImportReader.swift` | The universal importer: dispatches to FIF/BrainVision/EDF/Persyst/BESA/EEGLAB readers and the MNE-Python bridge, reads electrode locations, and normalizes to an `ImportedRecording`. |
+| `SignalImportReader.swift` | The universal importer: dispatches to FIF/BrainVision/EDF/BDF/Persyst/BESA/EEGLAB readers and the MNE-Python bridge, reads electrode locations, and normalizes to an `ImportedRecording`. |
+| `BDFSignalReader.swift` | BDF import policy: microvolts, EEG/PNS classification, analog windowed-sinc upsampling and digital sample-and-hold; uses the core BDF reader. |
 | `MFFRecording.swift` | The app document type wrapping a loaded recording: channel roles, edits, `LoadResult`, geometry/reference bridges. |
 | `MFFExportWriter.swift` | App-side entry to write an `.mff` (delegates to `EVACore` `MFFWriter`). |
 | `MFFExportFlowViews.swift` | The export flow UI (a `WaveformView` extension). |

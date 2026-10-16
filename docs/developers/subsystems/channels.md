@@ -40,3 +40,31 @@ the callers. A new **topomap rendering** option lives in `TopomapView`
 (watch the raster cache keys). Because `ChannelModel`'s command keys wire menus
 app-wide, adding a menu action means adding a `FocusedValues` key here and reading
 it in `EVAApp`/`ContentView` ([app.md](app.md)).
+
+## Recording-local location overrides
+
+`ChannelLocationImportViews` previews a `.bvef` file and explicit name/number
+matching. `EVACore/Channels/BVEFMontage` parses BrainVision signed polar angles
+and azimuths into EVA's right/anterior/superior unit-sphere axes. Zero radii have
+no spatial position. Duplicate names/numbers, non-finite coordinates, malformed
+XML, and ambiguous name mappings fail explicitly.
+
+`ChannelsWindowModel` routes application to the captured recording ID; a preview
+cannot silently affect a newly focused recording. `MFFRecording` owns the
+replacement layout/geometry without changing its signal revision. Existing
+interpolation recipes are re-solved through `ChannelInterpolationSolver` and
+health is refreshed. Role edits remap the active override, and fork payloads
+carry it into the new document.
+
+`MFFExportSnapshot` carries an optional `EEGLocationOverride`. The core MFF writer
+uses it after normal metadata copying, so stale source XML cannot overwrite it.
+The override writes matching 2D/3D metadata in signal order; zero-vector entries
+retain non-spatial channel names in `coordinates.xml`, while missing 2D positions
+stay off the scalp map. The export log records the source and matching method.
+Split exports and Resolve handoffs use the same metadata path.
+
+`BVEFMontageTests` covers orientation, mapping, reference handling, non-spatial
+channels, stale source XML, MFF round-trips, unchanged samples/source files,
+channel-role edits, and recording focus routing. An optional ignored local
+corpus checks the study's complete BC-MR-64-X52 file against MNE; the repository
+contains only synthetic electrode definitions, not the study's supplied file.

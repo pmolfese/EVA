@@ -1226,6 +1226,7 @@ struct MFFExportSnapshot: Sendable {
     let signal: MFFSignalData
     let segments: [EpochSegment]
     let kind: MFFExportKind
+    var locationOverride: EEGLocationOverride? = nil
 }
 
 enum MFFSplitSelection {

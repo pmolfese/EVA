@@ -206,6 +206,7 @@ extension WaveformView {
                 artifactCleaningTask = nil
                 if replay.state.isAwaitingDecision {
                     artifactVM.showsCleaningSheet = false
+                    template.showsSheet = false
                     replay.resume(.proceed)
                 }
                 precomputeCleaningPreviews(beforeSignal: signal, afterSignal: outcome.signal)

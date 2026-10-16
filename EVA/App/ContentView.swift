@@ -369,7 +369,7 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Text("Drop .mff, BrainVision, EDF, FIF, Persyst, or BESA .avr/.mul recordings here")
+            Text("Drop .mff, BrainVision, EDF/BDF, FIF, Persyst, or BESA .avr/.mul recordings here")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -431,7 +431,7 @@ struct ContentView: View {
         let openable = supportedURLs.filter { SignalImportReader.recordingRejectionReason(for: $0) == nil }
         guard let url = openable.first else {
             openError = supportedURLs.compactMap(SignalImportReader.recordingRejectionReason(for:)).first
-                ?? "EVA can open .mff, BrainVision, EDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
+                ?? "EVA can open .mff, BrainVision, EDF/BDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
             return false
         }
         return open(url, securityScopedURLs: supportedURLs)
@@ -440,7 +440,7 @@ struct ContentView: View {
     @discardableResult
     private func open(_ url: URL, securityScopedURLs: [URL] = []) -> Bool {
         guard isSupportedRecordingURL(url) else {
-            openError = "EVA can open .mff, BrainVision, EDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
+            openError = "EVA can open .mff, BrainVision, EDF/BDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
             return false
         }
         // A `.fif` may be a head model, a transform or a digitization rather

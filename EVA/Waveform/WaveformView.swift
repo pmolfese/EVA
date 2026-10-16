@@ -1080,6 +1080,7 @@ struct WaveformView: View {
             signal: channelsSignal,
             acquisitionSignal: recording.signal,
             layout: recording.sensorLayout,
+            geometry: recording.electrodeGeometry,
             channelNames: channelsSignal?.channelNames,
             healthResults: channelModel.healthResults,
             isAnalyzingHealth: channelModel.isAnalyzingHealth,
@@ -1087,6 +1088,9 @@ struct WaveformView: View {
             refreshHealth: { [weak channelModel] in
                 channelModel?.showsHealth = true
                 channelModel?.healthRefreshToken += 1
+            },
+            importLocations: { value in
+                try applyEEGLocationOverride(value)
             }
         )
     }
@@ -1168,6 +1172,10 @@ struct WaveformView: View {
     /// node appended after the fork point) actually were.
     private func applyForkSeed() {
         guard let forkSeed else { return }
+        if let locations = forkSeed.locationOverride {
+            try? recording.applyLocationOverride(locations)
+            electrodeGeometry = recording.electrodeGeometry
+        }
         // A fork continues the source window's experiment, so it joins its
         // comparison group rather than starting one (ROADMAP RW-1 item 10).
         comparisonGroupID = forkSeed.comparisonGroupID
@@ -1628,8 +1636,8 @@ struct WaveformView: View {
         }
         .overlay(alignment: .top) { replayBanner() }
         .overlay(alignment: .top) { reDerivingBanner }
-        .task(id: artifactDetectionRequestID(for: continuousSignal)) {
-            await updateArtifactEvents(for: continuousSignal)
+        .task(id: artifactDetectionRequestID(for: continuousSignal) + "|\(cleaningBase.dataRevision)") {
+            await updateArtifactEvents(for: continuousSignal, cleaningSignal: cleaningBase)
         }
         .task(id: channelHealthSignature(for: continuousSignal)) {
             // A major state change (new filter/gradient/ICA/artifact
@@ -1799,12 +1807,19 @@ struct WaveformView: View {
             }
 
             Menu {
-                if activeSelectionRange(in: signal) != nil,
-                   let defaultChannel = defaultArtifactTemplateChannel(in: signal) {
-                    Button("Define Artifact…") {
+                Button("Define Artifact…") {
+                    if let defaultChannel = defaultArtifactTemplateChannel(in: signal) {
                         openArtifactTemplateSheet(for: signal, clickedChannel: defaultChannel)
                     }
                 }
+                .disabled(activeSelectionRange(in: signal) == nil || defaultArtifactTemplateChannel(in: signal) == nil)
+
+                Button("Review Artifacts…") {
+                    openArtifactReviewSheet()
+                }
+                .disabled(template.isApplying || artifactVM.isCleaning || artifactVM.isDetecting
+                    || !template.definedArtifacts.contains { ArtifactReviewEngine.canReview($0)
+                    && !ArtifactReviewEngine.candidates(for: $0).isEmpty })
 
                 Button("Clean Artifacts…") {
                     artifactVM.showsCleaningSheet = true
