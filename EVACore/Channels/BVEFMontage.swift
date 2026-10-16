@@ -194,7 +194,7 @@ nonisolated struct EEGLocationOverride: Sendable {
         let centerX = entries.map { $0.value.x }.reduce(0, +) / Double(max(entries.count, 1))
         let centerY = entries.map { $0.value.y }.reduce(0, +) / Double(max(entries.count, 1))
         let scale = entries.map { hypot($0.value.x - centerX, $0.value.y - centerY) }.max().flatMap { $0 > 0 ? $0 : nil } ?? 1
-        return SensorLayout(name: sourceName, positions: entries.map {
+        return SensorLayout(name: geometry.name, positions: entries.map {
             SensorPosition(channelIndex: $0.key, x: ($0.value.x - centerX) / scale, y: ($0.value.y - centerY) / scale)
         }, reference: geometry.reference.map {
             SensorReference(channelIndex: $0.channelIndex, name: $0.name,
@@ -237,7 +237,7 @@ nonisolated struct EEGLocationOverride: Sendable {
             if let reference, reference.channelIndex >= signal.numberOfChannels {
                 sensors += sensor(index: reference.channelIndex, name: reference.name, type: 1, x: reference.x, y: reference.y)
             }
-            let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sensorLayout xmlns=\"http://www.egi.com/sensorLayout_mff\"><name>\(escape(sourceName))</name><sensors>\(sensors)</sensors></sensorLayout>"
+            let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sensorLayout xmlns=\"http://www.egi.com/sensorLayout_mff\"><name>\(escape(layoutOverride.name))</name><sensors>\(sensors)</sensors></sensorLayout>"
             try xml.write(to: url.appendingPathComponent("sensorLayout.xml"), atomically: true, encoding: .utf8)
             let coordinates = url.appendingPathComponent("coordinates.xml")
             if FileManager.default.fileExists(atPath: coordinates.path) { try FileManager.default.removeItem(at: coordinates) }
@@ -263,9 +263,9 @@ nonisolated struct EEGLocationOverride: Sendable {
             flat += start + "<x>\(reference.position.x)</x><y>\(-reference.position.y)</y><z>0</z></sensor>\n"
             spatial += start + "<x>\(reference.position.x)</x><y>\(reference.position.y)</y><z>\(reference.position.z)</z></sensor>\n"
         }
-        let title = "<name>\(escape(sourceName))</name><sensors>"
+        let title = "<name>\(escape(geometry.name))</name><sensors>"
         let layoutXML = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sensorLayout xmlns=\"http://www.egi.com/sensorLayout_mff\">\(title)\(flat)</sensors></sensorLayout>"
-        let coordinatesXML = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><coordinates xmlns=\"http://www.egi.com/coordinates_mff\">\(title)\(spatial)</sensors></coordinates>"
+        let coordinatesXML = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><coordinates xmlns=\"http://www.egi.com/coordinates_mff\"><sensorLayout>\(title)\(spatial)</sensors></sensorLayout></coordinates>"
         try layoutXML.write(to: url.appendingPathComponent("sensorLayout.xml"), atomically: true, encoding: .utf8)
         try coordinatesXML.write(to: url.appendingPathComponent("coordinates.xml"), atomically: true, encoding: .utf8)
         try writeImportRecord(toPackage: url)

@@ -37,6 +37,7 @@ nonisolated struct ElectrodeLocationFile: Sendable {
     let sourceName: String
     let format: Format
     let electrodes: [Electrode]
+    var layoutName: String? = nil
 
     var formatDescription: String {
         switch format {
@@ -75,7 +76,12 @@ nonisolated struct ElectrodeLocationFile: Sendable {
         default:
             throw BVEFError.invalid("Choose a BrainVision .bvef file, MFF coordinates.xml, or MFF sensorLayout.xml.")
         }
-        let container = (root.children ?? []).compactMap { $0 as? XMLElement }.first { tag($0) == "sensors" }
+        // Native coordinates.xml nests the layout under <sensorLayout>;
+        // older EVA exports also used a direct <sensors> container.
+        let layoutElement = format == .mffCoordinates
+            ? ((root.children ?? []).compactMap { $0 as? XMLElement }.first { tag($0) == "sensorLayout" } ?? root)
+            : root
+        let container = (layoutElement.children ?? []).compactMap { $0 as? XMLElement }.first { tag($0) == "sensors" }
         guard let container else { throw BVEFError.invalid("The MFF location file has no sensors section.") }
         var electrodes = [Electrode]()
         var numbers = Set<Int>(), names = Set<String>()
@@ -127,7 +133,10 @@ nonisolated struct ElectrodeLocationFile: Sendable {
         guard !electrodes.isEmpty, electrodes.contains(where: \.hasLocation) else {
             throw BVEFError.invalid("The MFF file contains no EEG electrode locations.")
         }
-        return ElectrodeLocationFile(sourceName: sourceName, format: format, electrodes: electrodes)
+        let netName = (layoutElement.children ?? []).compactMap { $0 as? XMLElement }.first { tag($0) == "name" }?
+            .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ElectrodeLocationFile(sourceName: sourceName, format: format, electrodes: electrodes,
+                                     layoutName: netName.flatMap { $0.isEmpty ? nil : $0 })
     }
 
     func matches(channelNames: [String], using matching: ElectrodeLocationMatching) throws -> [Match] {
@@ -144,11 +153,16 @@ nonisolated struct ElectrodeLocationFile: Sendable {
     func resolved(channelNames: [String], using matching: ElectrodeLocationMatching,
                   reference: ElectrodeGeometry.Reference? = nil,
                   layoutReference: SensorReference? = nil) throws -> EEGLocationOverride {
+        let spatialReference = reference ?? layoutReference.flatMap { existing in
+            electrodes.first(where: \.isReference)?.position.map {
+                ElectrodeGeometry.Reference(channelIndex: existing.channelIndex, name: existing.name, position: $0)
+            }
+        }
         if format == .brainVision {
             let bvef = BVEFMontage(sourceName: sourceName, electrodes: electrodes.map {
                 BVEFMontage.Electrode(name: $0.name, number: $0.number, position: $0.position)
             })
-            return try bvef.resolved(channelNames: channelNames, using: matching, reference: reference)
+            return try bvef.resolved(channelNames: channelNames, using: matching, reference: spatialReference)
         }
         let matches = try matches(channelNames: channelNames, using: matching)
         guard matches.contains(where: { $0.electrode?.hasLocation == true }) else {
@@ -159,7 +173,7 @@ nonisolated struct ElectrodeLocationFile: Sendable {
             var positions = Dictionary(uniqueKeysWithValues: matches.compactMap { match in
                 match.electrode?.position.map { (match.channelIndex, $0) }
             })
-            let updatedReference = reference.map { existing in
+            let updatedReference = spatialReference.map { existing in
                 ElectrodeGeometry.Reference(channelIndex: existing.channelIndex, name: existing.name,
                     position: electrodes.first(where: \.isReference)?.position ?? existing.position)
             }
@@ -167,7 +181,7 @@ nonisolated struct ElectrodeLocationFile: Sendable {
                 positions[reference.channelIndex] = reference.position
             }
             return EEGLocationOverride(sourceName: sourceName, matching: matching, channelNames: channelNames,
-                geometry: ElectrodeGeometry(name: sourceName, positions: positions, channelNames: labels, reference: updatedReference))
+                geometry: ElectrodeGeometry(name: layoutName ?? sourceName, positions: positions, channelNames: labels, reference: updatedReference))
         }
         let rawPoints = matches.compactMap { match -> SensorPosition? in
             guard let point = match.electrode?.plotPosition else { return nil }
@@ -188,10 +202,10 @@ nonisolated struct ElectrodeLocationFile: Sendable {
                 x: point.map { ($0.x / coordinateScale - centerX) / radius } ?? existing.x,
                 y: point.map { ($0.y / coordinateScale - centerY) / radius } ?? existing.y)
         }
-        let layout = SensorLayout(name: sourceName, positions: points.filter { $0.channelIndex != layoutReference?.channelIndex }.map {
+        let layout = SensorLayout(name: layoutName ?? sourceName, positions: points.filter { $0.channelIndex != layoutReference?.channelIndex }.map {
             SensorPosition(channelIndex: $0.channelIndex, x: ($0.x - centerX) / radius, y: ($0.y - centerY) / radius)
         }, reference: updatedReference)
         return EEGLocationOverride(sourceName: sourceName, matching: matching, channelNames: channelNames,
-            geometry: ElectrodeGeometry(name: sourceName, positions: [:]), layoutOverride: layout)
+            geometry: ElectrodeGeometry(name: layoutName ?? sourceName, positions: [:]), layoutOverride: layout)
     }
 }

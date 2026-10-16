@@ -50,6 +50,10 @@ final class MFFLocationImportTests: XCTestCase {
         XCTAssertEqual(resolved.geometry.reference?.channelIndex, 2)
         XCTAssertEqual(resolved.geometry.reference?.name, "Acquisition REF")
         XCTAssertEqual(resolved.geometry.reference!.position.x, sqrt(0.5), accuracy: 1e-12)
+        let fromFlatReference = try montage.resolved(channelNames: ["Fz", "Cz"], using: .names,
+            layoutReference: SensorReference(channelIndex: 2, name: "Known REF", x: 0, y: 0))
+        XCTAssertEqual(fromFlatReference.geometry.reference?.name, "Known REF")
+        XCTAssertEqual(fromFlatReference.geometry.reference?.channelIndex, 2)
     }
 
     func testFlatLayoutInvertsEGIYAndKeepsCenterElectrodesWithoutInventing3D() throws {

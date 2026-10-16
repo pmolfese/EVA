@@ -89,6 +89,10 @@ final class MFFRecording: Identifiable {
         locationOverride = value
         sensorLayout = value.layout
         electrodeGeometry = value.layoutOverride == nil ? value.geometry : nil
+        // A channel moved back from Physio must not resurrect a position from
+        // the net that this override has just replaced.
+        physioOriginPositions.removeAll()
+        physioOriginGeometry.removeAll()
     }
 
     private func updateLocationOverrideAfterRoleEdit() {
