@@ -80,18 +80,52 @@ extension WaveformView {
     @ViewBuilder
     func psaSheet(for signal: MFFSignalData) -> some View {
         if let matrix = epoching.decisionMatrix {
+            let matrixPriorRunning = channels.isAnalyzingHealth
+                || epoching.isAnalyzingDecisionMatrixChannelPrior
             PSADecisionMatrixView(
                 model: matrix,
                 isApplying: epoching.isApplying,
-                onBack: { epoching.decisionMatrix = nil },
+                isRunningFullChannelHealth: matrixPriorRunning,
+                allowsFullHealthUpgrade: goodnessSettings.psaDecisionMatrixHealthStrategy == .adaptive,
+                fallbackMessage: decisionMatrixFallbackMessage,
+                progress: channels.isAnalyzingHealth
+                    ? channels.healthProgress
+                    : (epoching.decisionMatrixChannelPriorProgress ?? epoching.segmentingProgress),
+                progressMessage: channels.isAnalyzingHealth
+                    ? (chanHealth.statusMessage ?? "Running full Channel Health…")
+                    : (epoching.decisionMatrixChannelPriorMessage ?? epoching.phaseMessage),
+                onBack: {
+                    psaTask?.cancel()
+                    epoching.decisionMatrix = nil
+                },
                 onCancel: {
+                    psaTask?.cancel()
                     epoching.decisionMatrix = nil
                     epoching.showsSheet = false
                 },
+                onRunFullChannelHealth: {
+                    runFullChannelHealthForDecisionMatrix(signal: signal, model: matrix)
+                },
                 onAverage: { averageReviewedDecisionMatrix() }
             )
+            .onAppear {
+                ensurePreferredDecisionMatrixChannelPrior(signal: signal, model: matrix)
+            }
         } else {
             psaConfigurationSheet(for: signal)
+        }
+    }
+
+    var decisionMatrixFallbackMessage: String {
+        switch goodnessSettings.psaDecisionMatrixHealthStrategy {
+        case .adaptive:
+            return "Full Channel Health is unavailable for this signal. Cells currently use the fast epoch scan and a robust epoch-set channel prior."
+        case .fullRecording:
+            return "The matrix is using its segment prior while the requested full recording suite is prepared."
+        case .fastRecording:
+            return "The matrix is using its segment prior while the requested fast recording suite is prepared."
+        case .segmentOnly:
+            return "Segment-only mode uses the abbreviated scan and each channel's median score across the epochs shown."
         }
     }
 
@@ -1596,12 +1630,22 @@ extension WaveformView {
         epoching.statusMessage = statusText
 
         if pausesForDecisionMatrix {
-            epoching.phaseMessage = "Preparing Decision Matrix…"
+            epoching.phaseMessage = "Scanning segment channel health…"
+            epoching.segmentingProgress = 0
             let thresholds = epoching.epochBadChannelThresholds
             let detectorSegments = built.epochBadChannelSegments
-            let recordingGoodness = channels.healthResults.mapValues(\.goodPercentage)
+            let strategy = goodnessSettings.psaDecisionMatrixHealthStrategy
+            let mayUseFullHealth = strategy == .adaptive || strategy == .fullRecording
+            let recordingGoodness = mayUseFullHealth
+                && chanHealth.signature == channelHealthSignature(for: signal)
+                ? channels.healthResults.mapValues(\.goodPercentage) : [:]
+            let baseSettings = goodnessSettings.base
             let positions = electrodeGeometry?.positions ?? [:]
             let globallyBad = channels.bad
+            let (progressContinuation, progressTask) = ProgressBridge.make { [weak epoching = epoching] (update: EpochBuildProgress) in
+                epoching?.phaseMessage = "Scanning segment channel health… (\(update.completed) of \(update.total))"
+                epoching?.segmentingProgress = update.fraction
+            }
             let preparationWorker = Task.detached(priority: .userInitiated) {
                 PSADecisionMatrixPreparation.make(
                     signal: built.signal,
@@ -1609,15 +1653,22 @@ extension WaveformView {
                     thresholds: thresholds,
                     detectorSegments: detectorSegments,
                     recordingChannelGoodness: recordingGoodness,
+                    baseSettings: baseSettings,
                     electrodePositions: positions,
                     globallyBadChannels: globallyBad,
-                    suggestedRejectedEpochReasons: built.suggestedRejectedEpochReasons
+                    suggestedRejectedEpochReasons: built.suggestedRejectedEpochReasons,
+                    progress: { completed, total in
+                        progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
+                    }
                 )
             }
             let preparation = await withTaskCancellationHandler(
                 operation: { await preparationWorker.value },
                 onCancel: { preparationWorker.cancel() }
             )
+            progressContinuation.finish()
+            progressTask.cancel()
+            epoching.segmentingProgress = nil
             guard !Task.isCancelled, sessionID == recordingSessionID else {
                 epoching.isApplying = false
                 epoching.phaseMessage = nil
@@ -1631,7 +1682,9 @@ extension WaveformView {
                 matrix.suggestEpochRejection(excluded, reason: "Previously excluded")
             }
             epoching.decisionMatrix = matrix
-            epoching.statusMessage = "Review the matrix before averaging. Overall Channel Health is shown at left; each cell combines local channel and epoch evidence."
+            epoching.statusMessage = matrix.hasRecordingWideChannelHealth
+                ? "Review the matrix before averaging. Full Channel Health supplies the channel prior; cells combine it with fast local and epoch evidence."
+                : "Review the matrix before averaging. A fast segment scan supplies local evidence and the fallback channel prior."
             epoching.isApplying = false
             epoching.phaseMessage = nil
             return
@@ -1946,15 +1999,25 @@ extension WaveformView {
         psaTask?.cancel()
         let sessionID = recordingSessionID
         let thresholds = epoching.epochBadChannelThresholds
-        let recordingGoodness = channels.healthResults.mapValues(\.goodPercentage)
+        let strategy = goodnessSettings.psaDecisionMatrixHealthStrategy
+        let mayUseFullHealth = strategy == .adaptive || strategy == .fullRecording
+        let recordingGoodness = mayUseFullHealth && chanHealth.signature != nil
+            && channels.healthResults.count >= segmentedEpochSignal.numberOfChannels
+            ? channels.healthResults.mapValues(\.goodPercentage) : [:]
+        let baseSettings = goodnessSettings.base
         let positions = electrodeGeometry?.positions ?? [:]
         let globallyBad = channels.bad
         let detectorSegments = epoching.epochBadChannelSegments
         let sourceSegments = segmentedEpochSegments
         epoching.isApplying = true
-        epoching.phaseMessage = "Preparing Decision Matrix…"
+        epoching.phaseMessage = "Scanning segment channel health…"
+        epoching.segmentingProgress = 0
         epoching.showsSheet = true
         psaTask = Task {
+            let (progressContinuation, progressTask) = ProgressBridge.make { [weak epoching = epoching] (update: EpochBuildProgress) in
+                epoching?.phaseMessage = "Scanning segment channel health… (\(update.completed) of \(update.total))"
+                epoching?.segmentingProgress = update.fraction
+            }
             let worker = Task.detached(priority: .userInitiated) {
                 PSADecisionMatrixPreparation.make(
                     signal: segmentedEpochSignal,
@@ -1962,14 +2025,21 @@ extension WaveformView {
                     thresholds: thresholds,
                     detectorSegments: detectorSegments,
                     recordingChannelGoodness: recordingGoodness,
+                    baseSettings: baseSettings,
                     electrodePositions: positions,
-                    globallyBadChannels: globallyBad
+                    globallyBadChannels: globallyBad,
+                    progress: { completed, total in
+                        progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
+                    }
                 )
             }
             let preparation = await withTaskCancellationHandler(
                 operation: { await worker.value },
                 onCancel: { worker.cancel() }
             )
+            progressContinuation.finish()
+            progressTask.cancel()
+            epoching.segmentingProgress = nil
             guard !Task.isCancelled, sessionID == recordingSessionID else {
                 epoching.isApplying = false
                 epoching.phaseMessage = nil
@@ -1985,6 +2055,116 @@ extension WaveformView {
             epoching.decisionMatrix = model
             epoching.isApplying = false
             epoching.phaseMessage = nil
+            psaTask = nil
+        }
+    }
+
+    @MainActor
+    func ensurePreferredDecisionMatrixChannelPrior(
+        signal: MFFSignalData, model: PSADecisionMatrixModel
+    ) {
+        switch goodnessSettings.psaDecisionMatrixHealthStrategy {
+        case .adaptive, .segmentOnly:
+            return
+        case .fullRecording:
+            guard !model.hasFullRecordingChannelHealth else { return }
+            runFullChannelHealthForDecisionMatrix(signal: signal, model: model)
+        case .fastRecording:
+            guard model.channelPriorKind != .fastRecording else { return }
+            runFastChannelHealthForDecisionMatrix(signal: signal, model: model)
+        }
+    }
+
+    /// Runs the core whole-recording metrics without spectral, neighbor, or
+    /// wavelet analysis. Results remain private to the matrix so other Channel
+    /// Health UI never mistakes this abbreviated suite for a full run.
+    @MainActor
+    func runFastChannelHealthForDecisionMatrix(
+        signal: MFFSignalData, model: PSADecisionMatrixModel
+    ) {
+        guard !channels.isAnalyzingHealth,
+              !epoching.isAnalyzingDecisionMatrixChannelPrior else { return }
+        let sessionID = recordingSessionID
+        let base = goodnessSettings.base
+        let impedance = goodnessSettings.impedance
+        let impedances = recording.signal?.impedancesKOhm
+        epoching.isAnalyzingDecisionMatrixChannelPrior = true
+        epoching.decisionMatrixChannelPriorProgress = 0
+        epoching.decisionMatrixChannelPriorMessage = "Running fast recording health…"
+
+        let (progressContinuation, progressTask) = ProgressBridge.make { [weak epoching = epoching] (fraction: Double) in
+            epoching?.decisionMatrixChannelPriorProgress = min(max(fraction, 0), 1)
+            epoching?.decisionMatrixChannelPriorMessage = "Running fast recording health…"
+        }
+        psaTask?.cancel()
+        psaTask = Task { @MainActor in
+            let worker = Task.detached(priority: .utility) {
+                ChannelHealthAnalyzer.analyze(
+                    signal: signal,
+                    layout: nil,
+                    base: base,
+                    spectral: nil,
+                    ransac: nil,
+                    includeAdvancedSpectral: false,
+                    impedance: impedance,
+                    impedancesKOhm: impedances,
+                    progress: { progressContinuation.yield($0) }
+                )
+            }
+            let analysis = await withTaskCancellationHandler(
+                operation: { await worker.value },
+                onCancel: { worker.cancel(); progressContinuation.finish() }
+            )
+            progressContinuation.finish()
+            progressTask.cancel()
+            epoching.isAnalyzingDecisionMatrixChannelPrior = false
+            epoching.decisionMatrixChannelPriorProgress = nil
+            epoching.decisionMatrixChannelPriorMessage = nil
+            guard !Task.isCancelled,
+                  sessionID == recordingSessionID,
+                  epoching.decisionMatrix === model else {
+                psaTask = nil
+                return
+            }
+            let goodness = analysis.resultsByChannel.mapValues(\.goodPercentage)
+            guard goodness.count >= signal.numberOfChannels else {
+                epoching.statusMessage = "Fast recording health did not return every channel; the matrix is using the segment-only prior."
+                psaTask = nil
+                return
+            }
+            model.adoptRecordingChannelGoodness(goodness, kind: .fastRecording)
+            epoching.statusMessage = "Fast whole-recording health now supplies the matrix channel prior."
+            psaTask = nil
+        }
+    }
+
+    /// Upgrades the matrix's channel prior in place. The abbreviated scan still
+    /// supplies transient per-cell evidence; only its recording-wide context is
+    /// replaced, so explicit keep/interpolate/reject decisions are preserved.
+    @MainActor
+    func runFullChannelHealthForDecisionMatrix(signal: MFFSignalData, model: PSADecisionMatrixModel) {
+        guard !channels.isAnalyzingHealth else { return }
+        let sessionID = recordingSessionID
+        runChannelHealthOnDemand(for: signal, force: true)
+        guard let healthTask = chanHealth.task else { return }
+        psaTask?.cancel()
+        psaTask = Task { @MainActor in
+            await healthTask.value
+            guard !Task.isCancelled,
+                  sessionID == recordingSessionID,
+                  epoching.decisionMatrix === model,
+                  chanHealth.signature == channelHealthSignature(for: signal) else {
+                psaTask = nil
+                return
+            }
+            let goodness = channels.healthResults.mapValues(\.goodPercentage)
+            guard goodness.count >= signal.numberOfChannels else {
+                epoching.statusMessage = "Full Channel Health did not return every channel; the matrix is still using the fast fallback prior."
+                psaTask = nil
+                return
+            }
+            model.adoptRecordingChannelGoodness(goodness, kind: .fullRecording)
+            epoching.statusMessage = "Full Channel Health now supplies the matrix channel prior. Your matrix decisions were preserved."
             psaTask = nil
         }
     }

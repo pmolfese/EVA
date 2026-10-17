@@ -351,7 +351,8 @@ struct PSABuildJobEpochRejectionTests {
         )
         let model = PSADecisionMatrixModel(preparation: preparation)
         #expect(model.hasRecordingWideChannelHealth == false)
-        #expect(model.channelHealthScopeLabel == "Epoch-set Channel Goodness")
+        #expect(model.channelHealthScopeLabel == "Fast Epoch-set Health")
+        #expect(preparation.localFastGoodnessScores.count == result.segments.count)
         let spiked = PSADecisionCellID(channelIndex: 0, epochIndex: 0)
         #expect(model.resolvedCellDecision(spiked) == .interpolate)
         #expect(model.resolvedEpochDecision(0) == .reject)
@@ -363,10 +364,52 @@ struct PSABuildJobEpochRejectionTests {
         #expect(model.resolvedCellDecision(.init(channelIndex: 1, epochIndex: 1)) == .interpolate)
         #expect(model.resolvedCellDecision(.init(channelIndex: 2, epochIndex: 0)) == .interpolate)
         model.setEpochDecision(.reject, epoch: 1)
+        #expect(model.categorySummaries.reduce(0) { $0 + $1.total } == result.segments.count)
+        #expect(model.categorySummaries.reduce(0) { $0 + $1.kept } == model.keptEpochCount)
         let materialized = model.snapshot().materializedResult()
         #expect(materialized?.segments.count == 1)
         #expect(materialized?.signal.data[0].count == 50)
         #expect(materialized?.signal.data[0].contains(500) == true)
+    }
+
+    @Test @MainActor func fullChannelHealthReplacesFallbackPriorWithoutLosingDecisions() async {
+        let thresholds = EpochBadChannelThresholds(
+            minMicrovolts: -100, maxMicrovolts: 100,
+            maxSlopeMicrovoltsPerSample: 50, maxAccelerationMicrovoltsPerSample: 50,
+            maxBadChannelCount: 0, usesAbsoluteBadChannelCount: true
+        )
+        var job = makeJob(thresholds: thresholds)
+        job.defersBadChannelDecisions = true
+        guard let result = await job.buildEpochs() else {
+            Issue.record("Expected deferred epoch build")
+            return
+        }
+        var preparation = PSADecisionMatrixPreparation.make(
+            signal: result.signal,
+            segments: result.segments,
+            thresholds: thresholds,
+            detectorSegments: [:],
+            recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions,
+            globallyBadChannels: []
+        )
+        preparation.localFastGoodnessScores[0][0] = 20
+        preparation.epochGoodnessScores[0] = 40
+        preparation.epochSetChannelGoodnessScores[0] = 60
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        let cell = PSADecisionCellID(channelIndex: 0, epochIndex: 0)
+        model.setCellDecision(.keep, for: cell)
+
+        #expect(model.integratedGoodness(channel: 0, epoch: 0) == 33)
+        model.adoptRecordingChannelGoodness([0: 80, 1: 80, 2: 80, 3: 80], kind: .fastRecording)
+        #expect(model.channelPriorKind == .fastRecording)
+        #expect(model.channelHealthScopeLabel == "Fast Recording Health")
+        #expect(model.integratedGoodness(channel: 0, epoch: 0) == 38)
+        model.adoptRecordingChannelGoodness([0: 100, 1: 90, 2: 80, 3: 70])
+        #expect(model.hasRecordingWideChannelHealth)
+        #expect(model.channelHealthScopeLabel == "Overall Channel Health")
+        #expect(model.integratedGoodness(channel: 0, epoch: 0) == 43)
+        #expect(model.resolvedCellDecision(cell) == .keep)
     }
 
     @Test func spikedEpochIsInterpolatedWhenBelowAbsoluteCountThreshold() async {

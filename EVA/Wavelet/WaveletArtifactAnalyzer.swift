@@ -217,6 +217,10 @@ nonisolated struct WaveletChannelGoodnessConfiguration: Sendable {
     var waveletFamily: WaveletReductionFamily
     var thresholdRule: WaveletCleaningThresholdRule
     var thresholdModel: WaveletCleaningThresholdModel
+    /// Uses the existing Metal decomposition when available. The analyzer
+    /// transparently falls back to the capped CPU implementation if Metal is
+    /// unavailable or a GPU dispatch cannot complete.
+    var usesGPU: Bool = true
 }
 
 nonisolated struct WaveletChannelGoodnessResult: Identifiable, Sendable {
@@ -551,7 +555,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             thresholdRule: configuration.thresholdRule,
             thresholdModel: configuration.thresholdModel,
             effectiveSamplingRate: effectiveRate,
-            retention: .goodness
+            retention: .goodness,
+            usesGPU: configuration.usesGPU
         ) { completed, channelIndex, total in
             report(
                 0.06 + 0.74 * Double(completed) / Double(max(total, 1)),
@@ -894,8 +899,9 @@ nonisolated enum WaveletArtifactAnalyzer {
         guard !channelIndices.isEmpty else { return [] }
 
         // The GPU path finishes the per-level work on-device and never brings
-        // the bands back, so it can only serve callers that don't need them.
-        if usesGPU, !retention.perLevelDetails, !retention.signedSalience,
+        // the bands back, so it can serve callers that only need aggregate
+        // energy/signed salience rather than the individual detail bands.
+        if usesGPU, !retention.perLevelDetails,
            let backend = WaveletMetalBackend.shared {
             if let gpuResults = prepareChannelsOnGPU(
                 backend: backend,
@@ -1098,12 +1104,11 @@ nonisolated enum WaveletArtifactAnalyzer {
                     channelIndex: entry.channelIndex,
                     samples: entry.samples,
                     // The GPU path never materializes per-level bands on the
-                    // host, so it can only serve the Explorer's retention
-                    // (which asks for neither) — `prepareChannels` routes the
-                    // template-matching paths to the CPU.
+                    // host; `prepareChannels` routes template-matching paths
+                    // that need those bands to the CPU.
                     details: [],
                     artifactDetails: [],
-                    signedSalience: [],
+                    signedSalience: retention.signedSalience ? accumulated.signedSalience[offset] : [],
                     energySalience: accumulated.energySalience[offset],
                     dominantLevels: accumulated.dominantLevels[offset],
                     totalEnergyByLevel: accumulated.totalEnergyByLevel[offset],

@@ -282,6 +282,12 @@ final class EpochingViewModel {
     /// Fraction complete (0...1) while segmenting; nil for indeterminate
     /// phases (e.g. averaging), which fall back to a spinner.
     var segmentingProgress: Double?
+    /// A whole-recording prior requested specifically by the Decision Matrix.
+    /// Kept separate from ordinary Channel Health so the fast-suite option
+    /// cannot be mistaken for a completed full analysis elsewhere in EVA.
+    var isAnalyzingDecisionMatrixChannelPrior = false
+    var decisionMatrixChannelPriorProgress: Double?
+    var decisionMatrixChannelPriorMessage: String?
 
     // MARK: Results
     /// Pre-average raw epochs, cached so PSA options can be re-toggled without
@@ -1157,6 +1163,10 @@ final class EpochingViewModel {
         statusMessage = nil
         isApplying = false
         phaseMessage = nil
+        segmentingProgress = nil
+        isAnalyzingDecisionMatrixChannelPrior = false
+        decisionMatrixChannelPriorProgress = nil
+        decisionMatrixChannelPriorMessage = nil
         epochedSignal = nil
         epochSegments = []
         isAveraged = false

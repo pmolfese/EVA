@@ -17,6 +17,40 @@
 
 import SwiftUI
 
+/// Saved policy for the channel prior used by PSA's Decision Matrix. Every
+/// mode still computes the abbreviated channel × segment scores needed to
+/// color individual cells; this controls the vertical, recording-level prior.
+nonisolated enum PSADecisionMatrixHealthStrategy: String, Codable, CaseIterable, Identifiable, Sendable {
+    case adaptive
+    case fullRecording
+    case fastRecording
+    case segmentOnly
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .adaptive: return "Adaptive (Recommended)"
+        case .fullRecording: return "Full recording suite"
+        case .fastRecording: return "Fast recording suite"
+        case .segmentOnly: return "Segment-only"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .adaptive:
+            return "Use current full Channel Health when available; otherwise open immediately with the abbreviated segment scan and offer a full upgrade."
+        case .fullRecording:
+            return "Automatically run the full recording suite when needed, including enabled spectral, neighbor, impedance, and automatic wavelet metrics."
+        case .fastRecording:
+            return "Run the core whole-recording metrics without spectral, neighbor, or wavelet analysis. This is faster but still gives every channel a recording-wide prior."
+        case .segmentOnly:
+            return "Use only the abbreviated per-channel/per-segment scan. The channel prior is the median score across the epochs in the matrix."
+        }
+    }
+}
+
 /// Configuration for the wavelet channel-burden detector.
 struct ChannelWaveletGoodnessSettings: Codable, Sendable {
     var family: WaveletReductionFamily = .bior44
@@ -36,6 +70,7 @@ struct ChannelWaveletGoodnessSettings: Codable, Sendable {
 @Observable
 final class ChannelGoodnessSettings {
     var runWaveletsAutomatically: Bool { didSet { save() } }
+    var psaDecisionMatrixHealthStrategy: PSADecisionMatrixHealthStrategy { didSet { save() } }
     var base: ChannelBaseMetricSettings { didSet { save() } }
     var impedance: ChannelImpedanceSettings { didSet { save() } }
     var spectral: ChannelSpectralConfiguration { didSet { save() } }
@@ -50,6 +85,7 @@ final class ChannelGoodnessSettings {
         if let data = defaults.data(forKey: Self.storageKey),
            let stored = try? JSONDecoder().decode(Stored.self, from: data) {
             runWaveletsAutomatically = stored.runWaveletsAutomatically
+            psaDecisionMatrixHealthStrategy = stored.psaDecisionMatrixHealthStrategy
             base = stored.base
             impedance = stored.impedance
             spectral = stored.spectral
@@ -57,6 +93,7 @@ final class ChannelGoodnessSettings {
             wavelet = stored.wavelet
         } else {
             runWaveletsAutomatically = true
+            psaDecisionMatrixHealthStrategy = .adaptive
             base = .defaults
             impedance = .defaults
             spectral = .happeStandard
@@ -67,6 +104,7 @@ final class ChannelGoodnessSettings {
 
     func restoreDefaults() {
         runWaveletsAutomatically = true
+        psaDecisionMatrixHealthStrategy = .adaptive
         base = .defaults
         impedance = .defaults
         spectral = .happeStandard
@@ -78,6 +116,7 @@ final class ChannelGoodnessSettings {
     /// back to its default rather than failing the whole decode.
     private struct Stored: Codable {
         var runWaveletsAutomatically: Bool
+        var psaDecisionMatrixHealthStrategy: PSADecisionMatrixHealthStrategy
         var base: ChannelBaseMetricSettings
         var impedance: ChannelImpedanceSettings
         var spectral: ChannelSpectralConfiguration
@@ -86,6 +125,7 @@ final class ChannelGoodnessSettings {
 
         init(
             runWaveletsAutomatically: Bool,
+            psaDecisionMatrixHealthStrategy: PSADecisionMatrixHealthStrategy,
             base: ChannelBaseMetricSettings,
             impedance: ChannelImpedanceSettings,
             spectral: ChannelSpectralConfiguration,
@@ -93,6 +133,7 @@ final class ChannelGoodnessSettings {
             wavelet: ChannelWaveletGoodnessSettings
         ) {
             self.runWaveletsAutomatically = runWaveletsAutomatically
+            self.psaDecisionMatrixHealthStrategy = psaDecisionMatrixHealthStrategy
             self.base = base
             self.impedance = impedance
             self.spectral = spectral
@@ -103,6 +144,10 @@ final class ChannelGoodnessSettings {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             runWaveletsAutomatically = try container.decodeIfPresent(Bool.self, forKey: .runWaveletsAutomatically) ?? true
+            psaDecisionMatrixHealthStrategy = try container.decodeIfPresent(
+                PSADecisionMatrixHealthStrategy.self,
+                forKey: .psaDecisionMatrixHealthStrategy
+            ) ?? .adaptive
             base = try container.decodeIfPresent(ChannelBaseMetricSettings.self, forKey: .base) ?? .defaults
             impedance = try container.decodeIfPresent(ChannelImpedanceSettings.self, forKey: .impedance) ?? .defaults
             spectral = try container.decodeIfPresent(ChannelSpectralConfiguration.self, forKey: .spectral) ?? .happeStandard
@@ -112,7 +157,15 @@ final class ChannelGoodnessSettings {
     }
 
     private func save() {
-        let stored = Stored(runWaveletsAutomatically: runWaveletsAutomatically, base: base, impedance: impedance, spectral: spectral, ransac: ransac, wavelet: wavelet)
+        let stored = Stored(
+            runWaveletsAutomatically: runWaveletsAutomatically,
+            psaDecisionMatrixHealthStrategy: psaDecisionMatrixHealthStrategy,
+            base: base,
+            impedance: impedance,
+            spectral: spectral,
+            ransac: ransac,
+            wavelet: wavelet
+        )
         if let data = try? JSONEncoder().encode(stored) {
             defaults.set(data, forKey: Self.storageKey)
         }
@@ -120,6 +173,7 @@ final class ChannelGoodnessSettings {
 }
 
 private enum GoodnessSettingsTool: String, CaseIterable, Identifiable {
+    case decisionMatrix = "Matrix"
     case base = "Core"
     case impedance = "Impedance"
     case spectral = "Spectral"
@@ -130,6 +184,8 @@ private enum GoodnessSettingsTool: String, CaseIterable, Identifiable {
 
     var caption: String {
         switch self {
+        case .decisionMatrix:
+            return "Choose how PSA supplies the recording-level channel prior used alongside abbreviated channel × segment health in the Decision Matrix."
         case .base:
             return "Green/red thresholds for the always-on core health metrics. \u{201C}Green\u{201D} scores fully good (1.0); \u{201C}Red\u{201D} scores fully poor (0.0); values between interpolate."
         case .impedance:
@@ -173,6 +229,7 @@ struct ChannelGoodnessSettingsView: View {
 
             Group {
                 switch tool {
+                case .decisionMatrix: decisionMatrixSection(settings: settings)
                 case .base: baseSection(settings: settings)
                 case .impedance: impedanceSection(settings: settings)
                 case .spectral: spectralSection(settings: settings)
@@ -201,6 +258,7 @@ struct ChannelGoodnessSettingsView: View {
 
     private func restoreCurrentTool() {
         switch tool {
+        case .decisionMatrix: settings.psaDecisionMatrixHealthStrategy = .adaptive
         case .base: settings.base = .defaults
         case .impedance: settings.impedance = .defaults
         case .spectral: settings.spectral = .happeStandard
@@ -209,6 +267,33 @@ struct ChannelGoodnessSettingsView: View {
             settings.runWaveletsAutomatically = true
             settings.wavelet = .defaults
         }
+    }
+
+    @ViewBuilder
+    private func decisionMatrixSection(settings: ChannelGoodnessSettings) -> some View {
+        @Bindable var settings = settings
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Decision Matrix channel-health strategy")
+                .font(.headline)
+            Picker("Strategy", selection: $settings.psaDecisionMatrixHealthStrategy) {
+                ForEach(PSADecisionMatrixHealthStrategy.allCases) { strategy in
+                    Text(strategy.displayName).tag(strategy)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 280, alignment: .leading)
+            Text(settings.psaDecisionMatrixHealthStrategy.detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Label(
+                "The fast per-segment scan always runs because it supplies each matrix cell's local evidence.",
+                systemImage: "info.circle"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder

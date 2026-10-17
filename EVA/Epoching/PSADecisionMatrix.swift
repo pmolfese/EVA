@@ -3,8 +3,9 @@
 //  EVA
 //
 //  Fast channel × epoch review before category averaging. Channel Health on
-//  the left is recording-wide; each cell combines local channel evidence with
-//  its epoch's aggregate health. Explicit operator decisions always win.
+//  the left is recording-wide when available; each cell combines fast local
+//  evidence, a channel prior, and aggregate epoch health. Explicit operator
+//  decisions always win.
 //
 
 import AppKit
@@ -22,9 +23,22 @@ nonisolated enum PSAEpochDecision: String, CaseIterable, Sendable {
     case reject = "Reject Epoch"
 }
 
+nonisolated enum PSAChannelPriorKind: Sendable {
+    case segmentMedian
+    case fastRecording
+    case fullRecording
+}
+
 nonisolated struct PSADecisionCellID: Hashable, Sendable {
     var channelIndex: Int
     var epochIndex: Int
+}
+
+nonisolated struct PSACategoryEpochSummary: Identifiable, Sendable {
+    var category: String
+    var kept: Int
+    var total: Int
+    var id: String { category }
 }
 
 nonisolated enum PSAChannelMatrixOrder: String, CaseIterable, Identifiable {
@@ -39,10 +53,42 @@ nonisolated enum PSAEpochMatrixOrder: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private nonisolated struct PSAFastSegmentSummary: Sendable {
+    var evidence: EpochBadChannelDetector.Evidence?
+    var finiteFraction: Double
+    var rms: Double
+    var p95Abs: Double
+    var p99Abs: Double
+    var maxAbs: Double
+    var differenceRMS: Double
+    var flatlineFraction: Double
+    var clippingFraction: Double
+    var excessKurtosis: Double
+}
+
+private nonisolated final class PSAScanProgressCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = 0
+
+    func increment() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        completed += 1
+        return completed
+    }
+}
+
+private nonisolated struct PSAFastScanRow: Sendable {
+    var summaries: [PSAFastSegmentSummary?]
+}
+
 nonisolated struct PSADecisionMatrixPreparation: Sendable {
     var signal: MFFSignalData
     var segments: [EpochSegment]
     var evidence: [[EpochBadChannelDetector.Evidence?]] // epoch, then channel
+    /// Abbreviated per-channel/per-epoch health. Unlike the absolute extrema
+    /// detector, this uses robust within-epoch cross-channel baselines.
+    var localFastGoodnessScores: [[Int]]
     var epochGoodnessScores: [Int]
     /// Aggregate channel quality across only the epochs in this matrix. Used as
     /// an explicitly-labelled fallback when full-recording Channel Health has
@@ -61,27 +107,35 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
         thresholds: EpochBadChannelThresholds,
         detectorSegments: [Int: [Int]],
         recordingChannelGoodness: [Int: Int],
+        baseSettings: ChannelBaseMetricSettings = .defaults,
         electrodePositions: [Int: SIMD3<Double>],
         globallyBadChannels: Set<Int>,
-        suggestedRejectedEpochReasons: [Int: [String]] = [:]
+        suggestedRejectedEpochReasons: [Int: [String]] = [:],
+        progress: (@Sendable (_ completed: Int, _ total: Int) -> Void)? = nil
     ) -> Self {
-        var rows = [[EpochBadChannelDetector.Evidence?]](
-            repeating: [EpochBadChannelDetector.Evidence?](repeating: nil, count: signal.numberOfChannels),
+        var scanRows = [PSAFastScanRow](
+            repeating: PSAFastScanRow(
+                summaries: [PSAFastSegmentSummary?](repeating: nil, count: signal.numberOfChannels)
+            ),
             count: segments.count
         )
-        rows.withUnsafeMutableBufferPointer { buffer in
+        let progressCounter = PSAScanProgressCounter()
+        scanRows.withUnsafeMutableBufferPointer { buffer in
             nonisolated(unsafe) let output = buffer.baseAddress!
             evaConcurrentPerform(iterations: segments.count) { epochIndex in
                 let segment = segments[epochIndex]
                 let range = segment.startSample..<(segment.endSample + 1)
-                var epoch = [EpochBadChannelDetector.Evidence?](repeating: nil, count: signal.numberOfChannels)
+                var summaries = [PSAFastSegmentSummary?](repeating: nil, count: signal.numberOfChannels)
                 for channelIndex in signal.data.indices {
-                    epoch[channelIndex] = EpochBadChannelDetector.evidence(
-                        in: signal.data[channelIndex], range: range
-                    )
+                    summaries[channelIndex] = fastSummary(in: signal.data[channelIndex], range: range)
                 }
-                (output + epochIndex).pointee = epoch
+                (output + epochIndex).pointee = PSAFastScanRow(summaries: summaries)
+                progress?(progressCounter.increment(), segments.count)
             }
+        }
+        let rows = scanRows.map { $0.summaries.map { $0?.evidence } }
+        let localScores = scanRows.map { row in
+            fastGoodnessScores(summaries: row.summaries, settings: baseSettings)
         }
         var suggestions = Set<PSADecisionCellID>()
         for epochIndex in segments.indices {
@@ -96,24 +150,19 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
                 suggestions.insert(.init(channelIndex: channelIndex, epochIndex: number - 1))
             }
         }
-        let epochGoodnessScores = rows.map { epoch in
+        let epochGoodnessScores = localScores.map { epoch in
             guard !epoch.isEmpty else { return 100 }
-            let total = epoch.reduce(0.0) { partial, value in
-                partial + max(0, 100 * (1 - (value?.severity(relativeTo: thresholds) ?? 0)))
-            }
-            return Int((total / Double(epoch.count)).rounded())
+            let total = epoch.reduce(0, +)
+            return Int((Double(total) / Double(epoch.count)).rounded())
         }
         let epochSetChannelGoodnessScores = (0..<signal.numberOfChannels).map { channel in
-            guard !rows.isEmpty else { return 100 }
-            let total = rows.reduce(0.0) { partial, epoch in
-                partial + max(0, 100 * (1 - (epoch[channel]?.severity(relativeTo: thresholds) ?? 0)))
-            }
-            return Int((total / Double(rows.count)).rounded())
+            median(localScores.compactMap { $0.indices.contains(channel) ? Double($0[channel]) : nil }, fallback: 100)
         }
         return Self(
             signal: signal,
             segments: segments,
             evidence: rows,
+            localFastGoodnessScores: localScores,
             epochGoodnessScores: epochGoodnessScores,
             epochSetChannelGoodnessScores: epochSetChannelGoodnessScores,
             detectorSuggestions: suggestions,
@@ -124,12 +173,162 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
             suggestedRejectedEpochReasons: suggestedRejectedEpochReasons
         )
     }
+
+    private static func fastSummary(in channel: [Float], range: Range<Int>) -> PSAFastSegmentSummary? {
+        guard range.count > 1, range.lowerBound >= 0, range.upperBound <= channel.count else { return nil }
+        var values = [Double]()
+        var absValues = [Double]()
+        var differences = [Double]()
+        values.reserveCapacity(range.count)
+        absValues.reserveCapacity(range.count)
+        differences.reserveCapacity(range.count - 1)
+        var minimum = Double.infinity
+        var maximum = -Double.infinity
+        var maxSlope = 0.0
+        var maxAcceleration = 0.0
+        var previousValue: Double?
+        var previousSlope: Double?
+        var sumSquares = 0.0
+        var nonFinite = 0
+
+        for sample in range {
+            let value = Double(channel[sample])
+            guard value.isFinite else {
+                nonFinite += 1
+                previousValue = nil
+                previousSlope = nil
+                continue
+            }
+            values.append(value)
+            absValues.append(abs(value))
+            sumSquares += value * value
+            minimum = min(minimum, value)
+            maximum = max(maximum, value)
+            if let previousValue {
+                let slope = abs(value - previousValue)
+                differences.append(slope)
+                maxSlope = max(maxSlope, slope)
+                if let previousSlope { maxAcceleration = max(maxAcceleration, abs(slope - previousSlope)) }
+                previousSlope = slope
+            }
+            previousValue = value
+        }
+        guard !values.isEmpty else {
+            return PSAFastSegmentSummary(
+                evidence: nil, finiteFraction: 0, rms: 0, p95Abs: 0, p99Abs: 0,
+                maxAbs: 0, differenceRMS: 0, flatlineFraction: 1,
+                clippingFraction: 0, excessKurtosis: 0
+            )
+        }
+        absValues.sort()
+        let p95 = SignalStatistics.percentile(absValues, fraction: 0.95)
+        let p99 = SignalStatistics.percentile(absValues, fraction: 0.99)
+        let maxAbs = absValues.last ?? 0
+        let rms = sqrt(sumSquares / Double(values.count))
+        let differenceRMS = differences.isEmpty
+            ? 0 : sqrt(differences.reduce(0) { $0 + $1 * $1 } / Double(differences.count))
+        let flatlineThreshold = max(p95 * 0.0001, 1e-7)
+        let flatlineFraction = differences.isEmpty ? 1
+            : Double(differences.filter { $0 <= flatlineThreshold }.count) / Double(differences.count)
+        let mean = values.reduce(0, +) / Double(values.count)
+        var m2 = 0.0
+        var m4 = 0.0
+        for value in values {
+            let delta = value - mean
+            let squared = delta * delta
+            m2 += squared
+            m4 += squared * squared
+        }
+        m2 /= Double(values.count)
+        m4 /= Double(values.count)
+        return PSAFastSegmentSummary(
+            evidence: .init(
+                minimumMicrovolts: minimum,
+                maximumMicrovolts: maximum,
+                maximumSlopeMicrovoltsPerSample: maxSlope,
+                maximumAccelerationMicrovoltsPerSample: maxAcceleration
+            ),
+            finiteFraction: Double(values.count) / Double(values.count + nonFinite),
+            rms: rms,
+            p95Abs: p95,
+            p99Abs: p99,
+            maxAbs: maxAbs,
+            differenceRMS: differenceRMS,
+            flatlineFraction: flatlineFraction,
+            clippingFraction: HealthScoring.clippingFraction(absValues: absValues, maxAbs: maxAbs),
+            excessKurtosis: m2 > 1e-18 ? m4 / (m2 * m2) - 3 : 0
+        )
+    }
+
+    private static func fastGoodnessScores(
+        summaries: [PSAFastSegmentSummary?], settings: ChannelBaseMetricSettings
+    ) -> [Int] {
+        let valid = summaries.compactMap { $0 }
+        let medianP95 = medianDouble(valid.map(\.p95Abs), fallback: 1)
+        let medianP99 = medianDouble(valid.map(\.p99Abs), fallback: 1)
+        let medianDerivative = medianDouble(
+            valid.map { $0.differenceRMS / max($0.rms, 1e-9) }, fallback: 1
+        )
+        return summaries.map { summary in
+            guard let summary else { return 0 }
+            var weighted = 0.0
+            var weight = 0.0
+            func add(_ score: Double, _ metricWeight: Double) {
+                weighted += score * metricWeight
+                weight += metricWeight
+            }
+            if settings.finiteEnabled {
+                add(HealthScoring.scoreLowerBound(summary.finiteFraction, green: settings.finiteGreen, red: settings.finiteRed), settings.finiteWeight)
+            }
+            if settings.amplitudeEnabled {
+                let score = summary.rms <= 1e-12 || summary.p95Abs <= 1e-12 ? 0
+                    : HealthScoring.scoreTwoSidedRatio(summary.p95Abs / medianP95, green: settings.amplitudeGreen, red: settings.amplitudeRed)
+                add(score, settings.amplitudeWeight)
+            }
+            if settings.burstEnabled {
+                add(HealthScoring.scoreUpperRatio(summary.maxAbs / max(medianP99, 1e-9), green: settings.burstGreen, red: settings.burstRed), settings.burstWeight)
+            }
+            if settings.flatlineEnabled {
+                add(HealthScoring.scoreUpperFraction(summary.flatlineFraction, green: settings.flatlineGreen, red: settings.flatlineRed), settings.flatlineWeight)
+            }
+            if settings.clippingEnabled {
+                add(HealthScoring.scoreUpperFraction(summary.clippingFraction, green: settings.clippingGreen, red: settings.clippingRed), settings.clippingWeight)
+            }
+            if settings.fastNoiseEnabled {
+                let derivativeRatio = summary.differenceRMS / max(summary.rms, 1e-9)
+                add(HealthScoring.scoreUpperRatio(derivativeRatio / max(medianDerivative, 1e-9), green: settings.fastNoiseGreen, red: settings.fastNoiseRed), settings.fastNoiseWeight)
+            }
+            add(HealthScoring.scoreUpperRatio(max(summary.excessKurtosis, 0), green: 5, red: 20), 1)
+            return Int((100 * (weight > 0 ? weighted / weight : 0)).rounded())
+        }
+    }
+
+    private static func median(_ values: [Double], fallback: Int) -> Int {
+        let sorted = values.filter(\.isFinite).sorted()
+        guard !sorted.isEmpty else { return fallback }
+        let middle = sorted.count / 2
+        let value = sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
+        return Int(value.rounded())
+    }
+
+    private static func medianDouble(_ values: [Double], fallback: Double) -> Double {
+        let sorted = values.filter { $0.isFinite && $0 > 0 }.sorted()
+        guard !sorted.isEmpty else { return fallback }
+        let middle = sorted.count / 2
+        return sorted.count.isMultiple(of: 2)
+            ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
+    }
 }
 
 @MainActor
 @Observable
 final class PSADecisionMatrixModel {
     let preparation: PSADecisionMatrixPreparation
+    /// Set when the operator runs full Channel Health from this review. Keeping
+    /// it outside `preparation` preserves every explicit matrix decision.
+    var recordingChannelGoodnessOverride: [Int: Int]?
+    var recordingChannelPriorKindOverride: PSAChannelPriorKind?
     var channelOrder: PSAChannelMatrixOrder = .number
     var epochOrder: PSAEpochMatrixOrder = .acquisition
     var interpolationHealthThreshold = 55.0
@@ -183,15 +382,35 @@ final class PSADecisionMatrixModel {
     }
 
     var hasRecordingWideChannelHealth: Bool {
-        preparation.recordingChannelGoodness.count >= preparation.signal.numberOfChannels
+        channelPriorKind != .segmentMedian
+    }
+
+    var hasFullRecordingChannelHealth: Bool {
+        channelPriorKind == .fullRecording
+    }
+
+    var channelPriorKind: PSAChannelPriorKind {
+        guard effectiveRecordingChannelGoodness.count >= preparation.signal.numberOfChannels else {
+            return .segmentMedian
+        }
+        return recordingChannelPriorKindOverride ?? .fullRecording
     }
 
     var channelHealthScopeLabel: String {
-        hasRecordingWideChannelHealth ? "Overall Channel Health" : "Epoch-set Channel Goodness"
+        switch channelPriorKind {
+        case .fullRecording: return "Overall Channel Health"
+        case .fastRecording: return "Fast Recording Health"
+        case .segmentMedian: return "Fast Epoch-set Health"
+        }
+    }
+
+    private var effectiveRecordingChannelGoodness: [Int: Int] {
+        recordingChannelGoodnessOverride ?? preparation.recordingChannelGoodness
     }
 
     func displayedChannelGoodness(_ channel: Int) -> Int {
-        if let overall = preparation.recordingChannelGoodness[channel] { return overall }
+        if hasRecordingWideChannelHealth,
+           let overall = effectiveRecordingChannelGoodness[channel] { return overall }
         return preparation.epochSetChannelGoodnessScores.indices.contains(channel)
             ? preparation.epochSetChannelGoodnessScores[channel] : 100
     }
@@ -203,18 +422,25 @@ final class PSADecisionMatrixModel {
     }
 
     func localGoodness(channel: Int, epoch: Int) -> Double {
-        guard preparation.evidence.indices.contains(epoch),
-              preparation.evidence[epoch].indices.contains(channel),
-              let evidence = preparation.evidence[epoch][channel] else { return 100 }
-        let severity = evidence.severity(relativeTo: preparation.thresholds)
-        return max(0, 100 * (1 - severity))
+        guard preparation.localFastGoodnessScores.indices.contains(epoch),
+              preparation.localFastGoodnessScores[epoch].indices.contains(channel) else { return 100 }
+        return Double(preparation.localFastGoodnessScores[epoch][channel])
     }
 
-    /// Cell color integrates local channel evidence (70%) and whole-epoch
-    /// health (30%). Recording-wide Channel Health remains a separate row label.
+    /// Cells emphasize transient local evidence while retaining a stable
+    /// channel prior and a smaller whole-epoch context contribution.
     func integratedGoodness(channel: Int, epoch: Int) -> Int {
-        Int((0.70 * localGoodness(channel: channel, epoch: epoch)
-             + 0.30 * Double(epochGoodness(epoch))).rounded())
+        Int((0.60 * localGoodness(channel: channel, epoch: epoch)
+             + 0.25 * Double(displayedChannelGoodness(channel))
+             + 0.15 * Double(epochGoodness(epoch))).rounded())
+    }
+
+    func adoptRecordingChannelGoodness(
+        _ goodness: [Int: Int], kind: PSAChannelPriorKind = .fullRecording
+    ) {
+        guard goodness.count >= preparation.signal.numberOfChannels else { return }
+        recordingChannelGoodnessOverride = goodness
+        recordingChannelPriorKindOverride = kind
     }
 
     func resolvedCellDecision(_ id: PSADecisionCellID) -> PSACellDecision {
@@ -240,6 +466,20 @@ final class PSADecisionMatrixModel {
 
     var keptEpochCount: Int { preparation.segments.indices.filter { resolvedEpochDecision($0) == .keep }.count }
     var rejectedEpochCount: Int { preparation.segments.count - keptEpochCount }
+
+    var categorySummaries: [PSACategoryEpochSummary] {
+        let grouped = Dictionary(grouping: preparation.segments.indices) {
+            preparation.segments[$0].category
+        }
+        return grouped.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { category in
+            let epochs = grouped[category] ?? []
+            return PSACategoryEpochSummary(
+                category: category,
+                kept: epochs.filter { resolvedEpochDecision($0) == .keep }.count,
+                total: epochs.count
+            )
+        }
+    }
 
     func setCellDecision(_ decision: PSACellDecision, for id: PSADecisionCellID) {
         if decision == .automatic { cellOverrides[id] = nil } else { cellOverrides[id] = decision }
@@ -286,6 +526,7 @@ final class PSADecisionMatrixModel {
     func snapshot() -> PSADecisionMatrixSnapshot {
         .init(
             preparation: preparation,
+            channelPriorGoodnessScores: (0..<preparation.signal.numberOfChannels).map(displayedChannelGoodness),
             interpolationHealthThreshold: interpolationHealthThreshold,
             epochRejectionHealthThreshold: epochRejectionHealthThreshold,
             suggestedRejectedEpochs: Set(suggestedRejectedEpochReasons.keys),
@@ -297,6 +538,7 @@ final class PSADecisionMatrixModel {
 
 nonisolated struct PSADecisionMatrixSnapshot: Sendable {
     var preparation: PSADecisionMatrixPreparation
+    var channelPriorGoodnessScores: [Int]
     var interpolationHealthThreshold: Double
     var epochRejectionHealthThreshold: Double
     var suggestedRejectedEpochs: Set<Int>
@@ -304,11 +546,14 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
     var epochOverrides: [Int: PSAEpochDecision]
 
     private func integratedGoodness(channel: Int, epoch: Int) -> Int {
-        guard let evidence = preparation.evidence[epoch][channel] else { return 100 }
-        let local = max(0, 100 * (1 - evidence.severity(relativeTo: preparation.thresholds)))
+        let local = preparation.localFastGoodnessScores.indices.contains(epoch)
+            && preparation.localFastGoodnessScores[epoch].indices.contains(channel)
+            ? Double(preparation.localFastGoodnessScores[epoch][channel]) : 100
+        let channelPrior = channelPriorGoodnessScores.indices.contains(channel)
+            ? Double(channelPriorGoodnessScores[channel]) : 100
         let epochGoodness = preparation.epochGoodnessScores.indices.contains(epoch)
             ? Double(preparation.epochGoodnessScores[epoch]) : 100
-        return Int((0.7 * local + 0.3 * epochGoodness).rounded())
+        return Int((0.60 * local + 0.25 * channelPrior + 0.15 * epochGoodness).rounded())
     }
 
     private func cellDecision(channel: Int, epoch: Int) -> PSACellDecision {
@@ -408,10 +653,17 @@ private enum PSAMatrixDragMode {
 struct PSADecisionMatrixView: View {
     @Bindable var model: PSADecisionMatrixModel
     var isApplying: Bool
+    var isRunningFullChannelHealth: Bool
+    var allowsFullHealthUpgrade: Bool
+    var fallbackMessage: String
+    var progress: Double?
+    var progressMessage: String?
     var onBack: () -> Void
     var onCancel: () -> Void
+    var onRunFullChannelHealth: () -> Void
     var onAverage: () -> Void
     @State private var dragMode: PSAMatrixDragMode?
+    @State private var showsSelectionPopover = false
 
     private let cellWidth: CGFloat = 28
     private let rowHeight: CGFloat = 24
@@ -422,25 +674,48 @@ struct PSADecisionMatrixView: View {
         VStack(alignment: .leading, spacing: 14) {
             stepHeader
             controls
+            categorySummary
             if !model.hasRecordingWideChannelHealth {
-                Label(
-                    "Whole-recording Channel Health has not been run. The left column is a limited goodness summary across the epochs shown here.",
-                    systemImage: "info.circle"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Label(
+                        fallbackMessage,
+                        systemImage: "info.circle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                    if allowsFullHealthUpgrade {
+                        Button("Run Full Channel Health", action: onRunFullChannelHealth)
+                            .controlSize(.small)
+                            .disabled(isRunningFullChannelHealth || isApplying)
+                    }
+                }
             }
-            HStack(spacing: 12) {
-                matrix
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                inspector
-                    .frame(width: 300)
-                    .frame(maxHeight: .infinity, alignment: .top)
-            }
+            Text(cellScoreExplanation)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            matrix
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .popover(isPresented: $showsSelectionPopover, arrowEdge: .trailing) {
+                    inspector
+                        .frame(width: 340)
+                        .padding(12)
+                }
             footer
         }
         .padding(20)
         .frame(minWidth: 1120, idealWidth: 1320, minHeight: 680, idealHeight: 820)
+    }
+
+    private var cellScoreExplanation: String {
+        switch model.channelPriorKind {
+        case .fullRecording:
+            return "Cell score: 60% fast segment health · 25% full Channel Health · 15% epoch health"
+        case .fastRecording:
+            return "Cell score: 60% fast segment health · 25% fast recording health · 15% epoch health"
+        case .segmentMedian:
+            return "Cell score: 60% fast segment health · 25% median epoch-set channel health · 15% epoch health"
+        }
     }
 
     private var stepHeader: some View {
@@ -485,6 +760,30 @@ struct PSADecisionMatrixView: View {
         .font(.caption)
     }
 
+    private var categorySummary: some View {
+        HStack(spacing: 10) {
+            Text("Kept by category")
+                .font(.caption.weight(.semibold))
+                .fixedSize()
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(model.categorySummaries) { summary in
+                        HStack(spacing: 5) {
+                            Text(summary.category.isEmpty ? "Uncategorized" : summary.category)
+                                .lineLimit(1)
+                            Text("\(summary.kept)/\(summary.total)")
+                                .font(.caption.monospacedDigit().weight(.semibold))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(healthColor(summary.total > 0 ? 100 * summary.kept / summary.total : 0).opacity(0.16), in: Capsule())
+                        .help("\(summary.kept) of \(summary.total) epochs kept")
+                    }
+                }
+            }
+        }
+    }
+
     private var matrix: some View {
         GeometryReader { _ in
             ScrollView([.horizontal, .vertical]) {
@@ -497,7 +796,12 @@ struct PSADecisionMatrixView: View {
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged(handleMatrixDrag)
-                            .onEnded { _ in dragMode = nil }
+                            .onEnded { _ in
+                                dragMode = nil
+                                showsSelectionPopover = model.selectedCell != nil
+                                    || !model.selectedChannels.isEmpty
+                                    || !model.selectedEpochs.isEmpty
+                            }
                     )
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
@@ -617,7 +921,7 @@ struct PSADecisionMatrixView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     let segment = model.preparation.segments[id.epochIndex]
                     Text("Channel \(id.channelIndex + 1) · Epoch \(id.epochIndex + 1)").font(.headline)
-                    Text("\(segment.category) · epoch health \(model.epochGoodness(id.epochIndex))% · integrated \(model.integratedGoodness(channel: id.channelIndex, epoch: id.epochIndex))%")
+                    Text("\(segment.category) · local \(Int(model.localGoodness(channel: id.channelIndex, epoch: id.epochIndex)))% · channel prior \(model.displayedChannelGoodness(id.channelIndex))% · epoch \(model.epochGoodness(id.epochIndex))% · integrated \(model.integratedGoodness(channel: id.channelIndex, epoch: id.epochIndex))%")
                         .font(.caption).foregroundStyle(.secondary)
                     if let reasons = model.suggestedRejectedEpochReasons[id.epochIndex], !reasons.isEmpty {
                         Label(reasons.joined(separator: ", "), systemImage: "exclamationmark.triangle.fill")
@@ -652,8 +956,6 @@ struct PSADecisionMatrixView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                ContentUnavailableView("Select cells or headers", systemImage: "square.grid.3x3", description: Text("Click a cell for details, or click and drag channel/epoch headers for bulk decisions."))
             }
         }
     }
@@ -745,10 +1047,22 @@ struct PSADecisionMatrixView: View {
         HStack {
             Button("Back", action: onBack).disabled(isApplying)
             Spacer()
-            if isApplying { ProgressView().controlSize(.small); Text("Applying decisions and averaging…").font(.caption) }
+            if isApplying || isRunningFullChannelHealth {
+                if let progress {
+                    ProgressView(value: progress)
+                        .controlSize(.small)
+                        .frame(width: 90)
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Text(progressMessage ?? (isRunningFullChannelHealth ? "Running full Channel Health…" : "Applying decisions and averaging…"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Button("Cancel", action: onCancel).disabled(isApplying)
             Button("Average \(model.keptEpochCount) Epochs", action: onAverage)
-                .keyboardShortcut(.defaultAction).disabled(isApplying || model.keptEpochCount == 0)
+                .keyboardShortcut(.defaultAction)
+                .disabled(isApplying || isRunningFullChannelHealth || model.keptEpochCount == 0)
         }
     }
 

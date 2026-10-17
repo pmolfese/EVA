@@ -59,6 +59,30 @@ struct ChannelHealthAnalyzerTests {
         let analysis = ChannelHealthAnalyzer.analyze(signal: empty, layout: nil)
         #expect(analysis.resultsByChannel.isEmpty)
     }
+
+    @Test func advancedSpectralMetricsCanBeExcludedFromFastAnalysis() throws {
+        let signal = SyntheticSignal.make(
+            (0..<4).map { cleanChannel(seed: UInt64($0 + 1), frequency: 8 + Double($0)) },
+            samplingRate: samplingRate
+        )
+        let full = ChannelHealthAnalyzer.analyze(
+            signal: signal,
+            layout: nil,
+            includeAdvancedSpectral: true
+        )
+        let fast = ChannelHealthAnalyzer.analyze(
+            signal: signal,
+            layout: nil,
+            includeAdvancedSpectral: false
+        )
+        let advancedNames = Set(["Aperiodic Slope", "Muscle (EMG)", "Line Harmonics"])
+        let fullNames = Set(try #require(full.resultsByChannel[0]).metrics.map(\.name))
+        let fastNames = Set(try #require(fast.resultsByChannel[0]).metrics.map(\.name))
+
+        #expect(!fullNames.isDisjoint(with: advancedNames))
+        #expect(fastNames.isDisjoint(with: advancedNames))
+    }
+
     @Test func kurtosisGoodnessDistinguishesTypicalSignalsFromSpikes() throws {
         let clean = cleanChannel(seed: 1, frequency: 10)
         var spiky = clean
