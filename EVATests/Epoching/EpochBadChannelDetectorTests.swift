@@ -60,6 +60,15 @@ struct EpochBadChannelDetectorTests {
         #expect(bad.isEmpty)
     }
 
+    @Test func evidenceRetainsTheMetricsBehindTheDecision() {
+        let channel: [Float] = [0, 2, 7, -4, 1]
+        let evidence = EpochBadChannelDetector.evidence(in: channel, range: 0..<channel.count)
+        #expect(evidence?.minimumMicrovolts == -4)
+        #expect(evidence?.maximumMicrovolts == 7)
+        #expect(evidence?.maximumSlopeMicrovoltsPerSample == 11)
+        #expect(evidence?.maximumAccelerationMicrovoltsPerSample == 6)
+    }
+
     @Test func interpolateReplacesOnlyTheFlaggedRange() {
         // Two good neighbors at antipodal-ish positions so the target's
         // interpolation weight is well-conditioned; values chosen so the
@@ -300,6 +309,58 @@ struct PSABuildJobEpochRejectionTests {
         // Still counted toward the escalation tally even though rejected.
         #expect(result?.epochBadChannelCounts[0] == 1)
         #expect(result?.totalEpochsEvaluated == 2)
+    }
+
+    @Test func decisionMatrixModeDefersRejectionAndInterpolation() async {
+        let thresholds = EpochBadChannelThresholds(
+            minMicrovolts: -100, maxMicrovolts: 100,
+            maxSlopeMicrovoltsPerSample: 50, maxAccelerationMicrovoltsPerSample: 50,
+            maxBadChannelFraction: 0
+        )
+        var job = makeJob(thresholds: thresholds)
+        job.defersBadChannelDecisions = true
+        let result = await job.buildEpochs()
+        #expect(result?.segments.count == 2)
+        #expect(result?.rejectedForTooManyBadChannels == 0)
+        #expect(result?.interpolatedChannelSegments.isEmpty == true)
+        #expect(result?.epochBadChannelSegments[0] == [1])
+        #expect(result?.signal.data[0].contains(500) == true)
+    }
+
+    @Test @MainActor func explicitMatrixDecisionsOverrideAutomaticThresholds() async {
+        let thresholds = EpochBadChannelThresholds(
+            minMicrovolts: -100, maxMicrovolts: 100,
+            maxSlopeMicrovoltsPerSample: 50, maxAccelerationMicrovoltsPerSample: 50,
+            maxBadChannelCount: 0, usesAbsoluteBadChannelCount: true
+        )
+        var job = makeJob(thresholds: thresholds)
+        job.defersBadChannelDecisions = true
+        guard let result = await job.buildEpochs() else {
+            Issue.record("Expected deferred epoch build")
+            return
+        }
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: result.signal,
+            segments: result.segments,
+            thresholds: thresholds,
+            detectorSegments: result.epochBadChannelSegments,
+            recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions,
+            globallyBadChannels: []
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        let spiked = PSADecisionCellID(channelIndex: 0, epochIndex: 0)
+        #expect(model.resolvedCellDecision(spiked) == .interpolate)
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        model.setCellDecision(.keep, for: spiked)
+        model.setEpochDecision(.keep, epoch: 0)
+        #expect(model.resolvedCellDecision(spiked) == .keep)
+        #expect(model.resolvedEpochDecision(0) == .keep)
+        model.setEpochDecision(.reject, epoch: 1)
+        let materialized = model.snapshot().materializedResult()
+        #expect(materialized?.segments.count == 1)
+        #expect(materialized?.signal.data[0].count == 50)
+        #expect(materialized?.signal.data[0].contains(500) == true)
     }
 
     @Test func spikedEpochIsInterpolatedWhenBelowAbsoluteCountThreshold() async {

@@ -635,6 +635,11 @@ nonisolated struct PSABuildResult {
     /// Channel index -> 1-based accepted segment numbers where that channel
     /// was flagged bad and therefore interpolated within the segment.
     var interpolatedChannelSegments: [Int: [Int]] = [:]
+    /// Channel index -> 1-based segment numbers where the detector found bad
+    /// evidence, whether the automatic action was applied or deferred to the
+    /// Decision Matrix. Unlike `interpolatedChannelSegments`, this is evidence,
+    /// not a claim that samples were already changed.
+    var epochBadChannelSegments: [Int: [Int]] = [:]
     var exclusionSummary = PSAExclusionSummary()
 
     /// Averages each category's epochs. Runs off the main thread.
@@ -849,6 +854,9 @@ nonisolated struct PSABuildJob: Sendable {
     let epochBadChannelThresholds: EpochBadChannelThresholds
     let electrodePositions: [Int: SIMD3<Double>]
     let globallyBadChannels: Set<Int>
+    /// Preserve raw epoch samples and turn automatic interpolation/rejection
+    /// into suggestions for the interactive Decision Matrix.
+    var defersBadChannelDecisions = false
     /// Sub-window of the epoch, in seconds relative to the anchor (negative =
     /// before it), within which an artifact must fall to reject the epoch.
     /// `nil` — the default — means the whole epoch counts.
@@ -1062,7 +1070,7 @@ nonisolated struct PSABuildJob: Sendable {
                         // legitimate "bad in this trial" data point for the
                         // escalate-to-globally-bad decision below.
                         badOut[jobIndex] = epochBadChannels
-                        if epochBadChannels.count > maxBadChannelsPerEpoch {
+                        if !defersBadChannelDecisions && epochBadChannels.count > maxBadChannelsPerEpoch {
                             // Too messy to trust — reject the whole epoch
                             // instead of interpolating. Skipping the spline
                             // fit here is also the point: it's the expensive
@@ -1075,14 +1083,16 @@ nonisolated struct PSABuildJob: Sendable {
                             progress?(done, total)
                             return
                         }
-                        EpochBadChannelDetector.interpolate(
-                            badChannels: epochBadChannels,
-                            in: &slice,
-                            range: range,
-                            positions: electrodePositions,
-                            excludingGloballyBad: globallyBadChannels,
-                            weightCache: weightCache
-                        )
+                        if !defersBadChannelDecisions {
+                            EpochBadChannelDetector.interpolate(
+                                badChannels: epochBadChannels,
+                                in: &slice,
+                                range: range,
+                                positions: electrodePositions,
+                                excludingGloballyBad: globallyBadChannels,
+                                weightCache: weightCache
+                            )
+                        }
                     }
                     out[jobIndex] = slice
                     progressLock.lock()
@@ -1112,6 +1122,7 @@ nonisolated struct PSABuildJob: Sendable {
         var epochedEvents: [MFFEvent] = []
         var segments: [EpochSegment] = []
         var interpolatedChannelSegments: [Int: [Int]] = [:]
+        var epochBadChannelSegments: [Int: [Int]] = [:]
         var outputStartSample = 0
 
         for (jobIndex, job) in jobs.enumerated() {
@@ -1127,7 +1138,10 @@ nonisolated struct PSABuildJob: Sendable {
             let acceptedSegmentNumber = segments.count + 1
             if interpolatesBadChannelsPerEpoch, let badSet = jobBadChannels[jobIndex], !badSet.isEmpty {
                 for channel in badSet.sorted() {
-                    interpolatedChannelSegments[channel, default: []].append(acceptedSegmentNumber)
+                    epochBadChannelSegments[channel, default: []].append(acceptedSegmentNumber)
+                    if !defersBadChannelDecisions {
+                        interpolatedChannelSegments[channel, default: []].append(acceptedSegmentNumber)
+                    }
                 }
             }
             for channelIndex in epochedData.indices {
@@ -1183,7 +1197,7 @@ nonisolated struct PSABuildJob: Sendable {
             }
         }
         let epochBadChannelsInAllAcceptedSegments = accepted > 0
-            ? interpolatedChannelSegments.keys.sorted().filter { interpolatedChannelSegments[$0]?.count == accepted }
+            ? epochBadChannelSegments.keys.sorted().filter { epochBadChannelSegments[$0]?.count == accepted }
             : []
         return PSABuildResult(
             signal: epochedSignal,
@@ -1194,6 +1208,7 @@ nonisolated struct PSABuildJob: Sendable {
             rejectedForTooManyBadChannels: rejectedForTooManyBadChannels,
             epochBadChannelsInAllAcceptedSegments: epochBadChannelsInAllAcceptedSegments,
             interpolatedChannelSegments: interpolatedChannelSegments,
+            epochBadChannelSegments: epochBadChannelSegments,
             exclusionSummary: PSAExclusionSummary(
                 candidateEvents: events.count,
                 acceptedEpochs: accepted,

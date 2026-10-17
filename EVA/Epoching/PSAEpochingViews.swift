@@ -23,6 +23,7 @@ extension WaveformView {
     // MARK: - PSA epoching
 
     func openPSASheet(for signal: MFFSignalData) {
+        epoching.decisionMatrix = nil
         reconcilePSADefinedArtifactRejectionSelections()
         let events = segmentableEvents(for: signal)
         reconcilePSAEventSelection(for: events)
@@ -76,7 +77,25 @@ extension WaveformView {
         }
     }
 
+    @ViewBuilder
     func psaSheet(for signal: MFFSignalData) -> some View {
+        if let matrix = epoching.decisionMatrix {
+            PSADecisionMatrixView(
+                model: matrix,
+                isApplying: epoching.isApplying,
+                onBack: { epoching.decisionMatrix = nil },
+                onCancel: {
+                    epoching.decisionMatrix = nil
+                    epoching.showsSheet = false
+                },
+                onAverage: { averageReviewedDecisionMatrix() }
+            )
+        } else {
+            psaConfigurationSheet(for: signal)
+        }
+    }
+
+    func psaConfigurationSheet(for signal: MFFSignalData) -> some View {
         let events = segmentableEvents(for: signal)
         let allSummaries = groupedPSAEventSummaries(events)
         let summaries = filteredPSAEventSummaries(allSummaries)
@@ -271,7 +290,13 @@ extension WaveformView {
                                 .padding(.leading, 18)
                                 .disabled(!epoching.interpolatesBadChannelsPerEpoch)
 
-                            Toggle("Average by category", isOn: $epoching.averageOnApply)
+                            HStack(spacing: 16) {
+                                Toggle("Average by category", isOn: $epoching.averageOnApply)
+                                Toggle("Use Decision Matrix", isOn: $epoching.usesDecisionMatrix)
+                                    .toggleStyle(.checkbox)
+                                    .disabled(!epoching.averageOnApply)
+                                    .help("Review channel × epoch health before averaging. Cell decisions override the automatic thresholds.")
+                            }
                             Toggle("Average reference", isOn: $epoching.averageReference)
                                 .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
                             Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
@@ -1413,14 +1438,18 @@ extension WaveformView {
     }
 
     func refreshPSAEpochDiagnostics(from result: PSABuildResult) {
+        epoching.epochBadChannelSegments = result.epochBadChannelSegments
         epoching.epochBadChannelSummary = result.epochBadChannelCounts.keys.sorted().map {
             "Ch\($0 + 1) (\(result.epochBadChannelCounts[$0] ?? 0) of \(result.totalEpochsEvaluated) epochs)"
         }
         epoching.epochBadChannelAllSegmentsSummary = result.epochBadChannelsInAllAcceptedSegments.map {
             "Ch\($0 + 1)"
         }
-        epoching.interpolatedChannelsBySegmentSummary = result.interpolatedChannelSegments.keys.sorted().map { channel in
-            let segments = result.interpolatedChannelSegments[channel, default: []]
+        let affectedSegments = result.interpolatedChannelSegments.isEmpty
+            ? result.epochBadChannelSegments
+            : result.interpolatedChannelSegments
+        epoching.interpolatedChannelsBySegmentSummary = affectedSegments.keys.sorted().map { channel in
+            let segments = affectedSegments[channel, default: []]
                 .map(String.init)
                 .joined(separator: ",")
             return "Ch\(channel + 1)(\(segments))"
@@ -1481,7 +1510,8 @@ extension WaveformView {
     /// immediately, the richer status line, and the UI teardown.
     private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
         let sessionID = recordingSessionID
-        let shouldAverage = epoching.averageOnApply
+        let pausesForDecisionMatrix = epoching.averageOnApply && epoching.usesDecisionMatrix
+        let shouldAverage = epoching.averageOnApply && !pausesForDecisionMatrix
         let badChannels = channels.bad
         let suffix = psaPostProcessingSuffix()
 
@@ -1564,6 +1594,40 @@ extension WaveformView {
             includeSkippedLabeledBadSegments: shouldAverage
         )
         epoching.statusMessage = statusText
+
+        if pausesForDecisionMatrix {
+            epoching.phaseMessage = "Preparing Decision Matrix…"
+            let thresholds = epoching.epochBadChannelThresholds
+            let detectorSegments = built.epochBadChannelSegments
+            let recordingGoodness = channels.healthResults.mapValues(\.goodPercentage)
+            let positions = electrodeGeometry?.positions ?? [:]
+            let globallyBad = channels.bad
+            let preparationWorker = Task.detached(priority: .userInitiated) {
+                PSADecisionMatrixPreparation.make(
+                    signal: built.signal,
+                    segments: built.segments,
+                    thresholds: thresholds,
+                    detectorSegments: detectorSegments,
+                    recordingChannelGoodness: recordingGoodness,
+                    electrodePositions: positions,
+                    globallyBadChannels: globallyBad
+                )
+            }
+            let preparation = await withTaskCancellationHandler(
+                operation: { await preparationWorker.value },
+                onCancel: { preparationWorker.cancel() }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else {
+                epoching.isApplying = false
+                epoching.phaseMessage = nil
+                return
+            }
+            epoching.decisionMatrix = PSADecisionMatrixModel(preparation: preparation)
+            epoching.statusMessage = "Review the matrix before averaging. Overall Channel Health is shown at left; each cell combines local channel and epoch evidence."
+            epoching.isApplying = false
+            epoching.phaseMessage = nil
+            return
+        }
 
         await escalateBadChannelsIfNeeded(
             counts: epochBadChannelCounts,
@@ -1720,6 +1784,7 @@ extension WaveformView {
             epochBadChannelThresholds: epoching.epochBadChannelThresholds,
             electrodePositions: electrodeGeometry?.positions ?? [:],
             globallyBadChannels: channels.bad,
+            defersBadChannelDecisions: epoching.averageOnApply && epoching.usesDecisionMatrix,
             artifactRejectionWindow: epoching.effectiveArtifactRejectionWindow
         )
     }
@@ -1870,62 +1935,109 @@ extension WaveformView {
             epoching.statusMessage = "Create epochs before averaging."
             return
         }
+        psaTask?.cancel()
+        let sessionID = recordingSessionID
+        let thresholds = epoching.epochBadChannelThresholds
+        let recordingGoodness = channels.healthResults.mapValues(\.goodPercentage)
+        let positions = electrodeGeometry?.positions ?? [:]
+        let globallyBad = channels.bad
+        let detectorSegments = epoching.epochBadChannelSegments
+        let sourceSegments = segmentedEpochSegments
+        epoching.isApplying = true
+        epoching.phaseMessage = "Preparing Decision Matrix…"
+        epoching.showsSheet = true
+        psaTask = Task {
+            let worker = Task.detached(priority: .userInitiated) {
+                PSADecisionMatrixPreparation.make(
+                    signal: segmentedEpochSignal,
+                    segments: sourceSegments,
+                    thresholds: thresholds,
+                    detectorSegments: detectorSegments,
+                    recordingChannelGoodness: recordingGoodness,
+                    electrodePositions: positions,
+                    globallyBadChannels: globallyBad
+                )
+            }
+            let preparation = await withTaskCancellationHandler(
+                operation: { await worker.value },
+                onCancel: { worker.cancel() }
+            )
+            guard !Task.isCancelled, sessionID == recordingSessionID else {
+                epoching.isApplying = false
+                epoching.phaseMessage = nil
+                return
+            }
+            let model = PSADecisionMatrixModel(preparation: preparation)
+            for excluded in excludedBadSegmentIndices(sourceSegments, requiresOptIn: false) {
+                model.setEpochDecision(.reject, epoch: excluded)
+            }
+            epoching.decisionMatrix = model
+            epoching.isApplying = false
+            epoching.phaseMessage = nil
+            psaTask = nil
+        }
+    }
+
+    func averageReviewedDecisionMatrix() {
+        guard let matrix = epoching.decisionMatrix else { return }
+        let snapshot = matrix.snapshot()
+        let sourceCount = snapshot.preparation.segments.count
         let shouldAvgRef = epoching.averageReference
         let shouldBaseline = epoching.baselineCorrected
         let badChannels = channels.bad
         let suffix = psaPostProcessingSuffix()
-        let base = PSABuildResult(
-            signal: segmentedEpochSignal,
-            segments: segmentedEpochSegments,
-            message: "\(segmentedEpochSegments.count) epochs"
-        )
-        let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
-        let excludedIndices = excludedBadSegmentIndices(base.segments, requiresOptIn: false)
-        psaTask?.cancel()
         let sessionID = recordingSessionID
+        epoching.isApplying = true
+        epoching.phaseMessage = "Applying decisions…"
+        psaTask?.cancel()
         psaTask = Task {
-            let averageWorker = Task.detached(priority: .userInitiated) {
-                base.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
+            let materializeWorker = Task.detached(priority: .userInitiated) { snapshot.materializedResult() }
+            guard let reviewed = await materializeWorker.value,
+                  !Task.isCancelled, sessionID == recordingSessionID else {
+                epoching.isApplying = false
+                epoching.phaseMessage = nil
+                epoching.statusMessage = "Keep at least one epoch before averaging."
+                return
             }
-            let averagedOpt = await withTaskCancellationHandler(
-                operation: {
-                    await averageWorker.value
-                },
-                onCancel: {
-                    averageWorker.cancel()
-                }
-            )
-            guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt else {
+            epoching.phaseMessage = "Averaging…"
+            let colors = categoryColorIndices(for: reviewed.segments.map(\.category))
+            let averageWorker = Task.detached(priority: .userInitiated) {
+                reviewed.average(colorIndices: colors)
+            }
+            guard let averaged = await averageWorker.value,
+                  !Task.isCancelled, sessionID == recordingSessionID else {
+                epoching.isApplying = false
+                epoching.phaseMessage = nil
                 epoching.statusMessage = "No averages could be computed."
                 return
             }
+            epoching.phaseMessage = "Post-processing…"
             let displayWorker = Task.detached(priority: .userInitiated) {
-                averaged.postProcessed(averageReference: shouldAvgRef, baselineCorrect: shouldBaseline, badChannels: badChannels)
+                averaged.postProcessed(
+                    averageReference: shouldAvgRef,
+                    baselineCorrect: shouldBaseline,
+                    badChannels: badChannels
+                )
             }
-            let display = await withTaskCancellationHandler(
-                operation: {
-                    await displayWorker.value
-                },
-                onCancel: {
-                    displayWorker.cancel()
-                }
-            )
+            let display = await displayWorker.value
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
-            computeAverageSNRInBackground(from: base, excludedIndices: excludedIndices, sessionID: sessionID)
+            segmentedEpochSignal = reviewed.signal
+            segmentedEpochSegments = reviewed.segments
+            computeAverageSNRInBackground(from: reviewed, excludedIndices: [], sessionID: sessionID)
+            let rejected = sourceCount - reviewed.segments.count
             PSAAveraging.commit(
                 averaged: display,
-                sourceSegmentCount: base.segments.count,
-                excludedSegmentCount: excludedIndices.count,
-                statusMessage: appendPSAEpochDiagnostics(
-                    to: averaged.message + suffix,
-                    sourceSegments: base.segments,
-                    skippedIndices: excludedIndices,
-                    includeSkippedLabeledBadSegments: true
-                ),
+                sourceSegmentCount: sourceCount,
+                excludedSegmentCount: rejected,
+                statusMessage: averaged.message + suffix + " · \(rejected) rejected in Decision Matrix",
                 epoching: epoching,
                 segHealth: segHealth,
                 store: recordingStore
             )
+            epoching.decisionMatrix = nil
+            epoching.showsSheet = false
+            epoching.isApplying = false
+            epoching.phaseMessage = nil
             psaTask = nil
         }
     }

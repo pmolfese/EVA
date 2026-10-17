@@ -178,6 +178,14 @@ final class EpochingViewModel {
     var baselineCorrected = true
     var averageReference = true
     var averageOnApply = false
+    /// When averaging, pause after epoch creation so the operator can review
+    /// the channel × epoch evidence and see exactly what enters the average.
+    var usesDecisionMatrix = false
+    var decisionMatrix: PSADecisionMatrixModel?
+    /// Structured detector evidence from the most recent epoch build, retained
+    /// so "Average Current Epochs" can reopen the same matrix without parsing
+    /// a display string.
+    var epochBadChannelSegments: [Int: [Int]] = [:]
 
     // MARK: Category naming / timing markers
     var categoryNames = [String: String]()
@@ -1128,6 +1136,8 @@ final class EpochingViewModel {
 
     func resetForClose() {
         showsSheet = false
+        decisionMatrix = nil
+        epochBadChannelSegments.removeAll()
         eventSearchText = ""
         selectedEventCodes.removeAll()
         categoryNames.removeAll()
