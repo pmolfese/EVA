@@ -79,13 +79,31 @@ private nonisolated final class PSAScanProgressCounter: @unchecked Sendable {
 }
 
 private nonisolated struct PSAFastScanRow: Sendable {
-    var summaries: [PSAFastSegmentSummary?]
+    var rawEvidence: [EpochBadChannelDetector.Evidence?]
+    var reviewEvidence: [EpochBadChannelDetector.Evidence?]
+    var goodnessScores: [Int]
+    var referenceChannels: [Int]
 }
 
 nonisolated struct PSADecisionMatrixPreparation: Sendable {
-    var signal: MFFSignalData
+    /// The only retained sample buffer. Review-domain samples are produced one
+    /// epoch at a time while scanning, then discarded; a selected cell's trace
+    /// is reconstructed on demand from this source.
+    var sourceSignal: MFFSignalData
+    /// Compatibility/readability alias for metadata-only users. This does not
+    /// create or retain a second sample buffer.
+    var signal: MFFSignalData { sourceSignal }
     var segments: [EpochSegment]
+    /// Evidence in the representation the operator reviews (reference and
+    /// baseline settings applied).
     var evidence: [[EpochBadChannelDetector.Evidence?]] // epoch, then channel
+    /// Pre-reference/pre-baseline evidence retained so correction cannot hide a
+    /// DC displacement or allow one bad cell to poison its epoch's reference.
+    var rawEvidence: [[EpochBadChannelDetector.Evidence?]]
+    /// Channels admitted to each epoch's provisional average reference.
+    var referenceChannelsByEpoch: [[Int]]
+    var appliesAverageReference: Bool
+    var appliesBaselineCorrection: Bool
     /// Abbreviated per-channel/per-epoch health. Unlike the absolute extrema
     /// detector, this uses robust within-epoch cross-channel baselines.
     var localFastGoodnessScores: [[Int]]
@@ -110,37 +128,78 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
         baseSettings: ChannelBaseMetricSettings = .defaults,
         electrodePositions: [Int: SIMD3<Double>],
         globallyBadChannels: Set<Int>,
+        averageReference: Bool = false,
+        baselineCorrect: Bool = false,
         suggestedRejectedEpochReasons: [Int: [String]] = [:],
         progress: (@Sendable (_ completed: Int, _ total: Int) -> Void)? = nil
     ) -> Self {
-        var scanRows = [PSAFastScanRow](
-            repeating: PSAFastScanRow(
-                summaries: [PSAFastSegmentSummary?](repeating: nil, count: signal.numberOfChannels)
-            ),
-            count: segments.count
+        let emptyEvidence = [EpochBadChannelDetector.Evidence?](
+            repeating: nil, count: signal.numberOfChannels
         )
+        var scanRows = [PSAFastScanRow](repeating: PSAFastScanRow(
+            rawEvidence: emptyEvidence,
+            reviewEvidence: emptyEvidence,
+            goodnessScores: [Int](repeating: 0, count: signal.numberOfChannels),
+            referenceChannels: []
+        ), count: segments.count)
         let progressCounter = PSAScanProgressCounter()
         scanRows.withUnsafeMutableBufferPointer { buffer in
             nonisolated(unsafe) let output = buffer.baseAddress!
             evaConcurrentPerform(iterations: segments.count) { epochIndex in
                 let segment = segments[epochIndex]
                 let range = segment.startSample..<(segment.endSample + 1)
-                var summaries = [PSAFastSegmentSummary?](repeating: nil, count: signal.numberOfChannels)
+                var rawSummaries = [PSAFastSegmentSummary?](repeating: nil, count: signal.numberOfChannels)
                 for channelIndex in signal.data.indices {
-                    summaries[channelIndex] = fastSummary(in: signal.data[channelIndex], range: range)
+                    rawSummaries[channelIndex] = fastSummary(in: signal.data[channelIndex], range: range)
                 }
-                (output + epochIndex).pointee = PSAFastScanRow(summaries: summaries)
+                let rawScores = fastGoodnessScores(summaries: rawSummaries, settings: baseSettings)
+                // This first pass is deliberately conservative. It protects the
+                // common average from channels already showing absolute-limit,
+                // finite-data, or strongly relative abnormalities.
+                let referenceChannels = signal.data.indices.filter { channel in
+                    guard !globallyBadChannels.contains(channel),
+                          recordingChannelGoodness[channel, default: 100] >= 45,
+                          rawSummaries[channel] != nil,
+                          rawSummaries[channel]?.finiteFraction == 1,
+                          rawSummaries[channel]?.evidence?.exceeds(thresholds) != true else { return false }
+                    return rawScores[channel] >= 45
+                }
+                let mean = averageReference
+                    ? referenceMean(signal: signal, range: range, channels: referenceChannels)
+                    : nil
+                var reviewSummaries = [PSAFastSegmentSummary?](repeating: nil, count: signal.numberOfChannels)
+                for channelIndex in signal.data.indices {
+                    let samples = reviewedSamples(
+                        signal: signal,
+                        segment: segment,
+                        channel: channelIndex,
+                        referenceMean: mean,
+                        baselineCorrect: baselineCorrect
+                    )
+                    reviewSummaries[channelIndex] = fastSummary(
+                        in: samples, range: samples.indices
+                    )
+                }
+                let reviewScores = fastGoodnessScores(summaries: reviewSummaries, settings: baseSettings)
+                let combinedScores = zip(rawScores, reviewScores).map { min($0.0, $0.1) }
+                (output + epochIndex).pointee = PSAFastScanRow(
+                    rawEvidence: rawSummaries.map { $0?.evidence },
+                    reviewEvidence: reviewSummaries.map { $0?.evidence },
+                    goodnessScores: combinedScores,
+                    referenceChannels: referenceChannels
+                )
                 progress?(progressCounter.increment(), segments.count)
             }
         }
-        let rows = scanRows.map { $0.summaries.map { $0?.evidence } }
-        let localScores = scanRows.map { row in
-            fastGoodnessScores(summaries: row.summaries, settings: baseSettings)
-        }
+        let rows = scanRows.map(\.reviewEvidence)
+        let rawRows = scanRows.map(\.rawEvidence)
+        let localScores = scanRows.map(\.goodnessScores)
         var suggestions = Set<PSADecisionCellID>()
         for epochIndex in segments.indices {
             for channelIndex in signal.data.indices {
-                if rows[epochIndex][channelIndex]?.exceeds(thresholds) == true {
+                if globallyBadChannels.contains(channelIndex)
+                    || rows[epochIndex][channelIndex]?.exceeds(thresholds) == true
+                    || rawRows[epochIndex][channelIndex]?.exceeds(thresholds) == true {
                     suggestions.insert(.init(channelIndex: channelIndex, epochIndex: epochIndex))
                 }
             }
@@ -159,9 +218,13 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
             median(localScores.compactMap { $0.indices.contains(channel) ? Double($0[channel]) : nil }, fallback: 100)
         }
         return Self(
-            signal: signal,
+            sourceSignal: signal,
             segments: segments,
             evidence: rows,
+            rawEvidence: rawRows,
+            referenceChannelsByEpoch: scanRows.map(\.referenceChannels),
+            appliesAverageReference: averageReference,
+            appliesBaselineCorrection: baselineCorrect,
             localFastGoodnessScores: localScores,
             epochGoodnessScores: epochGoodnessScores,
             epochSetChannelGoodnessScores: epochSetChannelGoodnessScores,
@@ -172,6 +235,86 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
             globallyBadChannels: globallyBadChannels,
             suggestedRejectedEpochReasons: suggestedRejectedEpochReasons
         )
+    }
+
+    /// Recreates only the selected trace. The matrix therefore retains one raw
+    /// signal plus compact evidence instead of a second full processed signal.
+    func reviewedWaveform(channel: Int, epoch: Int) -> [Float] {
+        guard segments.indices.contains(epoch), sourceSignal.data.indices.contains(channel) else { return [] }
+        let segment = segments[epoch]
+        let range = segment.startSample..<(segment.endSample + 1)
+        let referenceChannels = referenceChannelsByEpoch.indices.contains(epoch)
+            ? referenceChannelsByEpoch[epoch] : []
+        let mean = appliesAverageReference
+            ? Self.referenceMean(signal: sourceSignal, range: range, channels: referenceChannels)
+            : nil
+        return Self.reviewedSamples(
+            signal: sourceSignal,
+            segment: segment,
+            channel: channel,
+            referenceMean: mean,
+            baselineCorrect: appliesBaselineCorrection
+        )
+    }
+
+    func matchesCurrentReviewInputs(
+        signal: MFFSignalData,
+        segments currentSegments: [EpochSegment],
+        averageReference: Bool,
+        baselineCorrect: Bool,
+        globallyBadChannels currentGloballyBad: Set<Int>,
+        thresholds currentThresholds: EpochBadChannelThresholds
+    ) -> Bool {
+        sourceSignal.dataRevision == signal.dataRevision
+            && segments.count == currentSegments.count
+            && appliesAverageReference == averageReference
+            && appliesBaselineCorrection == baselineCorrect
+            && globallyBadChannels == currentGloballyBad
+            && thresholds == currentThresholds
+    }
+
+    private static func referenceMean(
+        signal: MFFSignalData, range: Range<Int>, channels: [Int]
+    ) -> [Float]? {
+        guard !channels.isEmpty, range.count > 0 else { return nil }
+        var mean = [Float](repeating: 0, count: range.count)
+        for channel in channels where signal.data.indices.contains(channel) {
+            let samples = signal.data[channel]
+            guard range.upperBound <= samples.count else { continue }
+            for (offset, sample) in range.enumerated() { mean[offset] += samples[sample] }
+        }
+        let divisor = Float(channels.count)
+        for index in mean.indices { mean[index] /= divisor }
+        return mean
+    }
+
+    private static func reviewedSamples(
+        signal: MFFSignalData,
+        segment: EpochSegment,
+        channel: Int,
+        referenceMean: [Float]?,
+        baselineCorrect: Bool
+    ) -> [Float] {
+        let range = segment.startSample..<(segment.endSample + 1)
+        guard signal.data.indices.contains(channel), range.lowerBound >= 0,
+              range.upperBound <= signal.data[channel].count else { return [] }
+        let source = signal.data[channel]
+        var values = [Float]()
+        values.reserveCapacity(range.count)
+        for (offset, sample) in range.enumerated() {
+            values.append(source[sample] - (referenceMean?[offset] ?? 0))
+        }
+        if baselineCorrect {
+            let count = min(max(segment.stimulusOffsetSamples, 0), values.count)
+            if count > 0 {
+                let baseline = values[..<count].reduce(0) { $0 + Double($1) } / Double(count)
+                if baseline.isFinite {
+                    let correction = Float(baseline)
+                    for index in values.indices { values[index] -= correction }
+                }
+            }
+        }
+        return values
     }
 
     private static func fastSummary(in channel: [Float], range: Range<Int>) -> PSAFastSegmentSummary? {
@@ -321,6 +464,71 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
     }
 }
 
+private nonisolated func psaInterpolationFeasibilityReason(
+    bad: Set<Int>,
+    channelCount: Int,
+    positions: [Int: SIMD3<Double>],
+    globallyBad: Set<Int>,
+    thresholds: EpochBadChannelThresholds
+) -> String? {
+    guard !bad.isEmpty else { return nil }
+    let missingPositions = bad.filter { positions[$0] == nil }
+    if !missingPositions.isEmpty {
+        return "Missing electrode positions for \(missingPositions.count) interpolation target\(missingPositions.count == 1 ? "" : "s")"
+    }
+    let donors = (0..<channelCount).filter {
+        !bad.contains($0) && !globallyBad.contains($0) && positions[$0] != nil
+    }
+    if donors.count < 4 { return "Too few positioned donor channels for interpolation" }
+    let allowed = thresholds.usesAbsoluteBadChannelCount
+        ? thresholds.maxBadChannelCount
+        : Int(floor(thresholds.maxBadChannelFraction * Double(channelCount)))
+    if bad.count > allowed {
+        return "\(bad.count) channels require interpolation; the configured limit is \(allowed)"
+    }
+
+    let positioned = bad.compactMap { channel -> (Int, SIMD3<Double>)? in
+        positions[channel].map { (channel, $0) }
+    }
+    guard positioned.count > 1 else { return nil }
+    let allPositions = Array(positions.values)
+    let nearestDistances = allPositions.compactMap { point -> Double? in
+        allPositions.lazy.map { psaSpatialDistance(point, $0) }
+            .filter { $0 > 1e-9 }.min()
+    }.sorted()
+    let adjacencyRadius = nearestDistances.isEmpty
+        ? 0.25 : nearestDistances[nearestDistances.count / 2] * 1.75
+    var remaining = Set(positioned.map(\.0))
+    var largest = 0
+    while let seed = remaining.first {
+        remaining.remove(seed)
+        var stack = [seed]
+        var size = 0
+        while let current = stack.popLast() {
+            size += 1
+            guard let point = positions[current] else { continue }
+            let neighbors = remaining.filter { neighbor in
+                guard let other = positions[neighbor] else { return false }
+                return psaSpatialDistance(point, other) <= adjacencyRadius
+            }
+            remaining.subtract(neighbors)
+            stack.append(contentsOf: neighbors)
+        }
+        largest = max(largest, size)
+    }
+    let clusterLimit = max(4, Int(ceil(Double(channelCount) * 0.08)))
+    return largest >= clusterLimit
+        ? "A contiguous cluster of \(largest) bad channels is too broad for reliable interpolation"
+        : nil
+}
+
+private nonisolated func psaSpatialDistance(
+    _ lhs: SIMD3<Double>, _ rhs: SIMD3<Double>
+) -> Double {
+    let delta = lhs - rhs
+    return sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z)
+}
+
 @MainActor
 @Observable
 final class PSADecisionMatrixModel {
@@ -339,6 +547,8 @@ final class PSADecisionMatrixModel {
     var selectedChannels = Set<Int>()
     var selectedEpochs = Set<Int>()
     var suggestedRejectedEpochReasons: [Int: [String]]
+    @ObservationIgnored private var cachedWaveformID: PSADecisionCellID?
+    @ObservationIgnored private var cachedWaveformSamples: [Float] = []
 
     init(preparation: PSADecisionMatrixPreparation) {
         self.preparation = preparation
@@ -461,7 +671,34 @@ final class PSADecisionMatrixModel {
     func resolvedEpochDecision(_ epoch: Int) -> PSAEpochDecision {
         if let explicit = epochOverrides[epoch], explicit != .automatic { return explicit }
         if suggestedRejectedEpochReasons[epoch]?.isEmpty == false { return .reject }
+        if interpolationFeasibilityReason(epoch: epoch) != nil { return .reject }
         return Double(epochGoodness(epoch)) < epochRejectionHealthThreshold ? .reject : .keep
+    }
+
+    /// A spatial reconstruction needs positioned donors and becomes unreliable
+    /// when the targets form a broad contiguous hole. Manual epoch decisions
+    /// remain authoritative, but automatic mode rejects rather than silently
+    /// claiming those cells were successfully repaired.
+    func interpolationFeasibilityReason(epoch: Int) -> String? {
+        let bad = Set((0..<preparation.signal.numberOfChannels).filter {
+            resolvedCellDecision(.init(channelIndex: $0, epochIndex: epoch)) == .interpolate
+        })
+        return psaInterpolationFeasibilityReason(
+            bad: bad,
+            channelCount: preparation.signal.numberOfChannels,
+            positions: preparation.electrodePositions,
+            globallyBad: preparation.globallyBadChannels,
+            thresholds: preparation.thresholds
+        )
+    }
+
+    func waveformSamples(for id: PSADecisionCellID) -> [Float] {
+        if cachedWaveformID == id { return cachedWaveformSamples }
+        cachedWaveformSamples = preparation.reviewedWaveform(
+            channel: id.channelIndex, epoch: id.epochIndex
+        )
+        cachedWaveformID = id
+        return cachedWaveformSamples
     }
 
     var keptEpochCount: Int { preparation.segments.indices.filter { resolvedEpochDecision($0) == .keep }.count }
@@ -567,17 +804,28 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
     private func epochDecision(_ epoch: Int) -> PSAEpochDecision {
         if let explicit = epochOverrides[epoch], explicit != .automatic { return explicit }
         if suggestedRejectedEpochs.contains(epoch) { return .reject }
+        let bad = Set((0..<preparation.signal.numberOfChannels).filter {
+            cellDecision(channel: $0, epoch: epoch) == .interpolate
+        })
+        if psaInterpolationFeasibilityReason(
+            bad: bad,
+            channelCount: preparation.signal.numberOfChannels,
+            positions: preparation.electrodePositions,
+            globallyBad: preparation.globallyBadChannels,
+            thresholds: preparation.thresholds
+        ) != nil { return .reject }
         let goodness = preparation.epochGoodnessScores.indices.contains(epoch)
             ? preparation.epochGoodnessScores[epoch] : 100
         return Double(goodness) < epochRejectionHealthThreshold ? .reject : .keep
     }
 
     func materializedResult() -> PSABuildResult? {
-        var data = preparation.signal.data
+        let sourceSignal = preparation.sourceSignal
+        var data = sourceSignal.data
         let cache = SphericalSplineWeightCache()
         for epoch in preparation.segments.indices where epochDecision(epoch) == .keep {
             let segment = preparation.segments[epoch]
-            let bad = Set((0..<preparation.signal.numberOfChannels).filter {
+            let bad = Set((0..<sourceSignal.numberOfChannels).filter {
                 cellDecision(channel: $0, epoch: epoch) == .interpolate
             })
             EpochBadChannelDetector.interpolate(
@@ -590,7 +838,7 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
             )
         }
 
-        var compacted = Array(repeating: [Float](), count: preparation.signal.numberOfChannels)
+        var compacted = Array(repeating: [Float](), count: sourceSignal.numberOfChannels)
         var keptSegments: [EpochSegment] = []
         var outputStart = 0
         for epoch in preparation.segments.indices where epochDecision(epoch) == .keep {
@@ -616,7 +864,7 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
         guard !keptSegments.isEmpty, compacted.first?.isEmpty == false else { return nil }
         let events = keptSegments.enumerated().map { index, segment in
             let stimulusSample = segment.startSample + segment.stimulusOffsetSamples
-            let stimulusTime = Double(stimulusSample) / preparation.signal.samplingRate
+            let stimulusTime = Double(stimulusSample) / sourceSignal.samplingRate
             return MFFEvent(
                 id: "psa-reviewed-\(index)",
                 code: segment.category,
@@ -626,15 +874,15 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
             )
         }
         let signal = MFFSignalData(
-            signalURL: preparation.signal.signalURL,
-            signalType: preparation.signal.signalType,
-            numberOfChannels: preparation.signal.numberOfChannels,
-            samplingRate: preparation.signal.samplingRate,
-            duration: Double(outputStart) / preparation.signal.samplingRate,
-            recordingStartTime: preparation.signal.recordingStartTime,
+            signalURL: sourceSignal.signalURL,
+            signalType: sourceSignal.signalType,
+            numberOfChannels: sourceSignal.numberOfChannels,
+            samplingRate: sourceSignal.samplingRate,
+            duration: Double(outputStart) / sourceSignal.samplingRate,
+            recordingStartTime: sourceSignal.recordingStartTime,
             events: events,
             data: compacted,
-            channelNames: preparation.signal.channelNames
+            channelNames: sourceSignal.channelNames
         )
         return PSABuildResult(
             signal: signal,
@@ -927,6 +1175,10 @@ struct PSADecisionMatrixView: View {
                         Label(reasons.joined(separator: ", "), systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
                     }
+                    if let reason = model.interpolationFeasibilityReason(epoch: id.epochIndex) {
+                        Label(reason, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                     waveform(id)
                         .frame(height: 110)
                         .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
@@ -993,6 +1245,13 @@ struct PSADecisionMatrixView: View {
                 Label(reasons.sorted().joined(separator: ", "), systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
             }
+            let interpolationWarnings = Set(model.selectedEpochs.compactMap {
+                model.interpolationFeasibilityReason(epoch: $0)
+            })
+            if !interpolationWarnings.isEmpty {
+                Label(interpolationWarnings.sorted().joined(separator: ", "), systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
             Button("Reject Selected Epochs") {
                 model.setEpochDecision(.reject, epochs: model.selectedEpochs)
             }
@@ -1014,20 +1273,21 @@ struct PSADecisionMatrixView: View {
     }
 
     private func evidenceText(_ id: PSADecisionCellID) -> some View {
-        let value = model.preparation.evidence[id.epochIndex][id.channelIndex]
+        let reviewed = model.preparation.evidence[id.epochIndex][id.channelIndex]
+        let raw = model.preparation.rawEvidence[id.epochIndex][id.channelIndex]
         return VStack(alignment: .leading, spacing: 3) {
-            Text("Local evidence").font(.caption.weight(.semibold))
-            Text(value.map { String(format: "min %.1f µV · max %.1f µV\nslope %.1f µV/sample · acceleration %.1f", $0.minimumMicrovolts, $0.maximumMicrovolts, $0.maximumSlopeMicrovoltsPerSample, $0.maximumAccelerationMicrovoltsPerSample) } ?? "Unavailable")
+            Text("Review evidence").font(.caption.weight(.semibold))
+            Text(reviewed.map { String(format: "min %.1f µV · max %.1f µV\nslope %.1f µV/sample · acceleration %.1f", $0.minimumMicrovolts, $0.maximumMicrovolts, $0.maximumSlopeMicrovoltsPerSample, $0.maximumAccelerationMicrovoltsPerSample) } ?? "Unavailable")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Text("Before reference/baseline").font(.caption.weight(.semibold))
+            Text(raw.map { String(format: "min %.1f µV · max %.1f µV\nslope %.1f µV/sample · acceleration %.1f", $0.minimumMicrovolts, $0.maximumMicrovolts, $0.maximumSlopeMicrovoltsPerSample, $0.maximumAccelerationMicrovoltsPerSample) } ?? "Unavailable")
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
     }
 
     private func waveform(_ id: PSADecisionCellID) -> some View {
         Canvas { context, size in
-            let segment = model.preparation.segments[id.epochIndex]
-            let samples = model.preparation.signal.data[id.channelIndex]
-            guard samples.indices.contains(segment.startSample), samples.indices.contains(segment.endSample) else { return }
-            let values = Array(samples[segment.startSample...segment.endSample])
+            let values = model.waveformSamples(for: id)
             guard values.count > 1, let low = values.min(), let high = values.max() else { return }
             let span = max(high - low, 1e-6)
             var path = Path()

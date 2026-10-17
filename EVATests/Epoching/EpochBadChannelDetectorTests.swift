@@ -10,6 +10,7 @@
 //  may apply.
 //
 
+import Foundation
 import Testing
 @testable import EVA
 
@@ -410,6 +411,45 @@ struct PSABuildJobEpochRejectionTests {
         #expect(model.channelHealthScopeLabel == "Overall Channel Health")
         #expect(model.integratedGoodness(channel: 0, epoch: 0) == 43)
         #expect(model.resolvedCellDecision(cell) == .keep)
+    }
+
+    @Test @MainActor func matrixStreamsProcessedEvidenceButMaterializesRawEpochs() async throws {
+        var job = makeJob(thresholds: EpochBadChannelThresholds())
+        job.defersBadChannelDecisions = true
+        let result = try #require(await job.buildEpochs())
+        var shiftedData = result.signal.data
+        for channel in 1..<shiftedData.count {
+            for sample in shiftedData[channel].indices {
+                shiftedData[channel][sample] = 10 * sin(Float(sample) * 0.2)
+            }
+        }
+        let sourceSignal = result.signal.replacingSamples(shiftedData)
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: sourceSignal,
+            segments: result.segments,
+            thresholds: job.epochBadChannelThresholds,
+            detectorSegments: [:],
+            recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions,
+            globallyBadChannels: [],
+            averageReference: true,
+            baselineCorrect: false
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        for epoch in result.segments.indices {
+            model.setEpochDecision(.keep, epoch: epoch)
+            for channel in result.signal.data.indices {
+                model.setCellDecision(.keep, for: .init(channelIndex: channel, epochIndex: epoch))
+            }
+        }
+
+        #expect(preparation.sourceSignal.data == sourceSignal.data)
+        let first = result.segments[0]
+        let rawWaveform = Array(sourceSignal.data[0][first.startSample...first.endSample])
+        #expect(preparation.reviewedWaveform(channel: 0, epoch: 0) != rawWaveform)
+        #expect(preparation.rawEvidence.count == result.segments.count)
+        let materialized = try #require(model.snapshot().materializedResult())
+        #expect(materialized.signal.data == sourceSignal.data)
     }
 
     @Test func spikedEpochIsInterpolatedWhenBelowAbsoluteCountThreshold() async {

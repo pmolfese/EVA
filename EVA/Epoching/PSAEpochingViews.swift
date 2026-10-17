@@ -1642,6 +1642,8 @@ extension WaveformView {
             let baseSettings = goodnessSettings.base
             let positions = electrodeGeometry?.positions ?? [:]
             let globallyBad = channels.bad
+            let shouldAverageReference = epoching.averageReference
+            let shouldBaselineCorrect = epoching.baselineCorrected
             let (progressContinuation, progressTask) = ProgressBridge.make { [weak epoching = epoching] (update: EpochBuildProgress) in
                 epoching?.phaseMessage = "Scanning segment channel health… (\(update.completed) of \(update.total))"
                 epoching?.segmentingProgress = update.fraction
@@ -1656,6 +1658,8 @@ extension WaveformView {
                     baseSettings: baseSettings,
                     electrodePositions: positions,
                     globallyBadChannels: globallyBad,
+                    averageReference: shouldAverageReference,
+                    baselineCorrect: shouldBaselineCorrect,
                     suggestedRejectedEpochReasons: built.suggestedRejectedEpochReasons,
                     progress: { completed, total in
                         progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
@@ -2009,8 +2013,10 @@ extension WaveformView {
         let globallyBad = channels.bad
         let detectorSegments = epoching.epochBadChannelSegments
         let sourceSegments = segmentedEpochSegments
+        let shouldAverageReference = epoching.averageReference
+        let shouldBaselineCorrect = epoching.baselineCorrected
         epoching.isApplying = true
-        epoching.phaseMessage = "Scanning segment channel health…"
+        epoching.phaseMessage = "Preparing epochs for review…"
         epoching.segmentingProgress = 0
         epoching.showsSheet = true
         psaTask = Task {
@@ -2019,7 +2025,7 @@ extension WaveformView {
                 epoching?.segmentingProgress = update.fraction
             }
             let worker = Task.detached(priority: .userInitiated) {
-                PSADecisionMatrixPreparation.make(
+                return PSADecisionMatrixPreparation.make(
                     signal: segmentedEpochSignal,
                     segments: sourceSegments,
                     thresholds: thresholds,
@@ -2028,6 +2034,8 @@ extension WaveformView {
                     baseSettings: baseSettings,
                     electrodePositions: positions,
                     globallyBadChannels: globallyBad,
+                    averageReference: shouldAverageReference,
+                    baselineCorrect: shouldBaselineCorrect,
                     progress: { completed, total in
                         progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
                     }
@@ -2170,7 +2178,21 @@ extension WaveformView {
     }
 
     func averageReviewedDecisionMatrix() {
-        guard let matrix = epoching.decisionMatrix else { return }
+        guard let matrix = epoching.decisionMatrix,
+              let currentSource = segmentedEpochSignal else { return }
+        guard matrix.preparation.matchesCurrentReviewInputs(
+            signal: currentSource,
+            segments: segmentedEpochSegments,
+            averageReference: epoching.averageReference,
+            baselineCorrect: epoching.baselineCorrected,
+            globallyBadChannels: channels.bad,
+            thresholds: epoching.epochBadChannelThresholds
+        ) else {
+            epoching.decisionMatrix = nil
+            epoching.statusMessage = "Decision Matrix inputs changed; recalculating the review before averaging."
+            averageCurrentEpochs()
+            return
+        }
         let snapshot = matrix.snapshot()
         let sourceCount = snapshot.preparation.segments.count
         let shouldAvgRef = epoching.averageReference
