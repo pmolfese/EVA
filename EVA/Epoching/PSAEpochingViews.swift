@@ -1610,7 +1610,8 @@ extension WaveformView {
                     detectorSegments: detectorSegments,
                     recordingChannelGoodness: recordingGoodness,
                     electrodePositions: positions,
-                    globallyBadChannels: globallyBad
+                    globallyBadChannels: globallyBad,
+                    suggestedRejectedEpochReasons: built.suggestedRejectedEpochReasons
                 )
             }
             let preparation = await withTaskCancellationHandler(
@@ -1622,7 +1623,14 @@ extension WaveformView {
                 epoching.phaseMessage = nil
                 return
             }
-            epoching.decisionMatrix = PSADecisionMatrixModel(preparation: preparation)
+            let matrix = PSADecisionMatrixModel(preparation: preparation)
+            for excluded in skippedBadIndices {
+                matrix.suggestEpochRejection(excluded, reason: "Labeled Bad")
+            }
+            for excluded in epoching.resolvedTrialExclusion(for: built.segments)?.excludedIndices ?? [] {
+                matrix.suggestEpochRejection(excluded, reason: "Previously excluded")
+            }
+            epoching.decisionMatrix = matrix
             epoching.statusMessage = "Review the matrix before averaging. Overall Channel Health is shown at left; each cell combines local channel and epoch evidence."
             epoching.isApplying = false
             epoching.phaseMessage = nil
@@ -1969,7 +1977,10 @@ extension WaveformView {
             }
             let model = PSADecisionMatrixModel(preparation: preparation)
             for excluded in excludedBadSegmentIndices(sourceSegments, requiresOptIn: false) {
-                model.setEpochDecision(.reject, epoch: excluded)
+                model.suggestEpochRejection(excluded, reason: "Labeled Bad")
+            }
+            for excluded in epoching.resolvedTrialExclusion(for: sourceSegments)?.excludedIndices ?? [] {
+                model.suggestEpochRejection(excluded, reason: "Previously excluded")
             }
             epoching.decisionMatrix = model
             epoching.isApplying = false

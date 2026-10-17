@@ -324,6 +324,7 @@ struct PSABuildJobEpochRejectionTests {
         #expect(result?.rejectedForTooManyBadChannels == 0)
         #expect(result?.interpolatedChannelSegments.isEmpty == true)
         #expect(result?.epochBadChannelSegments[0] == [1])
+        #expect(result?.suggestedRejectedEpochReasons[0]?.contains("Too many bad channels") == true)
         #expect(result?.signal.data[0].contains(500) == true)
     }
 
@@ -349,6 +350,8 @@ struct PSABuildJobEpochRejectionTests {
             globallyBadChannels: []
         )
         let model = PSADecisionMatrixModel(preparation: preparation)
+        #expect(model.hasRecordingWideChannelHealth == false)
+        #expect(model.channelHealthScopeLabel == "Epoch-set Channel Goodness")
         let spiked = PSADecisionCellID(channelIndex: 0, epochIndex: 0)
         #expect(model.resolvedCellDecision(spiked) == .interpolate)
         #expect(model.resolvedEpochDecision(0) == .reject)
@@ -356,6 +359,9 @@ struct PSABuildJobEpochRejectionTests {
         model.setEpochDecision(.keep, epoch: 0)
         #expect(model.resolvedCellDecision(spiked) == .keep)
         #expect(model.resolvedEpochDecision(0) == .keep)
+        model.setChannelDecision(.interpolate, channels: [1, 2])
+        #expect(model.resolvedCellDecision(.init(channelIndex: 1, epochIndex: 1)) == .interpolate)
+        #expect(model.resolvedCellDecision(.init(channelIndex: 2, epochIndex: 0)) == .interpolate)
         model.setEpochDecision(.reject, epoch: 1)
         let materialized = model.snapshot().materializedResult()
         #expect(materialized?.segments.count == 1)
@@ -449,6 +455,15 @@ struct PSABuildJobArtifactWindowTests {
         #expect(result?.segments.count == 1)   // only the clean trial survives
         #expect(result?.exclusionSummary.skippedArtifacts == 1)
         #expect(result?.exclusionSummary.skippedArtifactBreakdown["Eye Blink"] == 1)
+    }
+
+    @Test func decisionMatrixKeepsArtifactEpochVisibleButPremarkedRejected() async {
+        var job = makeJob(window: nil)
+        job.defersBadChannelDecisions = true
+        let result = await job.buildEpochs()
+        #expect(result?.segments.count == 2)
+        #expect(result?.exclusionSummary.skippedArtifacts == 0)
+        #expect(result?.suggestedRejectedEpochReasons[0]?.contains("Eye Blink") == true)
     }
 
     /// Time-boxed to −100…500 ms, the same blink is outside the window and the
