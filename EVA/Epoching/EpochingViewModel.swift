@@ -25,6 +25,20 @@ nonisolated enum PSAArtifactRejectionPolicy: String, CaseIterable, Identifiable,
     var id: String { rawValue }
 }
 
+/// Cheap decision-rule identity, separate from the expensive waveform/health
+/// evidence inputs. Merely opening Configure does not change this value.
+nonisolated struct PSAReviewRejectionSettings: Equatable {
+    var segmentField: String
+    var skipsArtifacts: Bool
+    var policy: PSAArtifactRejectionPolicy
+    var skipsBlinks: Bool
+    var skipsMovements: Bool
+    var skipsUnreliableMRI: Bool
+    var window: ClosedRange<Double>?
+    var definedArtifactIDs: Set<UUID>
+    var skipsLabeledBad: Bool
+}
+
 /// How a joint marker box arranges more than one condition's topomap. See
 /// `EpochingViewModel.jointBoxOrientation`.
 enum JointBoxOrientation: String, CaseIterable, Identifiable, Sendable {
@@ -196,6 +210,13 @@ final class EpochingViewModel {
     /// uses the independent floating panel instead.
     var decisionMatrixIsInSheet = false
     var decisionMatrixNeedsRefresh = false
+    var decisionMatrixRejectionSettings: PSAReviewRejectionSettings {
+        .init(segmentField: segmentField.rawValue, skipsArtifacts: skipIfContainsArtifact,
+              policy: artifactRejectionPolicy, skipsBlinks: skipEyeBlinks,
+              skipsMovements: skipEyeMovements, skipsUnreliableMRI: skipUnreliableMRI,
+              window: effectiveArtifactRejectionWindow, definedArtifactIDs: skippedDefinedArtifactIDs,
+              skipsLabeledBad: skipIfLabeledBad)
+    }
     /// Structured detector evidence from the most recent epoch build, retained
     /// so "Average Current Epochs" can reopen the same matrix without parsing
     /// a display string.

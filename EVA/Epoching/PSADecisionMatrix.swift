@@ -34,6 +34,35 @@ nonisolated struct PSADecisionCellID: Hashable, Sendable {
     var epochIndex: Int
 }
 
+nonisolated enum PSAMatrixHealthHoverTarget: Equatable {
+    case channel(Int)
+    case epoch(Int)
+}
+
+/// Uses the same content coordinates as the canvas, including pinned rails in
+/// Detail. No transparent per-cell views or tracking areas are needed.
+nonisolated struct PSAMatrixHealthHoverLayout: Equatable {
+    var channels: [Int]
+    var epochs: [Int]
+    var gridOrigin: CGPoint
+    var cellSize: CGSize
+    var channelHealthBounds: CGRect
+    var epochHealthBounds: CGRect
+
+    func target(at point: CGPoint) -> PSAMatrixHealthHoverTarget? {
+        guard cellSize.width > 0, cellSize.height > 0 else { return nil }
+        if channelHealthBounds.contains(point) {
+            let row = Int(floor((point.y - gridOrigin.y) / cellSize.height))
+            return channels.indices.contains(row) ? .channel(channels[row]) : nil
+        }
+        if epochHealthBounds.contains(point) {
+            let column = Int(floor((point.x - gridOrigin.x) / cellSize.width))
+            return epochs.indices.contains(column) ? .epoch(epochs[column]) : nil
+        }
+        return nil
+    }
+}
+
 nonisolated struct PSACategoryEpochSummary: Identifiable, Sendable {
     var category: String
     var kept: Int
@@ -483,7 +512,7 @@ private nonisolated func psaInterpolationFeasibilityReason(
     channelCount: Int,
     positions: [Int: SIMD3<Double>],
     globallyBad: Set<Int>,
-    thresholds: EpochBadChannelThresholds,
+    maximumInterpolatedChannels: Int,
     adjacencyRadius: Double
 ) -> String? {
     guard !bad.isEmpty else { return nil }
@@ -495,9 +524,7 @@ private nonisolated func psaInterpolationFeasibilityReason(
         !bad.contains($0) && !globallyBad.contains($0) && positions[$0] != nil
     }
     if donors.count < 4 { return "Too few positioned donor channels for interpolation" }
-    let allowed = thresholds.usesAbsoluteBadChannelCount
-        ? thresholds.maxBadChannelCount
-        : Int(floor(thresholds.maxBadChannelFraction * Double(channelCount)))
+    let allowed = maximumInterpolatedChannels
     if bad.count > allowed {
         return "\(bad.count) channels require interpolation; the configured limit is \(allowed)"
     }
@@ -564,6 +591,9 @@ final class PSADecisionMatrixModel {
     var epochOrder: PSAEpochMatrixOrder = .acquisition
     var interpolationHealthThreshold = 55.0 { didSet { invalidateDecisionCache() } }
     var epochRejectionHealthThreshold: Double { didSet { invalidateDecisionCache() } }
+    /// A review decision, not an evidence-scan parameter. Changing this never
+    /// reruns health calculations or changes either goodness threshold.
+    var interpolationChannelLimit: Int { didSet { invalidateDecisionCache() } }
     var cellOverrides: [PSADecisionCellID: PSACellDecision] = [:] { didSet { invalidateDecisionCache() } }
     var epochOverrides: [Int: PSAEpochDecision] = [:] { didSet { invalidateDecisionCache() } }
     /// An inherited Good label suppresses the automatic health-threshold
@@ -574,24 +604,30 @@ final class PSADecisionMatrixModel {
     var selectedChannels = Set<Int>()
     var selectedEpochs = Set<Int>()
     var suggestedRejectedEpochReasons: [Int: [String]] { didSet { invalidateDecisionCache() } }
+    @ObservationIgnored var psaRejectionSettings: PSAReviewRejectionSettings?
     // Selection and scrolling are frequent. They must not repeat spatial
     // interpolation feasibility checks for every epoch in both windows.
     private var decisionRevision = 0
     @ObservationIgnored private var cachedEpochDecisions: [Int: PSAEpochDecision] = [:]
     @ObservationIgnored private var checkedFeasibility = Set<Int>()
     @ObservationIgnored private var cachedFeasibilityReasons: [Int: String] = [:]
+    @ObservationIgnored private var cachedBadChannelCounts: [Int: Int] = [:]
 
     private func invalidateDecisionCache() {
         decisionRevision &+= 1
         cachedEpochDecisions.removeAll(keepingCapacity: true)
         checkedFeasibility.removeAll(keepingCapacity: true)
         cachedFeasibilityReasons.removeAll(keepingCapacity: true)
+        cachedBadChannelCounts.removeAll(keepingCapacity: true)
     }
 
     init(preparation: PSADecisionMatrixPreparation) {
         self.preparation = preparation
         suggestedRejectedEpochReasons = preparation.suggestedRejectedEpochReasons
         let threshold = preparation.thresholds
+        interpolationChannelLimit = min(preparation.signal.numberOfChannels, max(0,
+            threshold.usesAbsoluteBadChannelCount ? threshold.maxBadChannelCount
+                : Int(floor(threshold.maxBadChannelFraction * Double(preparation.signal.numberOfChannels)))))
         let tolerated: Int
         if threshold.usesAbsoluteBadChannelCount {
             tolerated = threshold.maxBadChannelCount
@@ -675,6 +711,52 @@ final class PSADecisionMatrixModel {
             : 100
     }
 
+    func healthHoverSummary(for target: PSAMatrixHealthHoverTarget?) -> String {
+        switch target {
+        case .epoch(let epoch):
+            guard preparation.segments.indices.contains(epoch) else { return "" }
+            let segment = preparation.segments[epoch]
+            var lines = [
+                "Epoch \(epoch + 1) · \(segment.category)",
+                "Segment Health: \(epochGoodness(epoch))%",
+                resolvedEpochDecision(epoch) == .reject ? "Excluded from average" : "Kept for average"
+            ]
+            let reasons = rejectionReasons(for: epoch)
+            if !reasons.isEmpty { lines.append(reasons.joined(separator: " · ")) }
+            lines.append("Interpolation: \(badChannelCount(epoch: epoch)) channels · limit \(interpolationChannelLimit)")
+            if let reason = interpolationFeasibilityReason(epoch: epoch) { lines.append(reason) }
+            let artifacts = preparation.artifactEventsByEpoch[epoch, default: []]
+            if !artifacts.isEmpty {
+                let corrected = artifacts.filter(\.isCorrected).count
+                lines.append("Artifact events: \(corrected) corrected · \(artifacts.count - corrected) uncorrected/disabled")
+            }
+            if epochOverrides[epoch] == .keep {
+                lines.append("Manual Keep overrides automatic exclusions.")
+            }
+            return lines.joined(separator: "\n")
+        case .channel(let channel):
+            guard (0..<preparation.signal.numberOfChannels).contains(channel) else { return "" }
+            let name = preparation.signal.channelNames?.indices.contains(channel) == true
+                ? preparation.signal.channelNames?[channel] ?? "Ch \(channel + 1)" : "Ch \(channel + 1)"
+            var lines = ["\(name) · \(channelHealthScopeLabel): \(displayedChannelGoodness(channel))%"]
+            if recordingInterpolatedChannels.contains(channel) {
+                lines.append("Already interpolated in the recording")
+            } else {
+                let repairs = preparation.segments.indices.filter {
+                    resolvedCellDecision(.init(channelIndex: channel, epochIndex: $0)) == .interpolate
+                }.count
+                lines.append("Planned interpolation: \(repairs) of \(preparation.segments.count) epochs")
+            }
+            if channelPriorKind == .segmentMedian {
+                lines.append("Median channel-in-epoch evidence, not whole-recording Channel Health.")
+            }
+            lines.append("Blue indicates interpolation; the health score remains the underlying evidence.")
+            return lines.joined(separator: "\n")
+        case nil:
+            return ""
+        }
+    }
+
     func localGoodness(channel: Int, epoch: Int) -> Double {
         guard preparation.localFastGoodnessScores.indices.contains(epoch),
               preparation.localFastGoodnessScores[epoch].indices.contains(channel) else { return 100 }
@@ -708,9 +790,13 @@ final class PSADecisionMatrixModel {
     }
 
     func badChannelCount(epoch: Int) -> Int {
-        (0..<preparation.signal.numberOfChannels).filter {
-            resolvedCellDecision(.init(channelIndex: $0, epochIndex: epoch)) == .interpolate
-        }.count
+        _ = decisionRevision
+        if let count = cachedBadChannelCounts[epoch] { return count }
+        let count = (0..<preparation.signal.numberOfChannels).reduce(0) { count, channel in
+            count + (resolvedCellDecision(.init(channelIndex: channel, epochIndex: epoch)) == .interpolate ? 1 : 0)
+        }
+        cachedBadChannelCounts[epoch] = count
+        return count
     }
 
     func isChannelInterpolatedAcrossAllEpochs(_ channel: Int) -> Bool {
@@ -731,7 +817,7 @@ final class PSADecisionMatrixModel {
 
     private func uncachedEpochDecision(_ epoch: Int) -> PSAEpochDecision {
         if let explicit = epochOverrides[epoch], explicit != .automatic { return explicit }
-        if suggestedRejectedEpochReasons[epoch]?.isEmpty == false { return .reject }
+        if !fixedRejectionReasons(for: epoch).isEmpty { return .reject }
         if interpolationFeasibilityReason(epoch: epoch) != nil { return .reject }
         if trustedEpochHealth.contains(epoch) { return .keep }
         return Double(epochGoodness(epoch)) < epochRejectionHealthThreshold ? .reject : .keep
@@ -744,9 +830,10 @@ final class PSADecisionMatrixModel {
     func rejectionReasons(for epoch: Int) -> [String] {
         if epochOverrides[epoch] == .keep { return [] }
         if epochOverrides[epoch] == .reject { return ["Manual rejection"] }
-        var reasons = suggestedRejectedEpochReasons[epoch, default: []]
-            .flatMap { $0.components(separatedBy: " + ") }
-        if interpolationFeasibilityReason(epoch: epoch) != nil {
+        var reasons = fixedRejectionReasons(for: epoch)
+        if badChannelCount(epoch: epoch) > interpolationChannelLimit {
+            reasons.append("Too many bad channels")
+        } else if interpolationFeasibilityReason(epoch: epoch) != nil {
             reasons.append("Interpolation infeasible")
         }
         if !trustedEpochHealth.contains(epoch),
@@ -756,9 +843,21 @@ final class PSADecisionMatrixModel {
         return Array(Set(reasons)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
+    private func fixedRejectionReasons(for epoch: Int) -> [String] {
+        // The build-time count verdict is provisional: the matrix's current
+        // cell choices and limit are authoritative. Artifact/timing rules stay.
+        suggestedRejectedEpochReasons[epoch, default: []]
+            .flatMap { $0.components(separatedBy: " + ") }
+            .filter { $0 != "Too many bad channels" }
+    }
+
     var rejectionReasonSummaries: [PSARejectionReasonSummary] {
+        rejectionReasonSummaries(for: Set(preparation.segments.indices))
+    }
+
+    func rejectionReasonSummaries(for epochs: Set<Int>) -> [PSARejectionReasonSummary] {
         var counts: [String: Int] = [:]
-        for epoch in preparation.segments.indices where resolvedEpochDecision(epoch) == .reject {
+        for epoch in epochs where resolvedEpochDecision(epoch) == .reject {
             for reason in rejectionReasons(for: epoch) {
                 counts[reason, default: 0] += 1
             }
@@ -781,12 +880,13 @@ final class PSADecisionMatrixModel {
         let bad = Set((0..<preparation.signal.numberOfChannels).filter {
             resolvedCellDecision(.init(channelIndex: $0, epochIndex: epoch)) == .interpolate
         })
+        cachedBadChannelCounts[epoch] = bad.count
         let reason = psaInterpolationFeasibilityReason(
             bad: bad,
             channelCount: preparation.signal.numberOfChannels,
             positions: preparation.electrodePositions,
             globallyBad: preparation.globallyBadChannels,
-            thresholds: preparation.thresholds,
+            maximumInterpolatedChannels: interpolationChannelLimit,
             adjacencyRadius: preparation.spatialAdjacencyRadius
         )
         checkedFeasibility.insert(epoch)
@@ -880,7 +980,8 @@ final class PSADecisionMatrixModel {
             channelPriorGoodnessScores: (0..<preparation.signal.numberOfChannels).map(displayedChannelGoodness),
             interpolationHealthThreshold: interpolationHealthThreshold,
             epochRejectionHealthThreshold: epochRejectionHealthThreshold,
-            suggestedRejectedEpochs: Set(suggestedRejectedEpochReasons.filter { !$0.value.isEmpty }.keys),
+            interpolationChannelLimit: interpolationChannelLimit,
+            suggestedRejectedEpochs: Set(preparation.segments.indices.filter { !fixedRejectionReasons(for: $0).isEmpty }),
             trustedEpochHealth: trustedEpochHealth,
             cellOverrides: cellOverrides,
             epochOverrides: epochOverrides,
@@ -895,6 +996,7 @@ final class PSADecisionMatrixModel {
         epochOrder = previous.epochOrder
         interpolationHealthThreshold = previous.interpolationHealthThreshold
         epochRejectionHealthThreshold = previous.epochRejectionHealthThreshold
+        interpolationChannelLimit = min(preparation.signal.numberOfChannels, previous.interpolationChannelLimit)
         let current = Dictionary(uniqueKeysWithValues: preparation.segments.enumerated().map { ($0.element.id, $0.offset) })
         for (oldEpoch, decision) in previous.epochOverrides {
             guard previous.preparation.segments.indices.contains(oldEpoch),
@@ -915,6 +1017,7 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
     var channelPriorGoodnessScores: [Int]
     var interpolationHealthThreshold: Double
     var epochRejectionHealthThreshold: Double
+    var interpolationChannelLimit: Int
     var suggestedRejectedEpochs: Set<Int>
     var trustedEpochHealth: Set<Int>
     var cellOverrides: [PSADecisionCellID: PSACellDecision]
@@ -952,7 +1055,7 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
             channelCount: preparation.signal.numberOfChannels,
             positions: preparation.electrodePositions,
             globallyBad: preparation.globallyBadChannels,
-            thresholds: preparation.thresholds,
+            maximumInterpolatedChannels: interpolationChannelLimit,
             adjacencyRadius: preparation.spatialAdjacencyRadius
         ) != nil { return .reject }
         if trustedEpochHealth.contains(epoch) { return .keep }
@@ -1040,6 +1143,30 @@ private enum PSAMatrixDragMode {
     case cell
 }
 
+/// Native, noninteractive help keeps these summaries small and out of the
+/// selection workflow. Hover state lives outside the matrix view so moving
+/// between badges does not rebuild the canvas or change selection/decisions.
+@MainActor
+private struct PSAMatrixHealthHover: ViewModifier {
+    var model: PSADecisionMatrixModel
+    var layout: PSAMatrixHealthHoverLayout
+    @State private var target: PSAMatrixHealthHoverTarget?
+
+    func body(content: Content) -> some View {
+        content
+            .help(model.healthHoverSummary(for: target))
+            .onContinuousHover { phase in
+                let next: PSAMatrixHealthHoverTarget?
+                switch phase {
+                case .active(let point): next = layout.target(at: point)
+                case .ended: next = nil
+                }
+                if next != target { target = next }
+            }
+            .onChange(of: layout) { _, _ in target = nil }
+    }
+}
+
 private enum PSAMatrixViewMode: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case detail = "Detail"
@@ -1063,7 +1190,8 @@ private struct PSAOverviewBrush {
 private struct PSAOverviewSelection {
     var channels: [Int]
     var epochs: [Int]
-    var rect: CGRect
+    // Relative to the grid body so opening/resizing the inspector preserves the highlight.
+    var normalizedRect: CGRect
 }
 
 private enum PSAOverviewDragMode {
@@ -1087,15 +1215,15 @@ struct PSADecisionMatrixView: View {
     var onNavigate: (_ channel: Int?, _ epoch: Int?) -> Void = { _, _ in }
     var isFloating = true
     @State private var dragMode: PSAMatrixDragMode?
-    @State private var cellAtDragStart: PSADecisionCellID?
     @State private var showsScoringInfo = false
-    @State private var showsSelectionPopover = false
+    @State private var showsSelectionDetails = false
+    @State private var showsArtifactDetails = false
+    @State private var showsMeasurementDetails = false
     @State private var matrixScrollOffset = CGPoint.zero
     @State private var matrixViewMode: PSAMatrixViewMode = .overview
     @State private var overviewBrush: PSAOverviewBrush?
     @State private var overviewSelection: PSAOverviewSelection?
     @State private var overviewDragMode: PSAOverviewDragMode?
-    @State private var showsOverviewActions = false
     @State private var detailChannels: Set<Int>?
     @State private var detailEpochs: Set<Int>?
 
@@ -1111,14 +1239,15 @@ struct PSADecisionMatrixView: View {
             categorySummary
             rejectionSummary
             matrixLegend
-            matrix
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .popover(isPresented: $showsSelectionPopover, arrowEdge: .trailing) {
-                    inspector
-                        .frame(width: 340)
-                        .padding(12)
+            HSplitView {
+                matrix.frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                if showsSelectionDetails {
+                    selectionDetailsPane
                 }
-            selectionSummary
+            }
+            if !showsSelectionDetails {
+                selectionSummary
+            }
             footer
         }
         .padding(isFloating ? 12 : 20)
@@ -1129,6 +1258,52 @@ struct PSADecisionMatrixView: View {
             idealHeight: isFloating ? 535 : 820
         )
         .disabled(isApplying)
+        .onAppear { showsSelectionDetails = hasInspectionSelection }
+        .onChange(of: model.selectedCell) { _, cell in
+            // Also follow selections made in the epoched waveform, without rescanning evidence.
+            if cell != nil, dragMode == nil, overviewDragMode == nil {
+                clearOverviewSelection()
+                showsSelectionDetails = true
+            }
+        }
+    }
+
+    private var hasInspectionSelection: Bool {
+        overviewSelection != nil || model.selectedCell != nil
+            || !model.selectedChannels.isEmpty || !model.selectedEpochs.isEmpty
+    }
+
+    private var selectionDetailsPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(selectionDetailsTitle).font(.caption.weight(.semibold)).lineLimit(1)
+                Spacer()
+                Button { showsSelectionDetails = false } label: {
+                    Image(systemName: "sidebar.right")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Hide Details")
+                .help("Hide selection details")
+            }
+            Divider()
+            ScrollView {
+                inspector
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.trailing, 4)
+            }
+            // A new cell starts at its exclusion explanation, not at the
+            // previous cell's scrolled-down evidence. The matrix stays put.
+            .id(model.selectedCell)
+        }
+        .padding(.leading, 10)
+        .frame(minWidth: 230, idealWidth: 260, maxWidth: 300, maxHeight: .infinity)
+    }
+
+    private var selectionDetailsTitle: String {
+        if overviewSelection == nil, let cell = model.selectedCell {
+            return "\(channelName(cell.channelIndex)) · Epoch \(cell.epochIndex + 1)"
+        }
+        return "Selection details"
     }
 
     private var cellScoreExplanation: String {
@@ -1220,6 +1395,18 @@ struct PSADecisionMatrixView: View {
                         Text("\(Int(model.epochRejectionHealthThreshold))%").monospacedDigit().frame(width: 36)
                     }
                 }
+                Divider().frame(height: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("Max interpolated / epoch", systemImage: "number")
+                    HStack {
+                        Slider(value: Binding(
+                            get: { Double(model.interpolationChannelLimit) },
+                            set: { model.interpolationChannelLimit = Int($0.rounded()) }
+                        ), in: 0...Double(max(model.preparation.signal.numberOfChannels, 1)), step: 1)
+                        Text("\(model.interpolationChannelLimit)").monospacedDigit().frame(width: 36)
+                    }
+                }
+                .help("Maximum channels to interpolate within each epoch. Raising this does not bypass artifact rules, epoch health, electrode positions, or spatial safety checks.")
             }
         }
         .font(.caption)
@@ -1350,6 +1537,21 @@ struct PSADecisionMatrixView: View {
                         viewportSize: geometry.size
                     )
                 }
+                    .modifier(PSAMatrixHealthHover(model: model, layout: .init(
+                        channels: displayedDetailChannels, epochs: displayedDetailEpochs,
+                        gridOrigin: CGPoint(x: leftWidth, y: headerHeight),
+                        cellSize: CGSize(width: cellWidth, height: rowHeight),
+                        channelHealthBounds: CGRect(
+                            x: max(matrixScrollOffset.x, 0) + 104,
+                            y: max(matrixScrollOffset.y, 0) + headerHeight,
+                            width: 42, height: max(geometry.size.height - headerHeight, 0)
+                        ),
+                        epochHealthBounds: CGRect(
+                            x: max(matrixScrollOffset.x, 0) + leftWidth,
+                            y: max(matrixScrollOffset.y, 0) + 30,
+                            width: max(geometry.size.width - leftWidth, 0), height: 18
+                        )
+                    )))
                     .frame(
                         width: leftWidth + CGFloat(displayedDetailEpochs.count) * cellWidth,
                         height: headerHeight + CGFloat(displayedDetailChannels.count) * rowHeight
@@ -1367,9 +1569,8 @@ struct PSADecisionMatrixView: View {
                                     onNavigate(nil, model.selectedEpochs.first)
                                 }
                                 dragMode = nil
-                                showsSelectionPopover = (model.selectedCell != nil && (!isFloating || model.selectedCell == cellAtDragStart))
-                                    || !model.selectedChannels.isEmpty
-                                    || !model.selectedEpochs.isEmpty
+                                clearOverviewSelection()
+                                showsSelectionDetails = true
                             }
                     )
                     .simultaneousGesture(
@@ -1411,6 +1612,22 @@ struct PSADecisionMatrixView: View {
                 Canvas(opaque: true, rendersAsynchronously: true) { context, _ in
                     drawOverviewMatrix(context: &context, size: size)
                 }
+                .modifier(PSAMatrixHealthHover(model: model, layout: .init(
+                    channels: model.orderedChannels, epochs: model.orderedEpochs,
+                    gridOrigin: CGPoint(x: overviewLeftWidth, y: overviewHeaderHeight),
+                    cellSize: CGSize(
+                        width: max(size.width - overviewLeftWidth, 0) / CGFloat(max(model.orderedEpochs.count, 1)),
+                        height: max(size.height - overviewHeaderHeight, 0) / CGFloat(max(model.orderedChannels.count, 1))
+                    ),
+                    channelHealthBounds: CGRect(
+                        x: overviewLeftWidth - 13, y: overviewHeaderHeight,
+                        width: 11, height: max(size.height - overviewHeaderHeight, 0)
+                    ),
+                    epochHealthBounds: CGRect(
+                        x: overviewLeftWidth, y: overviewHeaderHeight - 13,
+                        width: max(size.width - overviewLeftWidth, 0), height: 11
+                    )
+                )))
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
@@ -1426,19 +1643,18 @@ struct PSADecisionMatrixView: View {
                         .offset(x: brush.rect.minX, y: brush.rect.minY)
                         .allowsHitTesting(false)
                 } else if let selection = overviewSelection {
+                    let rect = overviewSelectionRect(selection, size: size)
                     Rectangle()
                         .fill(Color.accentColor.opacity(0.08))
                         .overlay(Rectangle().stroke(Color.accentColor, lineWidth: 2))
-                        .frame(width: selection.rect.width, height: selection.rect.height)
-                        .offset(x: selection.rect.minX, y: selection.rect.minY)
+                        .frame(width: rect.width, height: rect.height)
+                        .offset(x: rect.minX, y: rect.minY)
                         .allowsHitTesting(false)
                 }
 
                 VStack {
                     Spacer()
-                    Text(isFloating
-                         ? "\(model.orderedChannels.count) channels × \(model.orderedEpochs.count) epochs · click to navigate · drag to select"
-                         : "\(model.orderedChannels.count) channels × \(model.orderedEpochs.count) epochs · drag to select an area")
+                    Text("\(model.orderedChannels.count) channels × \(model.orderedEpochs.count) epochs · click to inspect · drag to select")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 9)
@@ -1451,11 +1667,6 @@ struct PSADecisionMatrixView: View {
             }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             .clipShape(RoundedRectangle(cornerRadius: 8))
-            .popover(isPresented: $showsOverviewActions, arrowEdge: .trailing) {
-                overviewActions
-                    .frame(width: 310)
-                    .padding(12)
-            }
             .onChange(of: model.channelOrder) { _, _ in clearOverviewSelection() }
             .onChange(of: model.epochOrder) { _, _ in clearOverviewSelection() }
         }
@@ -1464,7 +1675,17 @@ struct PSADecisionMatrixView: View {
     private func clearOverviewSelection() {
         overviewBrush = nil
         overviewSelection = nil
-        showsOverviewActions = false
+    }
+
+    private func overviewSelectionRect(_ selection: PSAOverviewSelection, size: CGSize) -> CGRect {
+        let width = max(size.width - overviewLeftWidth, 1)
+        let height = max(size.height - overviewHeaderHeight, 1)
+        return CGRect(
+            x: overviewLeftWidth + selection.normalizedRect.minX * width,
+            y: overviewHeaderHeight + selection.normalizedRect.minY * height,
+            width: selection.normalizedRect.width * width,
+            height: selection.normalizedRect.height * height
+        )
     }
 
     @ViewBuilder
@@ -1475,11 +1696,11 @@ struct PSADecisionMatrixView: View {
                 Text("\(selection.channels.count) channel\(selection.channels.count == 1 ? "" : "s") × \(selection.epochs.count) epoch\(selection.epochs.count == 1 ? "" : "s")")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                selectedEpochRejectionSummary(Set(selection.epochs))
                 Button("Zoom to Selection") {
                     detailChannels = Set(selection.channels)
                     detailEpochs = Set(selection.epochs)
                     matrixViewMode = .detail
-                    showsOverviewActions = false
                 }
                 .buttonStyle(.borderedProminent)
                 Button("Interpolate Selected Cells") {
@@ -1491,15 +1712,38 @@ struct PSADecisionMatrixView: View {
                             )
                         }
                     }
-                    showsOverviewActions = false
                 }
+                Button("Keep Selected Cells") {
+                    for channel in selection.channels {
+                        for epoch in selection.epochs {
+                            model.setCellDecision(.keep, for: .init(channelIndex: channel, epochIndex: epoch))
+                        }
+                    }
+                }
+                Button("Return Selected Cells to Automatic") {
+                    for channel in selection.channels {
+                        for epoch in selection.epochs {
+                            model.setCellDecision(.automatic, for: .init(channelIndex: channel, epochIndex: epoch))
+                        }
+                    }
+                }
+                Text("Cell decisions affect only this rectangle. Keeping cells does not override an epoch exclusion.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Divider()
                 Button("Reject Selected Epochs") {
                     model.setEpochDecision(.reject, epochs: Set(selection.epochs))
-                    showsOverviewActions = false
                 }
+                Button("Keep Selected Epochs") {
+                    model.setEpochDecision(.keep, epochs: Set(selection.epochs))
+                }
+                Button("Return Selected Epochs to Automatic") {
+                    model.setEpochDecision(.automatic, epochs: Set(selection.epochs))
+                }
+                Text("Epoch decisions apply to the whole trial, across all channels.")
+                    .font(.caption2).foregroundStyle(.secondary)
                 Button("Clear Area") {
                     overviewSelection = nil
-                    showsOverviewActions = false
+                    showsSelectionDetails = false
                 }
                 Text("Use the left or top margin to select entire channels or epochs.")
                     .font(.caption2)
@@ -1706,8 +1950,8 @@ struct PSADecisionMatrixView: View {
                 let row = overviewRow(at: value.startLocation.y, rowHeight: rowHeight, count: channels.count)
                 let column = overviewColumn(at: value.startLocation.x, cellWidth: cellWidth, count: epochs.count)
                 let cell = PSADecisionCellID(channelIndex: channels[row], epochIndex: epochs[column])
-                showsSelectionPopover = !isFloating || model.selectedCell == cell
                 model.selectCell(cell)
+                showsSelectionDetails = true
                 onNavigate(cell.channelIndex, cell.epochIndex)
                 overviewBrush = nil
                 return
@@ -1729,14 +1973,21 @@ struct PSADecisionMatrixView: View {
             overviewSelection = .init(
                 channels: Array(channels[min(firstRow, lastRow)...max(firstRow, lastRow)]),
                 epochs: Array(epochs[min(firstColumn, lastColumn)...max(firstColumn, lastColumn)]),
-                rect: rect
+                normalizedRect: CGRect(
+                    x: CGFloat(firstColumn) / CGFloat(epochs.count),
+                    y: CGFloat(firstRow) / CGFloat(channels.count),
+                    width: CGFloat(lastColumn - firstColumn + 1) / CGFloat(epochs.count),
+                    height: CGFloat(lastRow - firstRow + 1) / CGFloat(channels.count)
+                )
             )
+            model.selectChannels([])
             overviewBrush = nil
-            showsOverviewActions = true
+            showsSelectionDetails = true
         case .channels, .epochs:
             if model.selectedChannels.count == 1 { onNavigate(model.selectedChannels.first, nil) }
             if model.selectedEpochs.count == 1 { onNavigate(nil, model.selectedEpochs.first) }
-            showsSelectionPopover = !model.selectedChannels.isEmpty || !model.selectedEpochs.isEmpty
+            clearOverviewSelection()
+            showsSelectionDetails = true
         case nil:
             break
         }
@@ -1940,7 +2191,6 @@ struct PSADecisionMatrixView: View {
         let pinnedX = max(matrixScrollOffset.x, 0)
         let pinnedY = max(matrixScrollOffset.y, 0)
         if dragMode == nil {
-            cellAtDragStart = model.selectedCell
             if value.startLocation.x < pinnedX + leftWidth,
                value.startLocation.y >= pinnedY + headerHeight {
                 let row = Int((value.startLocation.y - headerHeight) / rowHeight)
@@ -1975,52 +2225,181 @@ struct PSADecisionMatrixView: View {
     }
 
     private var inspector: some View {
-        GroupBox("Selection details") {
-            if !model.selectedChannels.isEmpty {
+        Group {
+            if overviewSelection != nil {
+                overviewActions
+            } else if !model.selectedChannels.isEmpty {
                 channelSelectionInspector
             } else if !model.selectedEpochs.isEmpty {
                 epochSelectionInspector
             } else if let id = model.selectedCell {
-                VStack(alignment: .leading, spacing: 12) {
-                    let segment = model.preparation.segments[id.epochIndex]
-                    Text("Channel \(id.channelIndex + 1) · Epoch \(id.epochIndex + 1)").font(.headline)
-                    Text("\(segment.category) · local \(Int(model.localGoodness(channel: id.channelIndex, epoch: id.epochIndex)))% · channel prior \(model.displayedChannelGoodness(id.channelIndex))% · epoch \(model.epochGoodness(id.epochIndex))% · integrated \(model.integratedGoodness(channel: id.channelIndex, epoch: id.epochIndex))%")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if let reasons = model.suggestedRejectedEpochReasons[id.epochIndex], !reasons.isEmpty {
-                        Label(reasons.joined(separator: ", "), systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                    if let reason = model.interpolationFeasibilityReason(epoch: id.epochIndex) {
-                        Label(reason, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                    artifactDetailsView(epoch: id.epochIndex)
-                    evidenceText(id)
+                cellInspector(id)
+            } else {
+                Text("Select a cell, a header, or an area to inspect evidence and make decisions.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func cellInspector(_ id: PSADecisionCellID) -> some View {
+        let epoch = id.epochIndex
+        let category = model.preparation.segments[epoch].category
+        return VStack(alignment: .leading, spacing: 8) {
+            if !category.isEmpty {
+                Text(category).font(.caption).foregroundStyle(.secondary)
+            }
+            cellEpochOutcome(epoch)
+            HStack(spacing: 12) {
+                Text("Cell \(model.integratedGoodness(channel: id.channelIndex, epoch: epoch))%")
+                    .help("Integrated cell score: channel-in-epoch evidence, channel prior, and epoch health.")
+                Text("Epoch \(model.epochGoodness(epoch))%")
+                    .help("Segment Health for the whole epoch.")
+            }
+            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+
+            VStack(spacing: 5) {
+                HStack(spacing: 6) {
+                    Text("Cell").frame(width: 34, alignment: .leading)
                     Picker("Cell decision", selection: Binding(
                         get: { model.cellOverrides[id] ?? .automatic },
                         set: { model.setCellDecision($0, for: id) }
                     )) {
-                        ForEach(PSACellDecision.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }.pickerStyle(.segmented)
-                    Picker("Epoch decision", selection: Binding(
-                        get: { model.epochOverrides[id.epochIndex] ?? .automatic },
-                        set: { model.setEpochDecision($0, epoch: id.epochIndex) }
-                    )) {
-                        ForEach(PSAEpochDecision.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }.pickerStyle(.menu)
-                    HStack {
-                        Button("Keep channel") {
-                            model.setChannelDecision(.keep, channels: [id.channelIndex])
-                        }
-                        Button("Reject channel") {
-                            model.setChannelDecision(.interpolate, channels: [id.channelIndex])
-                        }
+                        Text("Auto").tag(PSACellDecision.automatic)
+                        Text("Keep").tag(PSACellDecision.keep)
+                        Text("Interp.").tag(PSACellDecision.interpolate)
                     }
-                    .controlSize(.small)
-                    Text("Explicit decisions override both sliders.")
-                        .font(.caption2).foregroundStyle(.secondary)
+                    .labelsHidden()
+                    .help("Applies only to this channel in this epoch. Explicit decisions override the channel slider.")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    Text("Epoch").frame(width: 34, alignment: .leading)
+                    Picker("Epoch decision", selection: Binding(
+                        get: { model.epochOverrides[epoch] ?? .automatic },
+                        set: { model.setEpochDecision($0, epoch: epoch) }
+                    )) {
+                        Text("Auto").tag(PSAEpochDecision.automatic)
+                        Text("Keep").tag(PSAEpochDecision.keep)
+                        Text("Reject").tag(PSAEpochDecision.reject)
+                    }
+                    .labelsHidden()
+                    .help("Applies to the whole trial. Explicit Keep or Reject overrides automatic epoch exclusions.")
+                }
+            }
+            .pickerStyle(.segmented).controlSize(.small).font(.caption)
+
+            Menu("Whole channel…") {
+                Button("Keep Across Epochs") {
+                    model.setChannelDecision(.keep, channels: [id.channelIndex])
+                }
+                Button("Interpolate Across Epochs") {
+                    model.setChannelDecision(.interpolate, channels: [id.channelIndex])
+                }
+                Button("Return to Automatic Across Epochs") {
+                    model.setChannelDecision(.automatic, channels: [id.channelIndex])
+                }
+            }
+            .controlSize(.small)
+            .help("Changes this channel in every epoch, not recording-wide Channel Health.")
+
+            Divider()
+            let artifacts = model.preparation.artifactEventsByEpoch[epoch, default: []]
+            if !artifacts.isEmpty {
+                DisclosureGroup(isExpanded: $showsArtifactDetails) {
+                    artifactDetailsView(epoch: epoch).padding(.top, 4)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Artifacts (\(artifacts.count))")
+                        Text(artifactStateSummary(artifacts))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+            }
+            DisclosureGroup("Health & measurements", isExpanded: $showsMeasurementDetails) {
+                VStack(alignment: .leading, spacing: 8) {
+                    LabeledContent("Channel in epoch", value: "\(Int(model.localGoodness(channel: id.channelIndex, epoch: epoch)))%")
+                    LabeledContent(model.channelHealthScopeLabel, value: "\(model.displayedChannelGoodness(id.channelIndex))%")
+                    LabeledContent("Epoch health", value: "\(model.epochGoodness(epoch))%")
+                    LabeledContent("Integrated cell", value: "\(model.integratedGoodness(channel: id.channelIndex, epoch: epoch))%")
+                    evidenceText(id)
+                }
+                .font(.caption.monospacedDigit()).padding(.top, 4)
+            }
+            .font(.caption)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func cellEpochOutcome(_ epoch: Int) -> some View {
+        let rejected = model.resolvedEpochDecision(epoch) == .reject
+        let feasibility = model.interpolationFeasibilityReason(epoch: epoch)
+        let reasons = model.rejectionReasons(for: epoch).filter {
+            $0 != "Interpolation infeasible" && $0 != "Too many bad channels"
+        }
+        return VStack(alignment: .leading, spacing: 4) {
+            Label(rejected ? "Excluded from average" : "Kept for average",
+                  systemImage: rejected ? "xmark.circle.fill" : "checkmark.circle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(rejected ? Color.red : .green)
+            if !reasons.isEmpty {
+                Text(reasons.map {
+                    $0 == "Segment Health"
+                        ? "Epoch health \(model.epochGoodness(epoch))% < \(Int(model.epochRejectionHealthThreshold))%"
+                        : $0
+                }.joined(separator: " · "))
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            if let feasibility {
+                // Show the actionable limit once, rather than a generic reason
+                // followed by the same condition in a second warning.
+                Text(feasibility).font(.caption).foregroundStyle(.orange)
+            }
+            if model.epochOverrides[epoch] == .keep {
+                Text("Manual Keep overrides automatic exclusions.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func artifactStateSummary(_ details: [PSAArtifactEventDetail]) -> String {
+        let applied = details.filter(\.isCorrected).count
+        let disabled = details.filter { $0.hasCorrection && !$0.isCorrected }.count
+        let uncorrected = details.filter { !$0.hasCorrection && !$0.isCorrected }.count
+        return [(applied, "corrected"), (uncorrected, "uncorrected"), (disabled, "disabled")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
+    }
+
+    private func selectedEpochRejectionSummary(_ epochs: Set<Int>) -> some View {
+        let rejected = epochs.filter { model.resolvedEpochDecision($0) == .reject }
+        let reasons = model.rejectionReasonSummaries(for: epochs)
+        return VStack(alignment: .leading, spacing: 5) {
+            Label(
+                epochs.count == 1
+                    ? (rejected.isEmpty ? "Kept for average" : "Excluded from average")
+                    : "\(epochs.count - rejected.count) kept · \(rejected.count) excluded",
+                systemImage: rejected.isEmpty ? "checkmark.circle" : "exclamationmark.triangle.fill"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(rejected.isEmpty ? Color.secondary : .red)
+            ForEach(reasons) { summary in
+                HStack(alignment: .firstTextBaseline) {
+                    Text(summary.reason == "Segment Health"
+                         ? "Segment Health below \(Int(model.epochRejectionHealthThreshold))%"
+                         : summary.reason)
+                    Spacer(minLength: 4)
+                    if epochs.count > 1 {
+                        Text("\(summary.count)").monospacedDigit()
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            if reasons.count > 1 && epochs.count > 1 {
+                Text("Reasons apply to whole epochs and can overlap.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if epochs.contains(where: { model.epochOverrides[$0] == .keep }) {
+                Text("Manual Keep overrides automatic epoch exclusions; interpolation still requires valid neighbors.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
         }
     }
@@ -2053,11 +2432,7 @@ struct PSADecisionMatrixView: View {
                 .font(.headline)
             Text(model.selectedEpochs.sorted().map { "#\($0 + 1) \(model.preparation.segments[$0].category)" }.joined(separator: ", "))
                 .font(.caption).foregroundStyle(.secondary).lineLimit(5)
-            let reasons = Set(model.selectedEpochs.flatMap { model.suggestedRejectedEpochReasons[$0] ?? [] })
-            if !reasons.isEmpty {
-                Label(reasons.sorted().joined(separator: ", "), systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
-            }
+            selectedEpochRejectionSummary(model.selectedEpochs)
             let interpolationWarnings = Set(model.selectedEpochs.compactMap {
                 model.interpolationFeasibilityReason(epoch: $0)
             })
@@ -2103,7 +2478,6 @@ struct PSADecisionMatrixView: View {
         let details = model.preparation.artifactEventsByEpoch[epoch, default: []]
         if !details.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Artifact events").font(.caption.weight(.semibold))
                 ForEach(details) { detail in
                     VStack(alignment: .leading, spacing: 2) {
                         Label {
@@ -2149,14 +2523,17 @@ struct PSADecisionMatrixView: View {
                     .lineLimit(1)
                 Text(model.resolvedEpochDecision(cell.epochIndex) == .reject ? "Excluded from average" : "Kept for average")
                     .foregroundStyle(model.resolvedEpochDecision(cell.epochIndex) == .reject ? Color.red : .secondary)
-                Spacer()
-                Button("Details") { showsSelectionPopover = true }
             } else {
                 Text(isFloating
-                     ? "Click a cell to inspect its waveform. Click it again for decisions."
+                     ? "Click a cell to navigate and inspect its evidence."
                      : "Click a cell to inspect evidence and make decisions.")
                     .foregroundStyle(.secondary)
-                Spacer()
+            }
+            Spacer()
+            if hasInspectionSelection {
+                Button(showsSelectionDetails ? "Hide Details" : "Show Details") {
+                    showsSelectionDetails.toggle()
+                }
             }
         }
         .font(.caption).frame(height: 22)

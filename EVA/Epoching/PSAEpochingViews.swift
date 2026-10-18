@@ -26,7 +26,8 @@ extension WaveformView {
         recordingStore.selection.matrixReviewRequest = nil
         epoching.showsDecisionMatrix = false
         epoching.decisionMatrixIsInSheet = false
-        epoching.decisionMatrixNeedsRefresh = true
+        // Opening configuration is presentation only. Actual evidence inputs
+        // are validated when the existing review is reopened or averaged.
         reconcilePSADefinedArtifactRejectionSelections()
         let events = segmentableEvents(for: signal)
         reconcilePSAEventSelection(for: events)
@@ -1703,6 +1704,38 @@ extension WaveformView {
         }
     }
 
+    /// Artifact/window selections change decisions, not waveform evidence.
+    /// Refresh this inexpensive context on reuse without rerunning either
+    /// Segment Health or the channel-in-epoch scan. Explicit edits stay intact.
+    func refreshDecisionMatrixRejectionContext(
+        _ model: PSADecisionMatrixModel,
+        segments: [EpochSegment], sourceSignal: MFFSignalData
+    ) {
+        let settings = epoching.decisionMatrixRejectionSettings
+        guard model.psaRejectionSettings != settings else { return }
+        var reasons = psaDecisionMatrixRejectionReasons(for: segments, sourceSignal: sourceSignal)
+        for (index, segment) in segments.enumerated() {
+            switch segHealth.qualityLabels[SegmentHealthAnalyzer.segmentID(index: index, segment: segment)] {
+            case .good:
+                if !model.trustedEpochHealth.contains(index) { model.trustEpochHealth(index) }
+            case .bad:
+                reasons[index, default: []].append("Labeled Bad")
+            case nil:
+                break
+            }
+        }
+        for excluded in epoching.resolvedTrialExclusion(for: segments)?.excludedIndices ?? [] {
+            reasons[excluded, default: []].append("Previously excluded")
+        }
+        reasons = reasons.compactMapValues { entries in
+            entries.isEmpty ? nil : Array(Set(entries)).sorted()
+        }
+        if model.suggestedRejectedEpochReasons != reasons {
+            model.suggestedRejectedEpochReasons = reasons
+        }
+        model.psaRejectionSettings = settings
+    }
+
     func appendPSAEpochDiagnostics(
         to baseStatus: String,
         sourceSegments: [EpochSegment],
@@ -1953,6 +1986,7 @@ extension WaveformView {
                 matrix.suggestEpochRejection(excluded, reason: "Previously excluded")
             }
             epoching.decisionMatrix = matrix
+            matrix.psaRejectionSettings = epoching.decisionMatrixRejectionSettings
             epoching.decisionMatrixNeedsRefresh = false
             epoching.showsSheet = reviewInSheet
             epoching.showsDecisionMatrix = !reviewInSheet
@@ -2286,6 +2320,10 @@ extension WaveformView {
                baselineCorrect: epoching.baselineCorrected,
                globallyBadChannels: channels.bad, thresholds: epoching.epochBadChannelThresholds
            ) {
+            refreshDecisionMatrixRejectionContext(
+                matrix, segments: segmentedEpochSegments,
+                sourceSignal: continuousProcessedSignal ?? recording.signal ?? segmentedEpochSignal
+            )
             epoching.showsSheet = reviewInSheet
             epoching.showsDecisionMatrix = !reviewInSheet
             showDecisionMatrixSourceEpochs()
@@ -2413,6 +2451,7 @@ extension WaveformView {
                 model.suggestEpochRejection(excluded, reason: "Previously excluded")
             }
             epoching.decisionMatrix = model
+            model.psaRejectionSettings = epoching.decisionMatrixRejectionSettings
             epoching.decisionMatrixNeedsRefresh = false
             epoching.showsSheet = reviewInSheet
             epoching.showsDecisionMatrix = !reviewInSheet
@@ -2620,6 +2659,10 @@ extension WaveformView {
             averageCurrentEpochs(reviewInSheet: epoching.decisionMatrixIsInSheet)
             return
         }
+        refreshDecisionMatrixRejectionContext(
+            matrix, segments: segmentedEpochSegments,
+            sourceSignal: continuousProcessedSignal ?? recording.signal ?? currentSource
+        )
         let snapshot = matrix.snapshot()
         let sourceCount = snapshot.preparation.segments.count
         let shouldAvgRef = epoching.averageReference

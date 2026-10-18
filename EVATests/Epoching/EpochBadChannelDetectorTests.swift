@@ -10,6 +10,8 @@
 //  may apply.
 //
 
+import CoreGraphics
+import Foundation
 import Foundation
 import Testing
 @testable import EVA
@@ -227,6 +229,210 @@ struct EpochBadChannelDetectorTests {
 }
 
 struct PSABuildJobEpochRejectionTests {
+
+    @MainActor
+    private func makeInterpolationLimitReview() -> PSADecisionMatrixModel {
+        let channelCount = 12
+        let signal = SyntheticSignal.make(Array(repeating: Array(repeating: Float(1), count: 100), count: channelCount),
+                                          samplingRate: 100)
+        let segments = (0..<2).map { epoch in
+            EpochSegment(startSample: epoch * 50, endSample: epoch * 50 + 49,
+                         stimulusOffsetSamples: 10, category: "stim", sourceCode: "stim",
+                         sourceTimeSeconds: Double(epoch), colorIndex: 0, contributingEpochCount: 1)
+        }
+        let positions = Dictionary(uniqueKeysWithValues: (0..<channelCount).map { channel in
+            let angle = Double(channel) * 2 * Double.pi / Double(channelCount)
+            return (channel, SIMD3<Double>(cos(angle), sin(angle), 0))
+        })
+        let thresholds = EpochBadChannelThresholds(maxBadChannelCount: 2, usesAbsoluteBadChannelCount: true)
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: signal, segments: segments, thresholds: thresholds,
+            detectorSegments: [:], recordingChannelGoodness: [:], electrodePositions: positions,
+            globallyBadChannels: [], segmentHealthGoodnessScores: [80, 100],
+            suggestedRejectedEpochReasons: [0: ["Too many bad channels"], 1: ["Eye Blink"]]
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        model.setChannelDecision(.keep, channels: Set(0..<channelCount))
+        for channel in [0, 4, 8] {
+            model.setCellDecision(.interpolate, for: .init(channelIndex: channel, epochIndex: 0))
+        }
+        return model
+    }
+
+    @MainActor
+    private func makeWaveformWithCachedReview() -> (WaveformView, PSADecisionMatrixModel) {
+        let view = WaveformView(recording: MFFRecording(packageURL: URL(fileURLWithPath: "/tmp/psa-reopen-test.mff")),
+                                userMarkers: [])
+        let model = makeInterpolationLimitReview()
+        view.epoching.averageReference = false
+        view.epoching.baselineCorrected = false
+        view.epoching.epochBadChannelThresholds = model.preparation.thresholds
+        view.epoching.segmentedEpochSignal = model.preparation.signal
+        view.epoching.segmentedEpochSegments = model.preparation.segments
+        view.epoching.epochedSignal = model.preparation.signal
+        view.epoching.epochSegments = model.preparation.segments
+        view.epoching.decisionMatrix = model
+        view.epoching.showsDecisionMatrix = true
+        model.psaRejectionSettings = view.epoching.decisionMatrixRejectionSettings
+        return (view, model)
+    }
+
+    @Test @MainActor func configureCancelShowReusesTheSameMatrixWithoutHealthWork() {
+        let (view, model) = makeWaveformWithCachedReview()
+        let cell = PSADecisionCellID(channelIndex: 4, epochIndex: 0)
+        model.selectCell(cell)
+        model.channelOrder = .goodness
+        model.epochOrder = .goodness
+        model.interpolationChannelLimit = 5
+        model.setEpochDecision(.keep, epoch: 1)
+        let reasons = model.suggestedRejectedEpochReasons
+
+        view.openPSASheet(for: model.preparation.signal)
+        #expect(view.epoching.showsSheet)
+        #expect(!view.epoching.showsDecisionMatrix)
+        #expect(!view.epoching.decisionMatrixNeedsRefresh)
+        view.epoching.showsSheet = false // PSA Cancel dismisses configuration.
+        view.averageCurrentEpochs() // Processing → Show Decision Matrix.
+
+        #expect(view.epoching.decisionMatrix === model)
+        #expect(view.epoching.showsDecisionMatrix)
+        #expect(!view.epoching.showsSheet)
+        #expect(!view.epoching.isApplying)
+        #expect(!view.epoching.isAnalyzingDecisionMatrixChannelPrior)
+        #expect(view.epoching.segmentingProgress == nil)
+        #expect(view.epoching.phaseMessage == nil)
+        #expect(model.selectedCell == cell)
+        #expect(model.channelOrder == .goodness && model.epochOrder == .goodness)
+        #expect(model.interpolationChannelLimit == 5)
+        #expect(model.epochOverrides[1] == .keep)
+        #expect(model.suggestedRejectedEpochReasons == reasons)
+    }
+
+    @Test @MainActor func openingConfigureDoesNotClearRealEvidenceInvalidation() {
+        let (view, model) = makeWaveformWithCachedReview()
+        view.epoching.decisionMatrixNeedsRefresh = true
+        view.openPSASheet(for: model.preparation.signal)
+        #expect(view.epoching.decisionMatrixNeedsRefresh)
+        view.epoching.baselineCorrected = true
+        #expect(!model.preparation.matchesCurrentReviewInputs(
+            signal: model.preparation.signal, segments: model.preparation.segments,
+            averageReference: false, baselineCorrect: true,
+            globallyBadChannels: [], thresholds: model.preparation.thresholds
+        ))
+    }
+
+    @Test @MainActor func changingOnlyArtifactWindowRefreshesRulesWithoutRebuildingHealth() {
+        let (view, model) = makeWaveformWithCachedReview()
+        model.setChannelDecision(.keep, channels: Set(0..<12))
+        model.setEpochDecision(.keep, epoch: 1)
+        let event = MFFEvent(id: "late-blink", code: "blink", beginTimeSeconds: 0.3,
+                             rawBeginTime: "0.3", sourceFile: "test")
+        let artifact = DefinedArtifact(type: .ocular, name: "Late blink", eventCode: "blink",
+                                       events: [event], selectedChannelIndices: [0], windowSizeSeconds: 0.1,
+                                       average: nil, topography: nil, cleaningMethod: .doNothing)
+        view.template.definedArtifacts = [artifact]
+        view.epoching.skippedDefinedArtifactIDs = [artifact.id]
+        view.refreshDecisionMatrixRejectionContext(model, segments: model.preparation.segments,
+                                                  sourceSignal: model.preparation.signal)
+        #expect(model.rejectionReasons(for: 0) == ["Late blink"])
+        #expect(model.resolvedEpochDecision(0) == .reject)
+
+        view.epoching.limitsArtifactRejectionWindow = true
+        view.epoching.artifactRejectionWindowStart = -0.1
+        view.epoching.artifactRejectionWindowEnd = 0.1
+        view.averageCurrentEpochs()
+        #expect(view.epoching.decisionMatrix === model)
+        #expect(model.resolvedEpochDecision(0) == .keep)
+        #expect(model.rejectionReasons(for: 0).isEmpty)
+        #expect(model.epochGoodness(0) == 80)
+        #expect(model.epochOverrides[1] == .keep)
+        #expect(!view.epoching.isApplying && view.epoching.phaseMessage == nil)
+    }
+
+    @Test @MainActor func interpolationLimitUpdatesReviewAndMaterializationWithoutRescanning() throws {
+        let model = makeInterpolationLimitReview()
+        #expect(model.interpolationChannelLimit == 2)
+        #expect(model.badChannelCount(epoch: 0) == 3)
+        #expect(model.resolvedEpochDecision(0) == .reject) // Warm caches before moving the slider.
+        #expect(model.interpolationFeasibilityReason(epoch: 0)?.contains("limit is 2") == true)
+        #expect(model.rejectionReasons(for: 0).contains("Too many bad channels"))
+
+        model.interpolationChannelLimit = 3
+        #expect(model.interpolationFeasibilityReason(epoch: 0) == nil)
+        #expect(model.resolvedEpochDecision(0) == .keep)
+        #expect(model.rejectionReasons(for: 0).isEmpty)
+        #expect(model.resolvedEpochDecision(1) == .reject) // Blink rule is independent.
+        let snapshot = model.snapshot()
+        #expect(snapshot.interpolationChannelLimit == 3)
+        let result = try #require(snapshot.materializedResult())
+        #expect(result.segments.count == 1)
+        #expect(result.segments.first?.sourceTimeSeconds == 0)
+        #expect(model.preparation.thresholds.maxBadChannelCount == 2)
+
+        model.epochRejectionHealthThreshold = 90
+        #expect(model.resolvedEpochDecision(0) == .reject) // Health rule is independent too.
+        #expect(model.rejectionReasons(for: 0) == ["Segment Health"])
+        #expect(model.snapshot().materializedResult() == nil)
+        model.epochRejectionHealthThreshold = 0
+        model.interpolationChannelLimit = 2
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        #expect(model.snapshot().materializedResult() == nil)
+
+        let restored = PSADecisionMatrixModel(preparation: model.preparation)
+        restored.restoreManualDecisions(from: model)
+        #expect(restored.interpolationChannelLimit == 2)
+        model.interpolationChannelLimit = 5
+        restored.restoreManualDecisions(from: model)
+        #expect(restored.interpolationChannelLimit == 5)
+    }
+
+    @Test @MainActor func countLimitDoesNotBypassGeometrySafety() {
+        let model = makeInterpolationLimitReview()
+        model.setChannelDecision(.interpolate, channels: [0, 1, 2, 3])
+        model.interpolationChannelLimit = 12
+        #expect(model.interpolationFeasibilityReason(epoch: 0)?.contains("contiguous cluster") == true)
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        model.setChannelDecision(.interpolate, channels: Set(0..<12))
+        #expect(model.interpolationFeasibilityReason(epoch: 0)?.contains("Too few positioned donor") == true)
+        #expect(model.resolvedEpochDecision(0) == .reject)
+    }
+
+    @Test @MainActor func healthHoversExplainScoresDecisionsAndScopeWithoutSelecting() {
+        let model = makeInterpolationLimitReview()
+        let epoch = model.healthHoverSummary(for: .epoch(0))
+        #expect(epoch.contains("Segment Health: 80%"))
+        #expect(epoch.contains("Excluded from average"))
+        #expect(epoch.contains("limit 2"))
+        #expect(model.healthHoverSummary(for: .channel(0)).contains("not whole-recording Channel Health"))
+        model.adoptRecordingChannelGoodness(Dictionary(uniqueKeysWithValues: (0..<12).map { ($0, 95) }))
+        #expect(model.healthHoverSummary(for: .channel(0)).contains("Overall Channel Health: 95%"))
+        model.interpolationChannelLimit = 3
+        #expect(model.healthHoverSummary(for: .epoch(0)).contains("Kept for average"))
+        #expect(model.healthHoverSummary(for: nil).isEmpty)
+        #expect(model.selectedCell == nil)
+        #expect(model.selectedEpochs.isEmpty && model.selectedChannels.isEmpty)
+    }
+
+    @Test func healthHoverHitTestingFollowsSortingAndPinnedScrollOffsets() {
+        let overview = PSAMatrixHealthHoverLayout(
+            channels: [5, 2], epochs: [8, 3], gridOrigin: CGPoint(x: 74, y: 42),
+            cellSize: CGSize(width: 50, height: 20),
+            channelHealthBounds: CGRect(x: 61, y: 42, width: 11, height: 40),
+            epochHealthBounds: CGRect(x: 74, y: 29, width: 100, height: 11)
+        )
+        #expect(overview.target(at: CGPoint(x: 64, y: 65)) == .channel(2))
+        #expect(overview.target(at: CGPoint(x: 140, y: 32)) == .epoch(3))
+        #expect(overview.target(at: CGPoint(x: 140, y: 65)) == nil) // Body is click-only.
+        let detail = PSAMatrixHealthHoverLayout(
+            channels: [5, 2, 7, 1], epochs: [8, 3, 9, 6], gridOrigin: CGPoint(x: 164, y: 76),
+            cellSize: CGSize(width: 28, height: 24),
+            channelHealthBounds: CGRect(x: 160, y: 124, width: 42, height: 200),
+            epochHealthBounds: CGRect(x: 220, y: 78, width: 200, height: 18)
+        )
+        #expect(detail.target(at: CGPoint(x: 175, y: 130)) == .channel(7))
+        #expect(detail.target(at: CGPoint(x: 230, y: 85)) == .epoch(9))
+        #expect(detail.target(at: CGPoint(x: 175, y: 85)) == nil) // Pinned corner.
+    }
 
     /// 4 channels x 1000 samples @ 100 Hz; channel 0 has a huge spike near
     /// t=2s (inside the first epoch), channels 1-3 are flat/clean. Two
@@ -613,6 +819,33 @@ struct PSABuildJobEpochRejectionTests {
         #expect(counts["Eye Movement"] == 1)
         #expect(counts["Segment Health"] == 1)
         #expect(model.rejectedEpochCount == 2)
+
+        // The area inspector must describe only its selected trials, with the
+        // same overlapping reasons used by the whole-matrix summary.
+        let selected = Dictionary(uniqueKeysWithValues: model.rejectionReasonSummaries(for: [1]).map {
+            ($0.reason, $0.count)
+        })
+        #expect(selected["Eye Blink"] == 1)
+        #expect(selected["Eye Movement"] == 1)
+        #expect(selected["Segment Health"] == nil)
+        #expect(model.rejectionReasonSummaries(for: []).isEmpty)
+
+        // Cell Keep is not epoch Keep: artifact and health exclusions remain.
+        for epoch in 0..<2 {
+            for channel in 0..<result.signal.numberOfChannels {
+                model.setCellDecision(.keep, for: .init(channelIndex: channel, epochIndex: epoch))
+            }
+        }
+        #expect(model.rejectedEpochCount == 2)
+        model.setEpochDecision(.keep, epochs: [1])
+        #expect(model.resolvedEpochDecision(1) == .keep)
+        #expect(model.rejectionReasonSummaries(for: [1]).isEmpty)
+        #expect(model.rejectedEpochCount == 1)
+
+        model.setEpochDecision(.reject, epochs: [1])
+        #expect(model.rejectionReasonSummaries(for: [1]).map(\.reason) == ["Manual rejection"])
+        model.setEpochDecision(.automatic, epochs: [1])
+        #expect(Set(model.rejectionReasonSummaries(for: [1]).map(\.reason)) == ["Eye Blink", "Eye Movement"])
     }
 
     @Test @MainActor func matrixStreamsProcessedEvidenceButMaterializesRawEpochs() async throws {
