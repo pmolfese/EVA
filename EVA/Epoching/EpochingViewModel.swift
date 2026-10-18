@@ -186,6 +186,11 @@ final class EpochingViewModel {
     /// so "Average Current Epochs" can reopen the same matrix without parsing
     /// a display string.
     var epochBadChannelSegments: [Int: [Int]] = [:]
+    /// Non-artifact automatic rejection reasons from the epoch build (for
+    /// example a missing timing marker). Artifact reasons are deliberately
+    /// recomputed from the current PSA selections and rejection window whenever
+    /// the matrix opens, so immediate and deferred averaging cannot drift.
+    var epochNonArtifactRejectionReasons: [Int: [String]] = [:]
 
     // MARK: Category naming / timing markers
     var categoryNames = [String: String]()
@@ -279,8 +284,9 @@ final class EpochingViewModel {
     var statusMessage: String?
     var isApplying = false
     var phaseMessage: String?
-    /// Fraction complete (0...1) while segmenting; nil for indeterminate
-    /// phases (e.g. averaging), which fall back to a spinner.
+    /// Fraction complete (0...1) for the entire current PSA operation. Keeping
+    /// one monotonic value here avoids replacing the progress bar for every
+    /// internal phase.
     var segmentingProgress: Double?
     /// A whole-recording prior requested specifically by the Decision Matrix.
     /// Kept separate from ordinary Channel Health so the fast-suite option
@@ -288,6 +294,11 @@ final class EpochingViewModel {
     var isAnalyzingDecisionMatrixChannelPrior = false
     var decisionMatrixChannelPriorProgress: Double?
     var decisionMatrixChannelPriorMessage: String?
+    /// Session cache for the optional core-only whole-recording prior. Unlike
+    /// full Channel Health this must not populate the Channels health UI, but
+    /// it also should not be recomputed every time the matrix is reopened.
+    var decisionMatrixFastChannelPriorSignature: String?
+    var decisionMatrixFastChannelGoodness: [Int: Int] = [:]
 
     // MARK: Results
     /// Pre-average raw epochs, cached so PSA options can be re-toggled without
@@ -909,15 +920,23 @@ final class EpochingViewModel {
         baselineCorrect: Bool,
         badChannels: Set<Int>,
         excludedSegmentIndices: ([EpochSegment]) -> Set<Int> = { _ in [] },
-        isCurrent: () -> Bool = { true }
+        isCurrent: () -> Bool = { true },
+        progressRange: ClosedRange<Double> = 0...1
     ) async -> PSAApplyOutcome? {
+        let progressLower = min(max(progressRange.lowerBound, 0), 1)
+        let progressUpper = min(max(progressRange.upperBound, progressLower), 1)
+        let progressSpan = progressUpper - progressLower
+        func setProgress(_ fraction: Double) {
+            segmentingProgress = progressLower + progressSpan * min(max(fraction, 0), 1)
+        }
         isApplying = true
         phaseMessage = "Segmenting…"
-        segmentingProgress = nil
+        setProgress(0)
 
         let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] (update: EpochBuildProgress) in
             self?.phaseMessage = "Segmenting… (\(update.completed) of \(update.total))"
-            self?.segmentingProgress = update.fraction
+            let buildShare = shouldAverage ? 0.70 : 0.75
+            self?.segmentingProgress = progressLower + progressSpan * buildShare * update.fraction
         }
         let buildWorker = Task.detached(priority: .userInitiated) {
             await job.buildEpochs { completed, total in
@@ -930,7 +949,7 @@ final class EpochingViewModel {
         )
         progressContinuation.finish()
         progressTask.cancel()
-        segmentingProgress = nil
+        setProgress(shouldAverage ? 0.70 : 0.75)
 
         guard !Task.isCancelled, isCurrent() else {
             finishApplying()
@@ -971,6 +990,7 @@ final class EpochingViewModel {
                 statusMessage = "No averages could be computed."
                 return nil
             }
+            setProgress(0.85)
             phaseMessage = "Post-processing…"
             let postWorker = Task.detached(priority: .userInitiated) {
                 averaged.postProcessed(
@@ -1007,6 +1027,7 @@ final class EpochingViewModel {
         // Only meaningful when averaging: an exclusion removes a trial from an
         // average, and there is no average to remove it from otherwise.
         trialExclusionResolution = wasAveraged ? resolution : nil
+        setProgress(1)
         return PSAApplyOutcome(
             built: built,
             finalResult: finalResult,
@@ -1021,6 +1042,7 @@ final class EpochingViewModel {
     private func finishApplying() {
         isApplying = false
         phaseMessage = nil
+        segmentingProgress = nil
     }
 
     func applyBuildJob(
@@ -1137,6 +1159,7 @@ final class EpochingViewModel {
         statusMessage = statusText
         isApplying = false
         phaseMessage = nil
+        segmentingProgress = nil
         return resultSignal
     }
 
@@ -1144,6 +1167,7 @@ final class EpochingViewModel {
         showsSheet = false
         decisionMatrix = nil
         epochBadChannelSegments.removeAll()
+        epochNonArtifactRejectionReasons.removeAll()
         eventSearchText = ""
         selectedEventCodes.removeAll()
         categoryNames.removeAll()
@@ -1167,6 +1191,8 @@ final class EpochingViewModel {
         isAnalyzingDecisionMatrixChannelPrior = false
         decisionMatrixChannelPriorProgress = nil
         decisionMatrixChannelPriorMessage = nil
+        decisionMatrixFastChannelPriorSignature = nil
+        decisionMatrixFastChannelGoodness.removeAll()
         epochedSignal = nil
         epochSegments = []
         isAveraged = false

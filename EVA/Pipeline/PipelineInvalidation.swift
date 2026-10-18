@@ -75,6 +75,10 @@ enum PipelineInvalidation {
         epoching.epochSegments = []
         epoching.segmentedEpochSignal = nil
         epoching.segmentedEpochSegments = []
+        epoching.epochBadChannelSegments.removeAll()
+        epoching.epochNonArtifactRejectionReasons.removeAll()
+        epoching.decisionMatrixFastChannelPriorSignature = nil
+        epoching.decisionMatrixFastChannelGoodness.removeAll()
         epoching.isAveraged = false
         epoching.butterflyTopomapRelativeSample = nil
         epoching.psaExclusionSummary = PSAExclusionSummary()

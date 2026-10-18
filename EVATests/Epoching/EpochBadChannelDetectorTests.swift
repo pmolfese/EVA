@@ -348,7 +348,8 @@ struct PSABuildJobEpochRejectionTests {
             detectorSegments: result.epochBadChannelSegments,
             recordingChannelGoodness: [:],
             electrodePositions: job.electrodePositions,
-            globallyBadChannels: []
+            globallyBadChannels: [],
+            segmentHealthGoodnessScores: [100, 100]
         )
         let model = PSADecisionMatrixModel(preparation: preparation)
         #expect(model.hasRecordingWideChannelHealth == false)
@@ -364,6 +365,9 @@ struct PSABuildJobEpochRejectionTests {
         model.setChannelDecision(.interpolate, channels: [1, 2])
         #expect(model.resolvedCellDecision(.init(channelIndex: 1, epochIndex: 1)) == .interpolate)
         #expect(model.resolvedCellDecision(.init(channelIndex: 2, epochIndex: 0)) == .interpolate)
+        #expect(model.isChannelInterpolatedAcrossAllEpochs(1))
+        #expect(model.isChannelInterpolatedAcrossAllEpochs(2))
+        #expect(!model.isChannelInterpolatedAcrossAllEpochs(3))
         model.setEpochDecision(.reject, epoch: 1)
         #expect(model.categorySummaries.reduce(0) { $0 + $1.total } == result.segments.count)
         #expect(model.categorySummaries.reduce(0) { $0 + $1.kept } == model.keptEpochCount)
@@ -392,7 +396,8 @@ struct PSABuildJobEpochRejectionTests {
             detectorSegments: [:],
             recordingChannelGoodness: [:],
             electrodePositions: job.electrodePositions,
-            globallyBadChannels: []
+            globallyBadChannels: [],
+            segmentHealthGoodnessScores: [100, 100]
         )
         preparation.localFastGoodnessScores[0][0] = 20
         preparation.epochGoodnessScores[0] = 40
@@ -411,6 +416,91 @@ struct PSABuildJobEpochRejectionTests {
         #expect(model.channelHealthScopeLabel == "Overall Channel Health")
         #expect(model.integratedGoodness(channel: 0, epoch: 0) == 43)
         #expect(model.resolvedCellDecision(cell) == .keep)
+    }
+
+    @Test @MainActor func matrixCanOrderBothAxesByGoodness() async throws {
+        var job = makeJob(thresholds: EpochBadChannelThresholds())
+        job.defersBadChannelDecisions = true
+        let result = try #require(await job.buildEpochs())
+        var preparation = PSADecisionMatrixPreparation.make(
+            signal: result.signal,
+            segments: result.segments,
+            thresholds: job.epochBadChannelThresholds,
+            detectorSegments: [:],
+            recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions,
+            globallyBadChannels: [],
+            segmentHealthGoodnessScores: [92, 38]
+        )
+        preparation.epochSetChannelGoodnessScores = [80, 25, 70, 95]
+        let model = PSADecisionMatrixModel(preparation: preparation)
+
+        model.channelOrder = .goodness
+        model.epochOrder = .goodness
+
+        #expect(model.orderedChannels == [1, 2, 0, 3])
+        #expect(model.orderedEpochs == [1, 0])
+    }
+
+    @Test @MainActor func manualGoodTrustsSegmentHealthButNotArtifactRules() async throws {
+        var job = makeJob(thresholds: EpochBadChannelThresholds())
+        job.defersBadChannelDecisions = true
+        let result = try #require(await job.buildEpochs())
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: result.signal,
+            segments: result.segments,
+            thresholds: job.epochBadChannelThresholds,
+            detectorSegments: [:],
+            recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions,
+            globallyBadChannels: [],
+            segmentHealthGoodnessScores: [20, 100]
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        model.epochRejectionHealthThreshold = 55
+        for channel in 0..<result.signal.numberOfChannels {
+            model.setCellDecision(.keep, for: .init(channelIndex: channel, epochIndex: 0))
+        }
+
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        #expect(model.rejectionReasons(for: 0) == ["Segment Health"])
+
+        model.trustEpochHealth(0)
+        #expect(model.resolvedEpochDecision(0) == .keep)
+
+        model.suggestEpochRejection(0, reason: "Eye Blink")
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        #expect(model.rejectionReasons(for: 0) == ["Eye Blink"])
+    }
+
+    @Test @MainActor func rejectionSummaryCountsOverlappingReasons() async throws {
+        var job = makeJob(thresholds: EpochBadChannelThresholds())
+        job.defersBadChannelDecisions = true
+        let result = try #require(await job.buildEpochs())
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: result.signal,
+            segments: result.segments,
+            thresholds: job.epochBadChannelThresholds,
+            detectorSegments: [:],
+            recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions,
+            globallyBadChannels: [],
+            segmentHealthGoodnessScores: [20, 100],
+            suggestedRejectedEpochReasons: [
+                0: ["Eye Blink"],
+                1: ["Eye Blink", "Eye Movement"]
+            ]
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        model.epochRejectionHealthThreshold = 55
+
+        let counts = Dictionary(uniqueKeysWithValues: model.rejectionReasonSummaries.map {
+            ($0.reason, $0.count)
+        })
+        #expect(counts["Eye Blink"] == 2)
+        #expect(counts["Eye Movement"] == 1)
+        #expect(counts["Segment Health"] == 1)
+        #expect(model.rejectedEpochCount == 2)
     }
 
     @Test @MainActor func matrixStreamsProcessedEvidenceButMaterializesRawEpochs() async throws {
@@ -433,7 +523,8 @@ struct PSABuildJobEpochRejectionTests {
             electrodePositions: job.electrodePositions,
             globallyBadChannels: [],
             averageReference: true,
-            baselineCorrect: false
+            baselineCorrect: false,
+            segmentHealthGoodnessScores: [100, 100]
         )
         let model = PSADecisionMatrixModel(preparation: preparation)
         for epoch in result.segments.indices {
