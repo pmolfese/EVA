@@ -70,11 +70,19 @@ correlations show **Unavailable**. Scores update with the class analysis and do
 not apply decisions or cleaning.
 
 Select an artifact class on the left. **Spatial groups** previews families of
-similar signed peak-field topographies. Move **Broader / Finer** to combine or
+similar peak-field topographies. **Polarity** chooses whether globally inverted
+fields remain separate (**Signed**) or share one spatial-axis family (**Ignore
+global polarity**). Ocular, saccadic-spike, and corneo-retinal classes default to
+ignoring global polarity; other classes default to signed grouping. Every
+polarity-invariant comparison uses global Pearson correlation to sign-align
+members before forming a centroid, so inverse maps do not cancel. It never takes
+the absolute value of individual sensors. Cards retain and report the number of
+events in each +/− orientation relative to the family's canonical centroid; raw
+maps are unchanged. Move **Broader / Finer** to combine or
 separate families, then click a card to browse its examples. Each card shows a
-representative real event, its count, and the minimum spatial correlation to the
-group center. Amplitude is normalized away; opposite polarities stay separate.
-The displayed r setting is spatial cohesion, not artifact confidence. Fine
+representative real event, its count, and the minimum spatial comparison score to
+the group center (`|r|` for Global Pearson). Amplitude is normalized away. The
+displayed setting is spatial cohesion, not artifact confidence. Fine
 settings can produce single examples, which do not establish a new artifact type.
 Missing layouts, flat maps, incomplete windows, and insufficient shared sensor
 coverage leave events **Unassigned**. Click **All** to clear the preview filter.
@@ -83,6 +91,27 @@ create classes. Building runs in the background; Broader/Finer reuses the cached
 tree without rescanning the recording. The session cache is refreshed when the
 signal, definition, or eligible sensor mask changes.
 
+When global polarity is ignored, **Comparison** offers five preview costs:
+
+- **Global Pearson** is the default whole-map `|r|` comparison.
+- **Local Pearson** averages signed correlations over overlapping physical
+  electrode neighborhoods after resolving one whole-map orientation. A region
+  cannot reverse independently to improve its score.
+- **Spearman** compares electrode ranks, reducing the influence of isolated
+  extreme amplitudes while giving up some relative-magnitude information.
+- **Robust composite** blends global Pearson, local Pearson, Spearman, and a
+  correlation trimmed by the largest sensor residuals.
+- **Information composite** blends electrode-wise Pearson with normalized mutual
+  information, Hellinger histogram affinity, and symmetric correlation ratio.
+  It is experimental because histogram estimates can be unstable for small
+  montages; the Pearson component prevents a matching value distribution at the
+  wrong scalp locations from receiving a perfect score.
+
+These scores share the same 0.65–0.98 **Broader / Finer** control, but their
+numeric values are not interchangeable. Compare the resulting maps visually
+rather than treating one threshold as equivalent across costs. Signed polarity
+always uses ordinary Pearson correlation.
+
 Select a spatial group to reveal **Waveform subgroups** beneath it. These compare
 aligned temporal shapes only inside that spatial family. Use the second
 **Broader / Finer** slider, then click a **Shape** card to filter the examples
@@ -90,6 +119,15 @@ further. **Whole spatial family** clears just the waveform filter; **All** clear
 both filters. Blue shows the normalized aligned subgroup mean and gray shows a
 representative event on the labeled preview channel. The channel list and maximum
 alignment shift are shown below the cards.
+
+**Waveform polarity** controls what happens to the retained spatial orientation.
+**Preserve polarity** clusters the recorded waveform signs as-is. **Orient to
+spatial family** multiplies an event's complete multichannel profile by its one
+global +/− orientation before temporal clustering. This lets globally inverted
+events share a shape subgroup without changing internal waveform lobes, relative
+channel polarity, raw data, decisions, or cleaning. Polarity-invariant spatial
+families default to this orientation step; signed spatial families preserve
+waveform polarity.
 
 The analysis uses up to five consistently selected definition channels with the
 strongest typical energy in that family. Amplitude is normalized, relative

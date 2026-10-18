@@ -890,6 +890,7 @@ struct WaveformView: View {
             }
         }
         .navigationTitle(recording.packageName)
+        .background { decisionMatrixPanelHost }
         .focusedSceneValue(\.channelModel, channels)
         .focusedSceneValue(\.displayChannelsControls, displayChannelsControls)
         .focusedSceneValue(\.channelLabelMetricsExportRequest, $channelLabelMetricsExportRequest)
@@ -1982,6 +1983,17 @@ struct WaveformView: View {
                 }
                 .disabled(segmentedEpochSignal == nil || segmentedEpochSegments.isEmpty)
 
+                if segmentedEpochSignal != nil, !segmentedEpochSegments.isEmpty {
+                    Button(epoching.showsDecisionMatrix ? "Hide Decision Matrix" : "Show Decision Matrix") {
+                        if epoching.showsDecisionMatrix {
+                            epoching.showsDecisionMatrix = false
+                        } else {
+                            averageCurrentEpochs()
+                        }
+                    }
+                    .disabled(epoching.isApplying)
+                }
+
                 Toggle("Average Reference", isOn: $epoching.averageReference)
                     .disabled(epoching.epochedSignal == nil)
                     .help("Re-reference the epochs to the common average of the good channels (excludes bad channels, uses interpolated values).")
@@ -2860,6 +2872,7 @@ struct WaveformView: View {
                         .overlay(alignment: .topLeading) { segmentHealthOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { epochBoundaryOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { selectionOverlay(for: signal) }
+                        .overlay(alignment: .topLeading) { decisionMatrixFocusOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { artifactHighlightOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { cursorOverlay(for: signal) }
                         .overlay(alignment: .topLeading) { waveformHoverOverlay() }
@@ -2868,8 +2881,13 @@ struct WaveformView: View {
                             switch phase {
                             case .active(let location):
                                 updateWaveformHover(at: location, in: signal)
+                                let channel = waveformHoverChannelIndex(atY: location.y, in: signal)
+                                if recordingStore.selection.matrixHoverChannel != channel {
+                                    recordingStore.selection.matrixHoverChannel = channel
+                                }
                             case .ended:
                                 waveformHoverInfo = nil
+                                recordingStore.selection.matrixHoverChannel = nil
                             }
                         }
                         .background(
@@ -3112,6 +3130,13 @@ struct WaveformView: View {
         // right after an Apply, e.g. the bad-channel escalation feature).
         if reinterpolateEpochSignals(index, indices: indices, weights: weights) {
             // Epoch caches patched in place — segmentation/averages remain intact.
+            if let matrix = epoching.decisionMatrix {
+                matrix.recordingInterpolatedChannels = Set(channels.interpolated.keys)
+                epoching.decisionMatrixNeedsRefresh = true
+                if epoching.showsDecisionMatrix {
+                    averageCurrentEpochs()
+                }
+            }
         } else {
             invalidateEpochsForSignalChange()
         }

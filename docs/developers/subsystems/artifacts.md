@@ -130,26 +130,54 @@ Reference members use a leave-one-out average for scoring. Single, flat,
 nonfinite, or otherwise unscorable examples stay unscored, rather than receiving
 a perfect self-match. Group cards show their own average shape.
 
-`ArtifactSpatialGrouping` derives session-only signed unit spatial vectors from
-those cached peak-GFP maps. The shared ordered channel set occurs in at least
+`ArtifactSpatialGrouping` derives session-only unit spatial vectors from those
+cached peak-GFP maps. The shared ordered channel set occurs in at least
 90% of available maps and must cover at least 80% of the largest map (minimum
 three sensors). Every assigned event must have all shared channels, finite
 nonflat values, and a complete window. Others remain unassigned. Normalization
-removes spatial mean and amplitude without taking absolute correlation, retaining
-polarity. Up to four task-group batches normalize vectors concurrently inside a
+removes spatial mean and amplitude. Signed mode uses ordinary correlation and
+retains polarity as a family boundary. Projective mode uses global Pearson sign
+alignment, iteratively sign-aligns members before centroid averaging, and records
+each event's orientation relative to the canonical centroid. It therefore treats
+`v` and `-v` as one spatial axis without taking per-sensor absolute values or
+losing the original orientation. Ocular, saccadic-spike, and corneo-retinal
+classes default to projective mode; other classes default to signed mode. Up to
+four task-group batches normalize vectors concurrently inside a
 cancellable detached worker. A deterministic divisive spherical clustering tree
 uses farthest seeds and up to twelve two-centroid refinements per split; no
 quadratic pairwise matrix is allocated. Recursion is capped at 32. This is a
 spatial browsing heuristic, not a validated artifact classifier or agglomerative
 linkage algorithm.
 
-The Broader/Finer slider cuts this tree at minimum centroid correlation
+Projective mode exposes five comparison costs. Every cost first chooses one
+global orientation from Pearson correlation; no neighborhood or histogram term
+may flip signs independently. `Global Pearson` uses `|r|`. `Local Pearson`
+averages correlations from one overlapping nearest-neighbor neighborhood per
+sensor, using the layout's 2D coordinates and a montage-scaled neighborhood size
+bounded to 3–12 sensors. If geometry is unavailable it falls back to the global
+score. `Spearman` applies average ranks for ties. `Robust composite` weights
+global Pearson 0.30, local Pearson 0.30, Spearman 0.25, and an 85%-residual-
+trimmed correlation 0.15. `Information composite` weights electrode-wise Pearson
+0.55 and a distributional score 0.45; the latter combines normalized mutual
+information 0.40, Hellinger histogram affinity 0.30, and symmetric binned
+correlation ratio 0.30. Histograms use 3–8 montage-scaled bins. Retaining the
+electrode-wise term prevents identical marginal distributions at different
+locations from scoring perfectly. Signed mode always uses ordinary Pearson.
+
+These metrics are AFNI-inspired rather than implementations of AFNI volume
+registration: there is no affine search, image resampling, automask overlap, or
+independently optimized local contrast. Their cohesion values are not calibrated
+to be numerically interchangeable, so the UI labels non-Pearson values
+as `score` and keeps the results preview-only.
+
+The Broader/Finer slider cuts this tree at minimum selected centroid score
 0.65–0.98 (default 0.85); terminal groups retain their actual reported cohesion.
 Representative events are closest to the centroid. Cards are lazy-rendered, and
 filtering a preview preserves the existing eighteen-example grid and waveform
 scores. A three-entry actor cache retains vectors and trees keyed by the review
-analysis key. Revision, candidates, definition channels/window/taper/reference,
-excluded channels, and mapped sensor IDs invalidate that key. Cancellation and
+analysis key plus polarity and comparison modes. Revision, candidates, definition
+channels/window/taper/reference, excluded channels, and mapped sensor IDs also
+invalidate that key. Cancellation and
 key checks prevent stale publication; no partial tree is cached. Cached cuts
 only traverse nodes and do not touch signal samples. Spatial previews cannot yet
 split classes or modify choices/replay/cleaning; existing waveform-band splitting
@@ -166,13 +194,22 @@ fixed cropped interior support; per-channel centering and pooled unit norm
 preserve relative channel amplitude and polarity without time warping. Invalid,
 flat, or incomplete profiles remain unassigned within the parent family.
 
+The waveform-polarity control either preserves these raw signs or applies the
+parent spatial node's single retained orientation sign to the complete
+multichannel profile before alignment and clustering. Projective spatial mode
+defaults to orienting waveforms; signed spatial mode defaults to preserving them.
+This canonicalization is session-only and never modifies signal samples, review
+decisions, cleaning inputs, or replay state.
+
 Normalization/alignment runs in up to four task-group batches, then the shared
 signed-vector divisive builder produces the waveform hierarchy. Waveform nodes
 retain normalized centroids for cheap mean/representative preview rendering;
-spatial nodes do not allocate these optional vectors. A separate six-entry actor
-cache is keyed by review analysis key plus spatial node ID. Spatial granularity
-chooses the parent node, while waveform granularity only cuts its cached tree.
-Detached tasks use cancellation and key guards before cache/UI publication.
+signed spatial nodes can omit them, while projective spatial nodes retain their
+canonical centroids so each event's orientation remains recoverable. A separate
+six-entry actor cache is keyed by review analysis key plus spatial node ID.
+Spatial granularity chooses the parent node, while waveform granularity only cuts
+its cached tree. Detached tasks use cancellation and key guards before cache/UI
+publication.
 Subgroup filters intersect spatial membership and cannot cross families.
 Cohesion includes members themselves and is not a replacement for leave-one-out
 waveform confidence. This stage does not persist subgroup choices, create split

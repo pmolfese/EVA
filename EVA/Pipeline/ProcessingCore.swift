@@ -406,7 +406,13 @@ final class ProcessingCore {
                 }
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
-                    summaries: outcome.summaries,
+                    summaries: ArtifactCleaningSummary.addingEventEvidence(
+                        to: outcome.summaries,
+                        original: current,
+                        cleaned: outcome.signal,
+                        artifacts: artifacts,
+                        excludedChannels: excludedFromCleaning
+                    ),
                     metrics: ArtifactCleanRunMetrics.measure(
                         original: current.data, cleaned: outcome.signal.data,
                         artifacts: artifacts, summaries: outcome.summaries,
@@ -566,17 +572,24 @@ final class ProcessingCore {
         guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [] }
         let sensorLayoutName = SensorLayout.load(fromPackageContaining: signal.signalURL)?.name
         var events: [MFFEvent] = []
+        let correctedIDs: Set<String> = artifactVM.cleaningIsEnabled && artifactVM.cleanedSignal != nil
+            && epoching.artifactRejectionPolicy == .uncorrected
+            ? Set(artifactVM.cleaningSummaries.flatMap(\.correctedEventIDs))
+            : []
+        func eligible(_ candidates: [MFFEvent]) -> [MFFEvent] {
+            correctedIDs.isEmpty ? candidates : candidates.filter { !correctedIDs.contains($0.id) }
+        }
         if epoching.skipEyeBlinks {
-            events += EyeArtifactThresholdDetector.detect(
+            events += eligible(EyeArtifactThresholdDetector.detect(
                 kind: .blink, channels: signal.data, samplingRate: signal.samplingRate,
                 duration: signal.duration, sensorLayoutName: sensorLayoutName,
-                configuration: artifactVM.blinkThresholdConfig)
+                configuration: artifactVM.blinkThresholdConfig))
         }
         if epoching.skipEyeMovements {
-            events += EyeArtifactThresholdDetector.detect(
+            events += eligible(EyeArtifactThresholdDetector.detect(
                 kind: .movement, channels: signal.data, samplingRate: signal.samplingRate,
                 duration: signal.duration, sensorLayoutName: sensorLayoutName,
-                configuration: artifactVM.movementThresholdConfig)
+                configuration: artifactVM.movementThresholdConfig))
         }
         // The gradient step's unreliable spans ride on the signal's own events,
         // exactly as the interactive `psaArtifactEventsForRejectionByLabel`

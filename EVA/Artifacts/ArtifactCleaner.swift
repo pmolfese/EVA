@@ -602,6 +602,21 @@ struct ArtifactCleaningSummary: Identifiable, Sendable {
     var method: ArtifactCleaningMethod
     var eventCount: Int
     var channelCount: Int
+    /// Exact events that contributed to this cleaning batch. Batch-level
+    /// method/context is deliberately stored once; the IDs are all the
+    /// Decision Matrix needs to distinguish corrected from merely detected.
+    var correctedEventIDs: [String] = []
+    /// RMS over the corrected event windows and channels. These are evidence
+    /// about how much the operation changed, not a claim that all artifact was
+    /// removed or that no neural signal was affected.
+    var inputRMSMicrovolts: Float? = nil
+    var outputRMSMicrovolts: Float? = nil
+
+    var rmsChangeFraction: Float? {
+        guard let inputRMSMicrovolts, let outputRMSMicrovolts,
+              inputRMSMicrovolts > 0 else { return nil }
+        return (inputRMSMicrovolts - outputRMSMicrovolts) / inputRMSMicrovolts
+    }
 
     var id: UUID { artifactID }
 }

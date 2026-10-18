@@ -22,6 +22,10 @@ math is delegated to [trials.md](trials.md).
 | `PSABadChannelEscalation.swift` | Decides when a channel is too bad within epochs to keep (`Outcome`). |
 | `PSAGlobalBadChannelInterpolator.swift` | Interpolates channels marked globally bad before averaging. |
 | `EpochBadChannelDetector.swift` | Flags per-epoch bad channels (with a cached spline-weight helper). |
+| `PSADecisionMatrix.swift` | Shared review model, compact Overview/Detail canvas, thresholds, explicit decisions and averaging snapshot. |
+| `PSADecisionMatrixPanel.swift` | Per-recording native floating panel; Show/Hide preserves SwiftUI view state and decisions. |
+| `PSADecisionMatrixNavigation.swift` | Links matrix identities to waveform scroll/highlight and restores the complete source epoch set after averaging. |
+| `PSAWaveformDecisionControls.swift` | Option-click waveform inspector bindings to the same epoch/cell overrides used by the matrix; per-epoch interpolation is queued for averaging. |
 | `EpochSNR.swift` | Per-average SNR metrics (`SNRMetrics`). |
 | `RegexPatternLibrary.swift` | Preset regexes + suggestions for turning event codes into categories. |
 
@@ -57,6 +61,27 @@ math is delegated to [trials.md](trials.md).
 | `JointMarkerOverlay.swift` | Draggable joint time/latency markers over the plots. |
 
 ## How to extend this
+
+Interactive segmentation defers destructive rejection/interpolation to the
+matrix. Keep `segmentedEpochSignal` and `segmentedEpochSegments` complete;
+`snapshot().materializedResult()` produces a temporary kept/interpolated set for
+averaging. Plain segmentation uses the floating panel; explicit PSA averaging
+with Use Decision Matrix retains the modal review sheet. Averaging with that
+checkbox off still uses the direct build/average/post-process path. The floating
+panel saves its AppKit frame explicitly on moves, resizes and dismissal, with a
+shared last-used frame for new panels across launches and per-panel placement
+while open. Avoid a shared frame-autosave owner: multiple recording panels can
+coexist. Restored frames are constrained to the available monitors.
+Source invalidation or history restoration tears down the review; merely hiding
+the panel does not. Epoch-decision/feasibility caches depend on decision inputs,
+not pointer selection, so navigation does not repeat spatial checks or scans.
+
+Waveform review pickers bind directly to the matrix model. Manual health labels
+also update explicit epoch overrides, so a later waveform edit supersedes an
+earlier matrix choice. A pinned option-click request retains the channel under
+the pointer even after the pointer moves into the inspector. Actual recording-wide
+channel repair refreshes matrix evidence from the changed source; already-repaired
+channels are displayed in blue without creating another interpolation instruction.
 
 A new **rejection criterion** is a detector (mirror `EpochBadChannelDetector` /
 `EyeArtifactThresholdDetector`) whose outcome feeds `PSAAveraging`. A new

@@ -23,7 +23,10 @@ extension WaveformView {
     // MARK: - PSA epoching
 
     func openPSASheet(for signal: MFFSignalData) {
-        epoching.decisionMatrix = nil
+        recordingStore.selection.matrixReviewRequest = nil
+        epoching.showsDecisionMatrix = false
+        epoching.decisionMatrixIsInSheet = false
+        epoching.decisionMatrixNeedsRefresh = true
         reconcilePSADefinedArtifactRejectionSelections()
         let events = segmentableEvents(for: signal)
         reconcilePSAEventSelection(for: events)
@@ -79,41 +82,58 @@ extension WaveformView {
 
     @ViewBuilder
     func psaSheet(for signal: MFFSignalData) -> some View {
-        if let matrix = epoching.decisionMatrix {
-            let matrixPriorRunning = channels.isAnalyzingHealth
-                || epoching.isAnalyzingDecisionMatrixChannelPrior
-            PSADecisionMatrixView(
-                model: matrix,
-                isApplying: epoching.isApplying,
-                isRunningFullChannelHealth: matrixPriorRunning,
-                allowsFullHealthUpgrade: goodnessSettings.psaDecisionMatrixHealthStrategy == .adaptive,
-                fallbackMessage: decisionMatrixFallbackMessage,
-                progress: channels.isAnalyzingHealth
-                    ? channels.healthProgress
-                    : (epoching.decisionMatrixChannelPriorProgress ?? epoching.segmentingProgress),
-                progressMessage: channels.isAnalyzingHealth
-                    ? (chanHealth.statusMessage ?? "Running full Channel Health…")
-                    : (epoching.decisionMatrixChannelPriorMessage ?? epoching.phaseMessage),
-                onBack: {
-                    psaTask?.cancel()
-                    epoching.decisionMatrix = nil
-                },
-                onCancel: {
-                    psaTask?.cancel()
-                    epoching.decisionMatrix = nil
-                    epoching.showsSheet = false
-                },
-                onRunFullChannelHealth: {
-                    runFullChannelHealthForDecisionMatrix(signal: signal, model: matrix)
-                },
-                onAverage: { averageReviewedDecisionMatrix() }
-            )
-            .onAppear {
-                ensurePreferredDecisionMatrixChannelPrior(signal: signal, model: matrix)
-            }
+        if epoching.decisionMatrixIsInSheet, let matrix = epoching.decisionMatrix {
+            decisionMatrixReview(for: signal, model: matrix, isFloating: false)
         } else {
             psaConfigurationSheet(for: signal)
         }
+    }
+
+    @ViewBuilder
+    var decisionMatrixPanelHost: some View {
+        if !epoching.decisionMatrixIsInSheet, let matrix = epoching.decisionMatrix {
+            let signal = continuousProcessedSignal ?? recording.signal ?? matrix.preparation.signal
+            PSADecisionMatrixPanel(
+                isPresented: $epoching.showsDecisionMatrix,
+                title: recording.packageName
+            ) {
+                decisionMatrixReview(for: signal, model: matrix, isFloating: true)
+            }
+            .frame(width: 0, height: 0)
+        }
+    }
+
+    private func decisionMatrixReview(
+        for signal: MFFSignalData, model: PSADecisionMatrixModel, isFloating: Bool
+    ) -> some View {
+        PSADecisionMatrixView(
+            model: model,
+            isApplying: epoching.isApplying,
+            isRunningFullChannelHealth: channels.isAnalyzingHealth || epoching.isAnalyzingDecisionMatrixChannelPrior,
+            allowsFullHealthUpgrade: goodnessSettings.psaDecisionMatrixHealthStrategy == .adaptive,
+            fallbackMessage: decisionMatrixFallbackMessage,
+            progress: channels.isAnalyzingHealth
+                ? channels.healthProgress
+                : (epoching.decisionMatrixChannelPriorProgress ?? epoching.segmentingProgress),
+            progressMessage: channels.isAnalyzingHealth
+                ? (chanHealth.statusMessage ?? "Running full Channel Health…")
+                : (epoching.decisionMatrixChannelPriorMessage ?? epoching.phaseMessage),
+            onBack: { openPSASheet(for: signal) },
+            onCancel: {
+                epoching.showsDecisionMatrix = false
+                if !isFloating {
+                    epoching.showsSheet = false
+                    epoching.decisionMatrixIsInSheet = false
+                }
+            },
+            onRunFullChannelHealth: { runFullChannelHealthForDecisionMatrix(signal: signal, model: model) },
+            onAverage: { averageReviewedDecisionMatrix() },
+            onNavigate: { channel, epoch in
+                if isFloating { navigateDecisionMatrix(channel: channel, epoch: epoch) }
+            },
+            isFloating: isFloating
+        )
+        .onAppear { ensurePreferredDecisionMatrixChannelPrior(signal: signal, model: model) }
     }
 
     var decisionMatrixFallbackMessage: String {
@@ -300,7 +320,15 @@ extension WaveformView {
 
                         VStack(alignment: .leading, spacing: 8) {
                             HStack(spacing: 8) {
-                                Toggle("Skip if contains artifact", isOn: $epoching.skipIfContainsArtifact)
+                                Toggle("Skip if contains", isOn: $epoching.skipIfContainsArtifact)
+                                Picker("Artifact rule", selection: $epoching.artifactRejectionPolicy) {
+                                    ForEach(PSAArtifactRejectionPolicy.allCases) { policy in
+                                        Text(policy.rawValue).tag(policy)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(width: 175)
+                                .disabled(!epoching.skipIfContainsArtifact)
                                 Button {
                                     epoching.showsArtifactRejectionOptions = true
                                 } label: {
@@ -1548,6 +1576,63 @@ extension WaveformView {
         return result.mapValues { Array(Set($0)).sorted() }
     }
 
+    /// Compact, event-aware cleaning context for the matrix. Cleaning method
+    /// and RMS evidence live once on the artifact summary; each epoch receives
+    /// only the overlapping event details it needs to draw and explain.
+    func psaArtifactEventDetails(
+        for segments: [EpochSegment],
+        sourceSignal: MFFSignalData
+    ) -> [Int: [PSAArtifactEventDetail]] {
+        guard sourceSignal.samplingRate > 0 else { return [:] }
+        let cleaningIsActive = artifactVM.cleaningIsEnabled && artifactVM.cleanedSignal != nil
+        let summaries = Dictionary(uniqueKeysWithValues: artifactVM.cleaningSummaries.map { ($0.artifactID, $0) })
+        var catalog: [(event: MFFEvent, label: String, summary: ArtifactCleaningSummary?)] = []
+        var definedEventIDs = Set<String>()
+        for artifact in template.definedArtifacts {
+            let summary = summaries[artifact.id]
+            for event in artifact.events {
+                definedEventIDs.insert(event.id)
+                catalog.append((event, artifact.name, summary))
+            }
+        }
+        for event in artifactVM.events where !definedEventIDs.contains(event.id) {
+            let label: String
+            switch event.code {
+            case EyeArtifactKind.blink.eventCode: label = "Eye Blink"
+            case EyeArtifactKind.movement.eventCode: label = "Eye Movement"
+            default: label = event.code
+            }
+            catalog.append((event, label, nil))
+        }
+
+        var result: [Int: [PSAArtifactEventDetail]] = [:]
+        for (index, segment) in segments.enumerated() {
+            let epochStart = segment.sourceTimeSeconds
+                - Double(segment.stimulusOffsetSamples) / sourceSignal.samplingRate
+            let epochEnd = epochStart
+                + Double(segment.endSample - segment.startSample + 1) / sourceSignal.samplingRate
+            let details = catalog.compactMap { item -> PSAArtifactEventDetail? in
+                guard item.event.overlaps(startSeconds: epochStart, endSeconds: epochEnd) else { return nil }
+                let hasCorrection = item.summary?.correctedEventIDs.contains(item.event.id) == true
+                let corrected = cleaningIsActive && hasCorrection
+                return PSAArtifactEventDetail(
+                    eventID: item.event.id,
+                    label: item.label,
+                    code: item.event.code,
+                    relativeTimeSeconds: item.event.centerTimeSeconds - segment.sourceTimeSeconds,
+                    hasCorrection: hasCorrection,
+                    isCorrected: corrected,
+                    method: hasCorrection ? item.summary?.method.rawValue : nil,
+                    inputRMSMicrovolts: hasCorrection ? item.summary?.inputRMSMicrovolts : nil,
+                    outputRMSMicrovolts: hasCorrection ? item.summary?.outputRMSMicrovolts : nil,
+                    rmsChangeFraction: hasCorrection ? item.summary?.rmsChangeFraction : nil
+                )
+            }.sorted { $0.relativeTimeSeconds < $1.relativeTimeSeconds }
+            if !details.isEmpty { result[index] = details }
+        }
+        return result
+    }
+
     /// Uses the same Segment Health engine and settings as the normal health
     /// band. A matching completed analysis is reused; otherwise it is computed
     /// once and published to the ordinary Segment Health UI as well as the
@@ -1672,7 +1757,11 @@ extension WaveformView {
     /// immediately, the richer status line, and the UI teardown.
     private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
         let sessionID = recordingSessionID
-        let pausesForDecisionMatrix = epoching.averageOnApply && epoching.usesDecisionMatrix
+        let pausesForDecisionMatrix = epoching.defersPSADecisionsForReview
+        let reviewInSheet = epoching.presentsPSADecisionMatrixSheet
+        epoching.showsDecisionMatrix = false
+        epoching.decisionMatrixIsInSheet = reviewInSheet
+        epoching.decisionMatrix = nil
         let shouldAverage = epoching.averageOnApply && !pausesForDecisionMatrix
         let badChannels = channels.bad
         let suffix = psaPostProcessingSuffix()
@@ -1816,6 +1905,7 @@ extension WaveformView {
                 for: built.segments,
                 sourceSignal: signal
             )
+            let artifactDetails = psaArtifactEventDetails(for: built.segments, sourceSignal: signal)
             let (progressContinuation, progressTask) = ProgressBridge.make { [weak epoching = epoching] (update: EpochBuildProgress) in
                 epoching?.phaseMessage = "Scanning channel-in-epoch evidence… (\(update.completed) of \(update.total))"
                 epoching?.segmentingProgress = preparedScanProgressStart
@@ -1835,6 +1925,7 @@ extension WaveformView {
                     baselineCorrect: shouldBaselineCorrect,
                     segmentHealthGoodnessScores: segmentHealthScores,
                     suggestedRejectedEpochReasons: rejectionReasons,
+                    artifactEventsByEpoch: artifactDetails,
                     progress: { completed, total in
                         progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
                     }
@@ -1853,6 +1944,7 @@ extension WaveformView {
                 return
             }
             let matrix = PSADecisionMatrixModel(preparation: preparation)
+            matrix.recordingInterpolatedChannels = Set(channels.interpolated.keys)
             if preparedUsesFastRecordingPrior && !hasCurrentFullHealth {
                 matrix.adoptRecordingChannelGoodness(preparedRecordingGoodness, kind: .fastRecording)
             }
@@ -1861,9 +1953,10 @@ extension WaveformView {
                 matrix.suggestEpochRejection(excluded, reason: "Previously excluded")
             }
             epoching.decisionMatrix = matrix
-            epoching.statusMessage = matrix.hasRecordingWideChannelHealth
-                ? "Review the matrix before averaging. Full Channel Health supplies the channel prior; cells combine it with fast local and epoch evidence."
-                : "Review the matrix before averaging. A fast segment scan supplies local evidence and the fallback channel prior."
+            epoching.decisionMatrixNeedsRefresh = false
+            epoching.showsSheet = reviewInSheet
+            epoching.showsDecisionMatrix = !reviewInSheet
+            epoching.statusMessage = "Review all epochs in the Decision Matrix. Rejected trials remain visible and are excluded only when averaging."
             epoching.isApplying = false
             epoching.phaseMessage = nil
             return
@@ -2024,7 +2117,7 @@ extension WaveformView {
             epochBadChannelThresholds: epoching.epochBadChannelThresholds,
             electrodePositions: electrodeGeometry?.positions ?? [:],
             globallyBadChannels: channels.bad,
-            defersBadChannelDecisions: epoching.averageOnApply && epoching.usesDecisionMatrix,
+            defersBadChannelDecisions: epoching.defersPSADecisionsForReview,
             artifactRejectionWindow: epoching.effectiveArtifactRejectionWindow
         )
     }
@@ -2065,19 +2158,26 @@ extension WaveformView {
         guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [:] }
 
         var eventsByLabel: [String: [MFFEvent]] = [:]
+        let correctedIDs: Set<String> = artifactVM.cleaningIsEnabled && artifactVM.cleanedSignal != nil
+            && epoching.artifactRejectionPolicy == .uncorrected
+            ? Set(artifactVM.cleaningSummaries.flatMap(\.correctedEventIDs))
+            : []
+        func eligible(_ events: [MFFEvent]) -> [MFFEvent] {
+            correctedIDs.isEmpty ? events : events.filter { !correctedIDs.contains($0.id) }
+        }
         // Only reject on eye artifacts whose detector was actually enabled/run —
         // matching what the rejection popover offers. A disabled detector has no
         // events, so it must not trigger on-the-fly detection here.
         if epoching.skipEyeBlinks, detectsEyeBlinkArtifacts {
-            eventsByLabel["Eye Blink", default: []] += artifactEventsOrDetection(for: .blink, in: signal)
+            eventsByLabel["Eye Blink", default: []] += eligible(artifactEventsOrDetection(for: .blink, in: signal))
         }
         if epoching.skipEyeMovements, detectsEyeMovementArtifacts {
-            eventsByLabel["Eye Movement", default: []] += artifactEventsOrDetection(for: .movement, in: signal)
+            eventsByLabel["Eye Movement", default: []] += eligible(artifactEventsOrDetection(for: .movement, in: signal))
         }
         for artifact in template.definedArtifacts
         where !ArtifactReviewEngine.isThresholdFamily(artifact)
             && epoching.skippedDefinedArtifactIDs.contains(artifact.id) {
-            eventsByLabel[artifact.name, default: []] += artifact.events
+            eventsByLabel[artifact.name, default: []] += eligible(artifact.events)
         }
         if epoching.skipUnreliableMRI {
             eventsByLabel[GradientCoverage.unreliableEventLabel, default: []] += psaUnreliableMRIEvents(in: signal)
@@ -2172,11 +2272,28 @@ extension WaveformView {
         return result
     }
 
-    func averageCurrentEpochs() {
+    func averageCurrentEpochs(reviewInSheet: Bool = false) {
         guard let segmentedEpochSignal, !segmentedEpochSegments.isEmpty else {
             epoching.statusMessage = "Create epochs before averaging."
             return
         }
+        epoching.decisionMatrixIsInSheet = reviewInSheet
+        if !epoching.decisionMatrixNeedsRefresh,
+           let matrix = epoching.decisionMatrix,
+           matrix.preparation.matchesCurrentReviewInputs(
+               signal: segmentedEpochSignal, segments: segmentedEpochSegments,
+               averageReference: epoching.averageReference,
+               baselineCorrect: epoching.baselineCorrected,
+               globallyBadChannels: channels.bad, thresholds: epoching.epochBadChannelThresholds
+           ) {
+            epoching.showsSheet = reviewInSheet
+            epoching.showsDecisionMatrix = !reviewInSheet
+            showDecisionMatrixSourceEpochs()
+            return
+        }
+        let previousMatrix = epoching.decisionMatrix
+        epoching.showsDecisionMatrix = false
+        epoching.decisionMatrix = nil
         psaTask?.cancel()
         let sessionID = recordingSessionID
         let thresholds = epoching.epochBadChannelThresholds
@@ -2242,6 +2359,10 @@ extension WaveformView {
                 for: sourceSegments,
                 sourceSignal: artifactSourceSignal
             )
+            let artifactDetails = psaArtifactEventDetails(
+                for: sourceSegments,
+                sourceSignal: artifactSourceSignal
+            )
             let (progressContinuation, progressTask) = ProgressBridge.make { [weak epoching = epoching] (update: EpochBuildProgress) in
                 epoching?.phaseMessage = "Scanning channel-in-epoch evidence… (\(update.completed) of \(update.total))"
                 epoching?.segmentingProgress = preparedScanProgressStart
@@ -2261,6 +2382,7 @@ extension WaveformView {
                     baselineCorrect: shouldBaselineCorrect,
                     segmentHealthGoodnessScores: segmentHealthScores,
                     suggestedRejectedEpochReasons: rejectionReasons,
+                    artifactEventsByEpoch: artifactDetails,
                     progress: { completed, total in
                         progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
                     }
@@ -2279,6 +2401,10 @@ extension WaveformView {
                 return
             }
             let model = PSADecisionMatrixModel(preparation: preparation)
+            model.recordingInterpolatedChannels = Set(channels.interpolated.keys)
+            if let previousMatrix {
+                model.restoreManualDecisions(from: previousMatrix)
+            }
             if preparedUsesFastRecordingPrior && !hasCurrentFullHealth {
                 model.adoptRecordingChannelGoodness(preparedRecordingGoodness, kind: .fastRecording)
             }
@@ -2287,9 +2413,13 @@ extension WaveformView {
                 model.suggestEpochRejection(excluded, reason: "Previously excluded")
             }
             epoching.decisionMatrix = model
+            epoching.decisionMatrixNeedsRefresh = false
+            epoching.showsSheet = reviewInSheet
+            epoching.showsDecisionMatrix = !reviewInSheet
             epoching.isApplying = false
             epoching.phaseMessage = nil
             psaTask = nil
+            showDecisionMatrixSourceEpochs()
         }
     }
 
@@ -2485,9 +2615,9 @@ extension WaveformView {
             globallyBadChannels: channels.bad,
             thresholds: epoching.epochBadChannelThresholds
         ) else {
-            epoching.decisionMatrix = nil
             epoching.statusMessage = "Decision Matrix inputs changed; recalculating the review before averaging."
-            averageCurrentEpochs()
+            epoching.decisionMatrixNeedsRefresh = true
+            averageCurrentEpochs(reviewInSheet: epoching.decisionMatrixIsInSheet)
             return
         }
         let snapshot = matrix.snapshot()
@@ -2542,8 +2672,8 @@ extension WaveformView {
                 return
             }
             epoching.segmentingProgress = 1
-            segmentedEpochSignal = reviewed.signal
-            segmentedEpochSegments = reviewed.segments
+            // Retain every original trial so the floating review can revisit
+            // and rescue exclusions, and interpolation never stacks on itself.
             computeAverageSNRInBackground(from: reviewed, excludedIndices: [], sessionID: sessionID)
             let rejected = sourceCount - reviewed.segments.count
             PSAAveraging.commit(
@@ -2555,8 +2685,9 @@ extension WaveformView {
                 segHealth: segHealth,
                 store: recordingStore
             )
-            epoching.decisionMatrix = nil
+            epoching.showsDecisionMatrix = false
             epoching.showsSheet = false
+            epoching.decisionMatrixIsInSheet = false
             epoching.isApplying = false
             epoching.phaseMessage = nil
             epoching.segmentingProgress = nil
@@ -2643,6 +2774,11 @@ extension WaveformView {
             message: "\(segmentedEpochSegments.count) epochs"
         )
         let isAveraged = epoching.isAveraged
+        let reviewedSnapshot = epoching.decisionMatrix.flatMap { matrix in
+            matrix.preparation.sourceSignal.dataRevision == base.signal.dataRevision
+                && matrix.preparation.segments.map(\.id) == base.segments.map(\.id)
+                ? matrix.snapshot() : nil
+        }
         let colorIndices = categoryColorIndices(for: base.segments.map(\.category))
         // Segment Health labels and the committed reviewed exclusion are kept
         // apart on purpose: they average together, but `skippedLabeledBadSegments`
@@ -2658,9 +2794,14 @@ extension WaveformView {
         let sessionID = recordingSessionID
         psaTask = Task {
             let result: PSABuildResult
+            var averageSource = base
             if isAveraged {
                 let averageWorker = Task.detached(priority: .userInitiated) {
-                    base.average(colorIndices: colorIndices, excludedIndices: excludedIndices)
+                    if let reviewedSnapshot {
+                        guard let reviewed = reviewedSnapshot.materializedResult() else { return (Optional<PSABuildResult>.none, base) }
+                        return (reviewed.average(colorIndices: colorIndices), reviewed)
+                    }
+                    return (base.average(colorIndices: colorIndices, excludedIndices: excludedIndices), base)
                 }
                 let averagedOpt2 = await withTaskCancellationHandler(
                     operation: {
@@ -2670,8 +2811,9 @@ extension WaveformView {
                         averageWorker.cancel()
                     }
                 )
-                guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt2 else { return }
+                guard !Task.isCancelled, sessionID == recordingSessionID, let averaged = averagedOpt2.0 else { return }
                 result = averaged
+                averageSource = averagedOpt2.1
             } else {
                 result = base
             }
@@ -2688,7 +2830,7 @@ extension WaveformView {
             )
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             if isAveraged {
-                computeAverageSNRInBackground(from: base, excludedIndices: excludedIndices, sessionID: sessionID)
+                computeAverageSNRInBackground(from: averageSource, excludedIndices: reviewedSnapshot == nil ? excludedIndices : [], sessionID: sessionID)
             } else {
                 snrTask?.cancel()
                 snrTask = nil
@@ -2717,6 +2859,15 @@ extension WaveformView {
                 includeSkippedLabeledBadSegments: isAveraged
             )
             psaTask = nil
+            if epoching.showsDecisionMatrix,
+               let matrix = epoching.decisionMatrix,
+               !matrix.preparation.matchesCurrentReviewInputs(
+                   signal: base.signal, segments: base.segments,
+                   averageReference: shouldAvgRef, baselineCorrect: shouldBaseline,
+                   globallyBadChannels: badChannels, thresholds: epoching.epochBadChannelThresholds
+               ) {
+                averageCurrentEpochs()
+            }
         }
     }
 

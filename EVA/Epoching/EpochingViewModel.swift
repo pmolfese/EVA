@@ -18,6 +18,13 @@
 
 import SwiftUI
 
+nonisolated enum PSAArtifactRejectionPolicy: String, CaseIterable, Identifiable, Sendable {
+    case uncorrected = "Uncorrected artifact"
+    case any = "Any artifact"
+
+    var id: String { rawValue }
+}
+
 /// How a joint marker box arranges more than one condition's topomap. See
 /// `EpochingViewModel.jointBoxOrientation`.
 enum JointBoxOrientation: String, CaseIterable, Identifiable, Sendable {
@@ -181,7 +188,14 @@ final class EpochingViewModel {
     /// When averaging, pause after epoch creation so the operator can review
     /// the channel × epoch evidence and see exactly what enters the average.
     var usesDecisionMatrix = false
+    var presentsPSADecisionMatrixSheet: Bool { averageOnApply && usesDecisionMatrix }
+    var defersPSADecisionsForReview: Bool { !averageOnApply || usesDecisionMatrix }
     var decisionMatrix: PSADecisionMatrixModel?
+    var showsDecisionMatrix = false
+    /// PSA's explicit averaging review stays modal; reviewing existing epochs
+    /// uses the independent floating panel instead.
+    var decisionMatrixIsInSheet = false
+    var decisionMatrixNeedsRefresh = false
     /// Structured detector evidence from the most recent epoch build, retained
     /// so "Average Current Epochs" can reopen the same matrix without parsing
     /// a display string.
@@ -213,6 +227,7 @@ final class EpochingViewModel {
 
     // MARK: Artifact rejection
     var skipIfContainsArtifact = true
+    var artifactRejectionPolicy = PSAArtifactRejectionPolicy.uncorrected
     var skipEyeBlinks = true
     var skipEyeMovements = true
     /// Rejects epochs overlapping an `MRI_GRAD_UNRELIABLE` span — a stretch the
@@ -533,6 +548,7 @@ final class EpochingViewModel {
             "skipEyeMovements": "\(skipEyeMovements)",
             "skipUnreliableMRI": "\(skipUnreliableMRI)",
             "skipArtifacts": "\(skipIfContainsArtifact)",
+            "artifactRejectionPolicy": artifactRejectionPolicy.rawValue,
             "skipLabeledBad": "\(skipIfLabeledBad)",
             "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
         ]
@@ -614,6 +630,9 @@ final class EpochingViewModel {
         // unreliable spans.
         skipUnreliableMRI = p["skipUnreliableMRI"] == "true"
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
+        if let v = p["artifactRejectionPolicy"].flatMap(PSAArtifactRejectionPolicy.init(rawValue:)) {
+            artifactRejectionPolicy = v
+        }
         // Absent keys mean "not limited", matching how `parameters` only writes
         // them when the limit is on.
         limitsArtifactRejectionWindow = p["artifactWindowLimited"] == "true"
@@ -1165,6 +1184,9 @@ final class EpochingViewModel {
 
     func resetForClose() {
         showsSheet = false
+        showsDecisionMatrix = false
+        decisionMatrixIsInSheet = false
+        decisionMatrixNeedsRefresh = false
         decisionMatrix = nil
         epochBadChannelSegments.removeAll()
         epochNonArtifactRejectionReasons.removeAll()

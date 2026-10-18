@@ -388,7 +388,7 @@ extension WaveformView {
         }
     }
 
-    private func waveformHoverChannelIndex(atY y: CGFloat, in signal: MFFSignalData) -> Int? {
+    func waveformHoverChannelIndex(atY y: CGFloat, in signal: MFFSignalData) -> Int? {
         guard y >= 0 else { return nil }
         let rowPitch = channelRowHeight + rowSpacing
         guard rowPitch > 0 else { return nil }
@@ -502,7 +502,22 @@ extension WaveformView {
                         result: result,
                         showsMouseOverHealth: segHealth.showsMouseOver,
                         qualityLabel: segHealth.qualityLabels[result.segmentID],
-                        onLabel: { segHealth.setQualityLabel($0, for: result.segmentID) }
+                        onLabel: { label in
+                            segHealth.setQualityLabel(label, for: result.segmentID)
+                            if let model = epoching.decisionMatrix,
+                               model.preparation.segments.indices.contains(result.segmentIndex),
+                               SegmentHealthAnalyzer.segmentID(
+                                   index: result.segmentIndex,
+                                   segment: model.preparation.segments[result.segmentIndex]
+                               ) == result.segmentID {
+                                let index = result.segmentIndex
+                                model.applyWaveformQualityLabel(label, epoch: index)
+                            }
+                        },
+                        isExcludedFromAverage: epoching.decisionMatrix?.resolvedEpochDecision(result.segmentIndex) == .reject,
+                        hoveredChannelIndex: recordingStore.selection.matrixHoverChannel,
+                        decisionControls: waveformDecisionControls(for: result),
+                        reviewRequest: recordingStore.selection.matrixReviewRequest
                     )
                         .frame(width: max(endX - startX, 2))
                         .frame(maxHeight: .infinity)
@@ -548,7 +563,11 @@ extension WaveformView {
                 // ⌥ held: finish moving the playhead (a stationary ⌥-click also
                 // places it), and never fall through to selection / double-click.
                 if isOptionKeyPressed {
-                    topomapSample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                    let sample = sampleIndex(forContentX: contentX(fromGlobalX: value.location.x), in: signal)
+                    topomapSample = sample
+                    if dragDistance(value) < Self.dragSelectionThreshold {
+                        openWaveformDecisionInspector(at: sample, channel: recordingStore.selection.matrixHoverChannel)
+                    }
                     epoching.butterflyTopomapRelativeSample = nil
                     clearLiveDragSelection()
                     lastWaveformClick = nil
@@ -576,6 +595,10 @@ extension WaveformView {
 
                 // Otherwise it's a stationary click: detect a double-click by hand.
                 let clickX = contentX(fromGlobalX: value.location.x)
+                selectDecisionMatrixCell(
+                    at: sampleIndex(forContentX: clickX, in: signal),
+                    channel: recordingStore.selection.matrixHoverChannel
+                )
                 let now = Date()
                 if let last = lastWaveformClick,
                    now.timeIntervalSince(last.time) < Self.doubleClickInterval,

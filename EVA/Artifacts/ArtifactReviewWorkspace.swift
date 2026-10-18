@@ -48,10 +48,13 @@ struct ArtifactReviewWorkspace: View {
     @State private var spatialLoadedKey = ""
     @State private var spatialGroupID: Int?
     @State private var spatialThreshold = 0.85
+    @State private var spatialPolarityOverride: ArtifactSpatialPolarityMode?
+    @State private var spatialSimilarityMetric = ArtifactSpatialSimilarityMetric.globalPearson
     @State private var waveformGrouping: ArtifactWaveformGroupingResult?
     @State private var waveformLoadedKey = ""
     @State private var waveformGroupID: Int?
     @State private var waveformThreshold = 0.90
+    @State private var waveformPolarityOverride: ArtifactWaveformPolarityMode?
     @State private var band: ArtifactReviewBand?
     @State private var channel = 0
     @State private var tilePreview = ArtifactReviewTilePreview.waveforms
@@ -84,15 +87,36 @@ struct ArtifactReviewWorkspace: View {
         return String(hasher.finalize())
     }
     private var currentAnalysis: ArtifactReviewAnalysis? { loadedKey == analysisKey ? analysis : nil }
-    private var spatialTaskKey: String { usesSpatialGroups && currentAnalysis != nil ? analysisKey : "" }
-    private var currentSpatial: ArtifactSpatialHierarchy? { spatialLoadedKey == analysisKey ? spatialHierarchy : nil }
+    private var defaultSpatialPolarityMode: ArtifactSpatialPolarityMode {
+        switch selected?.type {
+        case .ocular, .saccadicSpike, .corneoRetinal: return .ignoreGlobalPolarity
+        default: return .signed
+        }
+    }
+    private var spatialPolarityMode: ArtifactSpatialPolarityMode {
+        spatialPolarityOverride ?? defaultSpatialPolarityMode
+    }
+    private var waveformPolarityMode: ArtifactWaveformPolarityMode {
+        waveformPolarityOverride ?? (spatialPolarityMode == .ignoreGlobalPolarity ? .orientToSpatialFamily : .preserve)
+    }
+    private var effectiveSpatialSimilarityMetric: ArtifactSpatialSimilarityMetric {
+        spatialPolarityMode == .signed ? .globalPearson : spatialSimilarityMetric
+    }
+    private var spatialScoreLabel: String {
+        effectiveSpatialSimilarityMetric == .globalPearson ? (spatialPolarityMode == .signed ? "r" : "|r|") : "score"
+    }
+    private var spatialTaskKey: String {
+        usesSpatialGroups && currentAnalysis != nil
+            ? "\(analysisKey)/spatial/\(spatialPolarityMode.rawValue)/\(effectiveSpatialSimilarityMetric.rawValue)" : ""
+    }
+    private var currentSpatial: ArtifactSpatialHierarchy? { spatialLoadedKey == spatialTaskKey ? spatialHierarchy : nil }
     private var spatialGroups: [ArtifactSpatialGroup] { currentSpatial?.groups(minimumCorrelation: spatialThreshold) ?? [] }
     private var selectedSpatialFamily: ArtifactSpatialGroup? {
         spatialGroups.first { $0.id == spatialGroupID }
     }
     private var waveformTaskKey: String {
         guard usesSpatialGroups, let family = selectedSpatialFamily else { return "" }
-        return "\(analysisKey)/waveform/\(family.id)"
+        return "\(spatialTaskKey)/waveform/\(family.id)/\(waveformPolarityMode.rawValue)"
     }
     private var currentWaveform: ArtifactWaveformGroupingResult? {
         !waveformTaskKey.isEmpty && waveformLoadedKey == waveformTaskKey ? waveformGrouping : nil
@@ -209,6 +233,9 @@ struct ArtifactReviewWorkspace: View {
         .onChange(of: selected?.id) { _, _ in
             band = nil
             spatialGroupID = nil
+            spatialPolarityOverride = nil
+            spatialSimilarityMetric = .globalPearson
+            waveformPolarityOverride = nil
             selectedEventID = nil
             showsSplit = false
             ruleUndo = nil
@@ -345,16 +372,41 @@ struct ArtifactReviewWorkspace: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Spatial grouping · preview").font(.callout.weight(.medium))
-                ArtifactReviewHelp(title: "Spatial grouping", text: "Groups compare signed electrode vectors at each event’s peak global field power, not rendered images. Features are centered and normalized, so strength is ignored and opposite polarities stay distinct. A deterministic divisive spherical clustering tree is computed in the background and cached for this signal revision, definition, and channel mask. Broader/Finer cuts that tree using the minimum signed correlation to each group’s centroid. The common sensor set must cover at least 80% of the largest usable map; sensors must occur in at least 90% of maps. Events missing any common sensor, incomplete windows, or flat maps remain unassigned. Cards show a representative real event, not an average map. Singletons can appear at fine settings; they are not evidence of a new artifact type. Select a spatial family to inspect waveform subgroups within it. These previews do not change inclusion, waveform scores, or cleaning. Spatial class splitting is a later step.")
+                ArtifactReviewHelp(title: "Spatial grouping", text: "Groups compare electrode vectors at each event’s peak global field power, not rendered images. Features are centered and normalized, so strength is ignored. Signed mode keeps opposite polarities separate; Ignore global polarity treats a whole-map sign reversal as the same spatial axis, sign-aligns members before averaging, and retains each event’s orientation. A deterministic divisive spherical clustering tree is computed in the background and cached for this signal revision, definition, channel mask, polarity mode, and comparison cost. Broader/Finer cuts that tree using the minimum selected comparison score to each group’s centroid. The common sensor set must cover at least 80% of the largest usable map; sensors must occur in at least 90% of maps. Events missing any common sensor, incomplete windows, or flat maps remain unassigned. Cards show a representative real event, not an average map. Singletons can appear at fine settings; they are not evidence of a new artifact type. Select a spatial family to inspect waveform subgroups within it. These previews do not change inclusion, waveform scores, or cleaning. Spatial class splitting is a later step.")
                 Spacer()
                 Text("Preview only").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Picker("Polarity", selection: Binding(
+                    get: { spatialPolarityMode },
+                    set: { value in
+                        spatialPolarityOverride = value
+                        waveformPolarityOverride = nil
+                        spatialGroupID = nil; waveformGroupID = nil; selectedEventID = nil
+                    }
+                )) {
+                    ForEach(ArtifactSpatialPolarityMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }
+                .pickerStyle(.segmented).frame(width: 310)
+                ArtifactReviewHelp(title: "Spatial polarity", text: "Signed keeps globally inverted scalp fields in separate families. Ignore global polarity treats a field and its exact sign reversal as the same spatial axis using absolute correlation, while retaining every event’s + or − orientation relative to the family centroid. It does not take the absolute value of individual sensors. Ocular classes default to ignoring global polarity; other classes default to Signed.")
+            }
+            HStack(spacing: 8) {
+                Picker("Comparison", selection: $spatialSimilarityMetric) {
+                    ForEach(ArtifactSpatialSimilarityMetric.allCases) { metric in Text(metric.rawValue).tag(metric) }
+                }
+                .pickerStyle(.menu).frame(width: 260)
+                .disabled(spatialPolarityMode == .signed)
+                .onChange(of: spatialSimilarityMetric) { _, _ in
+                    spatialGroupID = nil; waveformGroupID = nil; selectedEventID = nil
+                }
+                ArtifactReviewHelp(title: "Spatial comparison", text: "Global Pearson is the current whole-map |r| method. Local Pearson averages correlations over overlapping physical electrode neighborhoods after choosing one global sign. Spearman compares electrode ranks and is less sensitive to extreme amplitudes. Robust composite blends global, local, rank, and trimmed correlations. Information composite blends electrode-wise correlation with normalized mutual information, Hellinger histogram affinity, and symmetric correlation ratio; it is experimental because histogram estimates are weak for small montages. Signed polarity always uses ordinary Pearson. All modes preserve electrode identity and use one global orientation—individual regions never flip independently.")
             }
             HStack {
                 Text("Broader").font(.caption)
                 Slider(value: $spatialThreshold, in: 0.65...0.98, step: 0.01)
                     .accessibilityLabel("Spatial grouping detail")
                 Text("Finer").font(.caption)
-                Text("r ≥ \(spatialThreshold, specifier: "%.2f")").font(.caption.monospacedDigit()).frame(width: 65)
+                Text("\(spatialScoreLabel) ≥ \(spatialThreshold, specifier: "%.2f")").font(.caption.monospacedDigit()).frame(width: 85)
             }
             if let hierarchy = currentSpatial {
                 Text("\(spatialGroups.count) groups · \(hierarchy.features.count) mapped · \(hierarchy.unassignedIDs.count) unassigned · \(hierarchy.channels.count) shared sensors")
@@ -374,9 +426,14 @@ struct ArtifactReviewWorkspace: View {
                                         layout: sensorLayout, scale: example?.topography?.maximumAbsoluteAmplitude ?? 1)
                                         .frame(height: 68)
                                     Text("Representative event").font(.caption2).foregroundStyle(.secondary)
-                                    Text(group.eventIDs.count == 1 ? "Single example" : String(format: "Minimum spatial r %.2f", group.minimumCorrelation))
+                                    if group.polarityMode == .ignoreGlobalPolarity {
+                                        Text("+ \(group.positiveOrientationCount) · − \(group.negativeOrientationCount)")
+                                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                                            .help("Orientation relative to this family’s canonical centroid; the raw event maps are unchanged.")
+                                    }
+                                    Text(group.eventIDs.count == 1 ? "Single example" : String(format: "Minimum %@ %.2f", group.similarityMetric == .globalPearson ? (group.polarityMode == .ignoreGlobalPolarity ? "|r|" : "r") : "score", group.minimumCorrelation))
                                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                                }.frame(width: 135).padding(8)
+                                }.frame(width: 145).padding(8)
                                     .background(spatialGroupID == group.id ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
                             }.buttonStyle(.plain)
                         }
@@ -386,7 +443,7 @@ struct ArtifactReviewWorkspace: View {
                             }.tint(spatialGroupID == -1 ? .accentColor : .secondary)
                         }
                     }
-                }.frame(height: 133)
+                }.frame(height: spatialPolarityMode == .ignoreGlobalPolarity ? 150 : 133)
                 if hierarchy.features.isEmpty {
                     Text("No comparable spatial features. Check the sensor layout, complete windows, and common good channels.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -408,6 +465,20 @@ struct ArtifactReviewWorkspace: View {
                     Spacer()
                     Text("Preview only").font(.caption).foregroundStyle(.secondary)
                 }
+                HStack(spacing: 8) {
+                    Picker("Waveform polarity", selection: Binding(
+                        get: { waveformPolarityMode },
+                        set: { value in
+                            waveformPolarityOverride = value
+                            waveformGroupID = nil; selectedEventID = nil
+                        }
+                    )) {
+                        ForEach(ArtifactWaveformPolarityMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                    }
+                    .pickerStyle(.segmented).frame(width: 360)
+                    .disabled(spatialPolarityMode == .signed)
+                    ArtifactReviewHelp(title: "Waveform polarity", text: "Preserve polarity clusters the recorded waveform signs as-is. Orient to spatial family multiplies an event’s complete multichannel profile by its retained spatial orientation before temporal clustering, so global sign reversals can share a shape subgroup. Within-waveform positive and negative lobes, relative channel strengths, raw data, decisions, and cleaning are unchanged. Spatially signed families have no orientation reversal to apply.")
+                }
                 HStack {
                     Text("Broader").font(.caption)
                     Slider(value: $waveformThreshold, in: 0.65...0.98, step: 0.01)
@@ -421,7 +492,7 @@ struct ArtifactReviewWorkspace: View {
                         selectedEventID = eventID; eventFocus = true
                     }
                     let labels = result.channelIndices.map(channelName).joined(separator: ", ")
-                    Text("Channels: \(labels.isEmpty ? "none usable" : labels) · alignment up to ±\(result.maximumAlignmentSeconds * 1000, specifier: "%.0f") ms · normalized shapes")
+                    Text("Channels: \(labels.isEmpty ? "none usable" : labels) · alignment up to ±\(result.maximumAlignmentSeconds * 1000, specifier: "%.0f") ms · normalized shapes\(result.polarityMode == .orientToSpatialFamily ? " · \(result.reorientedEventCount) polarity-oriented" : "")")
                         .font(.caption2).foregroundStyle(.secondary)
                 } else {
                     ProgressView("Building waveform subgroups in the background…")
@@ -826,8 +897,10 @@ struct ArtifactReviewWorkspace: View {
             return
         }
         let windowSeconds = artifact.windowSizeSeconds
+        let polarityMode = waveformPolarityMode
         let worker = Task.detached(priority: .userInitiated) {
-            await ArtifactWaveformGrouping.build(analysis: analysis, family: family, windowSeconds: windowSeconds)
+            await ArtifactWaveformGrouping.build(analysis: analysis, family: family,
+                windowSeconds: windowSeconds, polarityMode: polarityMode)
         }
         let result = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
         guard !Task.isCancelled, waveformTaskKey == key, let result else { return }
@@ -847,11 +920,15 @@ struct ArtifactReviewWorkspace: View {
             return
         }
         let hasLayout = sensorLayout != nil
+        let layout = sensorLayout
+        let polarityMode = spatialPolarityMode
+        let similarityMetric = effectiveSpatialSimilarityMetric
         let worker = Task.detached(priority: .userInitiated) {
             if !hasLayout {
                 return ArtifactSpatialHierarchy(channels: [], features: [], unassignedIDs: result.examples.map(\.id), nodes: [], root: nil) as ArtifactSpatialHierarchy?
             }
-            return await ArtifactSpatialGrouping.build(examples: result.examples)
+            return await ArtifactSpatialGrouping.build(examples: result.examples, layout: layout,
+                polarityMode: polarityMode, similarityMetric: similarityMetric)
         }
         let hierarchy = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
         guard !Task.isCancelled, spatialTaskKey == key, let hierarchy else { return }

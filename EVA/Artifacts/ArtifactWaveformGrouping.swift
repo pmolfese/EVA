@@ -1,5 +1,11 @@
 import Foundation
 
+nonisolated enum ArtifactWaveformPolarityMode: String, CaseIterable, Identifiable, Sendable {
+    case preserve = "Preserve polarity"
+    case orientToSpatialFamily = "Orient to spatial family"
+    var id: String { rawValue }
+}
+
 /// One cached waveform tree for one spatial family. It never merges spatial families.
 nonisolated struct ArtifactWaveformGroupingResult: Sendable {
     let hierarchy: ArtifactSpatialHierarchy
@@ -7,6 +13,8 @@ nonisolated struct ArtifactWaveformGroupingResult: Sendable {
     let pointsPerChannel: Int
     let maximumAlignmentSeconds: Double
     let alignmentReferenceID: String?
+    let polarityMode: ArtifactWaveformPolarityMode
+    let reorientedEventCount: Int
 
     func waveform(_ feature: [Double], channel: Int) -> [Float] {
         guard let index = channelIndices.firstIndex(of: channel), pointsPerChannel > 0,
@@ -19,9 +27,13 @@ nonisolated enum ArtifactWaveformGrouping {
     /// Use a fixed set of up to five energetic definition channels for the family.
     /// Profiles are downsampled to at most 64 points/channel to bound cache/work size.
     static func build(analysis: ArtifactReviewAnalysis, family: ArtifactSpatialGroup,
-                      windowSeconds: Double) async -> ArtifactWaveformGroupingResult? {
+                      windowSeconds: Double,
+                      polarityMode: ArtifactWaveformPolarityMode = .preserve) async -> ArtifactWaveformGroupingResult? {
         guard !Task.isCancelled else { return nil }
         let ids = Set(family.eventIDs)
+        let spatialOrientations = Dictionary(uniqueKeysWithValues: zip(family.eventIDs, family.orientationSigns).map {
+            ($0.0, $0.1 < 0 ? -1.0 : 1.0)
+        })
         let sourcePoints = analysis.pointsPerChannel
         let members = analysis.examples.filter { ids.contains($0.id) }.sorted { $0.id < $1.id }
         let valid = members.filter {
@@ -55,14 +67,15 @@ nonisolated enum ArtifactWaveformGrouping {
 
         func profile(_ example: ArtifactReviewExample) -> [Double]? {
             guard points >= 3, !channels.isEmpty else { return nil }
+            let orientation = polarityMode == .orientToSpatialFamily ? spatialOrientations[example.id] ?? 1 : 1
             var result: [Double] = []
             for offset in offsets {
                 for point in 0..<points {
                     let location = Double(point) * Double(sourcePoints - 1) / Double(points - 1)
                     let lower = Int(location), upper = min(lower + 1, sourcePoints - 1)
                     let fraction = location - Double(lower)
-                    result.append(Double(example.samples[offset * sourcePoints + lower]) * (1 - fraction)
-                        + Double(example.samples[offset * sourcePoints + upper]) * fraction)
+                    result.append(orientation * (Double(example.samples[offset * sourcePoints + lower]) * (1 - fraction)
+                        + Double(example.samples[offset * sourcePoints + upper]) * fraction))
                 }
             }
             return result
@@ -115,9 +128,11 @@ nonisolated enum ArtifactWaveformGrouping {
         let assigned = Set(features.map(\.eventID))
         guard let hierarchy = ArtifactSpatialGrouping.hierarchy(features: features, channels: channels,
             unassignedIDs: family.eventIDs.filter { !assigned.contains($0) }, storesCentroids: true) else { return nil }
+        let reoriented = polarityMode == .orientToSpatialFamily
+            ? valid.filter { spatialOrientations[$0.id] == -1 }.count : 0
         return ArtifactWaveformGroupingResult(hierarchy: hierarchy, channelIndices: channels,
             pointsPerChannel: croppedPoints, maximumAlignmentSeconds: Double(shift) * secondsPerPoint,
-            alignmentReferenceID: reference?.id)
+            alignmentReferenceID: reference?.id, polarityMode: polarityMode, reorientedEventCount: reoriented)
     }
 }
 

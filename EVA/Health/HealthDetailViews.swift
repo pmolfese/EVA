@@ -21,7 +21,12 @@ struct SegmentHealthBand: View {
     let showsMouseOverHealth: Bool
     let qualityLabel: SegmentQualityLabel?
     let onLabel: (SegmentQualityLabel?) -> Void
+    var isExcludedFromAverage = false
+    var hoveredChannelIndex: Int? = nil
+    var decisionControls: ((Int?) -> AnyView)? = nil
+    var reviewRequest: PSAWaveformReviewRequest? = nil
     @State private var showsDetails = false
+    @State private var inspectedChannelIndex: Int?
     /// Set when the popover was opened via right-click/tap rather than hover,
     /// so it stays open while the user reads it or picks a label instead of
     /// closing the instant the pointer drifts off the band.
@@ -36,7 +41,9 @@ struct SegmentHealthBand: View {
                     .frame(width: result.grade == .good ? 0 : 1)
             }
             .overlay(alignment: .bottom) {
-                if let qualityLabel {
+                if isExcludedFromAverage {
+                    Rectangle().fill(Color.red).frame(height: 3)
+                } else if decisionControls == nil, let qualityLabel {
                     Rectangle()
                         .fill(qualityLabel == .good ? Color.green : Color.red)
                         .frame(height: 3)
@@ -48,6 +55,7 @@ struct SegmentHealthBand: View {
                 // interaction modifier the waveform uses (see
                 // `WaveformView.installOptionKeyMonitor`).
                 guard NSEvent.modifierFlags.contains(.option) else { return }
+                inspectedChannelIndex = hoveredChannelIndex
                 pinsDetails = true
                 showsDetails = true
             }
@@ -60,6 +68,7 @@ struct SegmentHealthBand: View {
             }
             .contextMenu {
                 Button("Show Segment Health") {
+                    inspectedChannelIndex = hoveredChannelIndex
                     pinsDetails = true
                     showsDetails = true
                 }
@@ -72,7 +81,17 @@ struct SegmentHealthBand: View {
                 }
             }
             .popover(isPresented: $showsDetails, arrowEdge: .top) {
-                SegmentHealthPopover(result: result, qualityLabel: qualityLabel, onLabel: onLabel)
+                VStack(alignment: .leading, spacing: 0) {
+                    if let decisionControls {
+                        decisionControls(inspectedChannelIndex)
+                        Divider()
+                    }
+                    if isExcludedFromAverage {
+                        Label("Excluded from average in Decision Matrix", systemImage: "xmark.rectangle")
+                            .font(.caption).foregroundStyle(.red).padding(12)
+                    }
+                    SegmentHealthPopover(result: result, qualityLabel: qualityLabel, onLabel: onLabel)
+                }
             }
             .onChange(of: showsMouseOverHealth) { _, isEnabled in
                 if !isEnabled {
@@ -80,16 +99,23 @@ struct SegmentHealthBand: View {
                     pinsDetails = false
                 }
             }
+            .onChange(of: reviewRequest, initial: true) { _, request in
+                guard let request, request.segmentID == result.segmentID, decisionControls != nil else { return }
+                inspectedChannelIndex = request.channelIndex
+                pinsDetails = true
+                showsDetails = true
+            }
             .onChange(of: showsDetails) { _, isShowing in
                 if !isShowing {
                     pinsDetails = false
                 }
             }
             .accessibilityLabel("Segment health \(result.goodPercentage) percent good")
+            .accessibilityValue(isExcludedFromAverage ? "Excluded from average" : "")
     }
 
     private var segmentBackgroundColor: Color {
-        if qualityLabel == .bad {
+        if isExcludedFromAverage || (decisionControls == nil && qualityLabel == .bad) {
             return Color.red.opacity(0.22)
         }
         return result.grade.color.opacity(result.grade.segmentOverlayOpacity)

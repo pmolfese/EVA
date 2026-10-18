@@ -131,6 +131,8 @@ extension WaveformView {
                 id: window.id,
                 code: window.code,
                 sourceFile: window.sourceFile,
+                isOcular: window.isOcular,
+                isCorrected: window.isCorrected,
                 startSeconds: window.startSeconds,
                 endSeconds: window.endSeconds,
                 samplingRate: signal.samplingRate,
@@ -140,10 +142,13 @@ extension WaveformView {
         .sorted { $0.startSample < $1.startSample }
     }
 
-    func segmentHealthArtifactSourceWindows() -> [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)] {
+    func segmentHealthArtifactSourceWindows() -> [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double, isOcular: Bool, isCorrected: Bool)] {
         let defaultWindowSeconds = 0.25
-        var windows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)] = []
+        var windows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double, isOcular: Bool, isCorrected: Bool)] = []
         var definedEvents = Set<MFFEvent>()
+        let correctedEventIDs: Set<String> = artifactVM.cleaningIsEnabled && artifactVM.cleanedSignal != nil
+            ? Set(artifactVM.cleaningSummaries.flatMap(\.correctedEventIDs))
+            : []
 
         for artifact in template.definedArtifacts {
             let windowSeconds = max(artifact.windowSizeSeconds, defaultWindowSeconds)
@@ -158,7 +163,11 @@ extension WaveformView {
                     code: event.code,
                     sourceFile: artifact.name,
                     startSeconds: event.centerTimeSeconds - halfWindow,
-                    endSeconds: event.centerTimeSeconds + halfWindow
+                    endSeconds: event.centerTimeSeconds + halfWindow,
+                    isOcular: artifact.thresholdOcularKind != nil
+                        || event.code == EyeArtifactKind.blink.eventCode
+                        || event.code == EyeArtifactKind.movement.eventCode,
+                    isCorrected: correctedEventIDs.contains(event.id)
                 ))
             }
         }
@@ -170,7 +179,10 @@ extension WaveformView {
                 code: event.code,
                 sourceFile: event.sourceFile,
                 startSeconds: event.centerTimeSeconds - halfWindow,
-                endSeconds: event.centerTimeSeconds + halfWindow
+                endSeconds: event.centerTimeSeconds + halfWindow,
+                isOcular: event.code == EyeArtifactKind.blink.eventCode
+                    || event.code == EyeArtifactKind.movement.eventCode,
+                isCorrected: correctedEventIDs.contains(event.id)
             ))
         }
 
@@ -178,7 +190,7 @@ extension WaveformView {
     }
 
     func segmentHealthEpochedArtifactIntervals(
-        sourceWindows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double)],
+        sourceWindows: [(id: String, code: String, sourceFile: String, startSeconds: Double, endSeconds: Double, isOcular: Bool, isCorrected: Bool)],
         samplingRate: Double,
         sampleCount: Int
     ) -> [SegmentHealthArtifactInterval] {
@@ -199,6 +211,8 @@ extension WaveformView {
                     id: "\(segment.id)-\(window.id)",
                     code: window.code,
                     sourceFile: window.sourceFile,
+                    isOcular: window.isOcular,
+                    isCorrected: window.isCorrected,
                     startSeconds: displayStartSeconds,
                     endSeconds: displayEndSeconds,
                     samplingRate: samplingRate,
@@ -216,6 +230,8 @@ extension WaveformView {
         id: String,
         code: String,
         sourceFile: String,
+        isOcular: Bool = false,
+        isCorrected: Bool = false,
         startSeconds: Double,
         endSeconds: Double,
         samplingRate: Double,
@@ -232,7 +248,9 @@ extension WaveformView {
             code: code,
             startSample: start,
             endSample: end,
-            sourceFile: sourceFile
+            sourceFile: sourceFile,
+            isOcular: isOcular,
+            isCorrected: isCorrected
         )
     }
 

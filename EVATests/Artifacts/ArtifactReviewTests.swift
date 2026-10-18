@@ -418,6 +418,71 @@ extension ArtifactReviewTests {
         #expect(groups.allSatisfy { $0.minimumCorrelation > 0.999 })
     }
 
+    @Test func polarityInvariantSpatialGroupsMergeGlobalSignAndRetainOrientation() async throws {
+        let shape = [-2.0, -1, 0, 0, 1, 2]
+        let examples = (0..<12).map { index in
+            let gain = Double(index + 1) * (index < 6 ? 1.0 : -1.0)
+            return spatialExample("e\(index)", values: shape.map { $0 * gain + 37.0 })
+        }
+        let hierarchy = try #require(await ArtifactSpatialGrouping.build(
+            examples: examples, polarityMode: .ignoreGlobalPolarity))
+        let groups = hierarchy.groups(minimumCorrelation: 0.98)
+        #expect(groups.count == 1)
+        let group = try #require(groups.first)
+        #expect(Set(group.eventIDs) == Set(examples.map(\.id)))
+        #expect(group.positiveOrientationCount == 6)
+        #expect(group.negativeOrientationCount == 6)
+        #expect(group.minimumCorrelation > 0.999)
+        #expect(!group.meanFeature.isEmpty, "The polarity-aligned centroid must not cancel to zero")
+        #expect(group.eventIDs.allSatisfy { abs(group.orientationSign(for: $0)) == 1 })
+    }
+
+    @Test func afniInspiredSpatialCostsArePolarityInvariantButKeepOneGlobalOrientation() async throws {
+        let values = [-4.0, -3, -2, -1, 1, 2, 3, 4]
+        let vector = try #require(ArtifactSpatialGrouping.normalized(values))
+        let inverse = vector.map { -$0 }
+        let layout = SensorLayout(name: "ring", positions: values.indices.map { index in
+            let angle = Double(index) * 2 * Double.pi / Double(values.count)
+            return SensorPosition(channelIndex: index, x: cos(angle), y: sin(angle))
+        })
+        let neighborhoods = ArtifactSpatialGrouping.localNeighborhoods(
+            channels: Array(values.indices), layout: layout)
+        #expect(neighborhoods.count == values.count)
+        for metric in ArtifactSpatialSimilarityMetric.allCases {
+            let score = ArtifactSpatialGrouping.similarityScore(vector, inverse,
+                polarityMode: .ignoreGlobalPolarity, metric: metric,
+                localNeighborhoods: neighborhoods)
+            #expect(abs(score - 1) < 1e-10, "\(metric.rawValue) should merge an exact global inversion")
+            let hierarchy = try #require(await ArtifactSpatialGrouping.build(examples: [
+                spatialExample("positive", values: values),
+                spatialExample("negative", values: values.map { -$0 })
+            ], layout: layout, polarityMode: .ignoreGlobalPolarity, similarityMetric: metric))
+            let groups = hierarchy.groups(minimumCorrelation: 0.98)
+            #expect(groups.count == 1)
+            #expect(groups.first?.similarityMetric == metric)
+        }
+
+        let nonlinear = try #require(ArtifactSpatialGrouping.normalized(values.map { $0 * abs($0) }))
+        let pearson = ArtifactSpatialGrouping.similarityScore(vector, nonlinear,
+            polarityMode: .ignoreGlobalPolarity, metric: .globalPearson)
+        let spearman = ArtifactSpatialGrouping.similarityScore(vector, nonlinear,
+            polarityMode: .ignoreGlobalPolarity, metric: .spearman)
+        #expect(spearman > pearson)
+        #expect(spearman > 0.999)
+
+        let regionalReversal = try #require(ArtifactSpatialGrouping.normalized(
+            Array(values.prefix(4)) + values.suffix(4).map { -$0 }))
+        let local = ArtifactSpatialGrouping.similarityScore(vector, regionalReversal,
+            polarityMode: .ignoreGlobalPolarity, metric: .localPearson,
+            localNeighborhoods: neighborhoods)
+        #expect(local < 0.95, "Local neighborhoods must not choose independent polarity flips")
+
+        let shuffled = try #require(ArtifactSpatialGrouping.normalized([-4.0, 4, -3, 3, -2, 2, -1, 1]))
+        let information = ArtifactSpatialGrouping.similarityScore(vector, shuffled,
+            polarityMode: .ignoreGlobalPolarity, metric: .informationComposite)
+        #expect(information < 0.85, "Distribution agreement must not erase electrode identity")
+    }
+
     @Test func spatialCutsAreNestedDeterministicAndDoNotLoseEvents() async throws {
         let examples = (0..<48).map { index in
             let angle = Double(index) / 48 * 2 * Double.pi
@@ -533,6 +598,13 @@ extension ArtifactReviewTests {
         opposite.examples[4].samples = opposite.examples[0].samples.map { -$0 }
         let signed = try #require(await ArtifactWaveformGrouping.build(analysis: opposite, family: family, windowSeconds: 0.5))
         #expect(signed.hierarchy.groups(minimumCorrelation: 0.90).contains { $0.eventIDs == ["wave-4"] })
+        var orientedFamily = family
+        orientedFamily.orientationSigns = [1, 1, 1, 1, -1]
+        orientedFamily.polarityMode = .ignoreGlobalPolarity
+        let oriented = try #require(await ArtifactWaveformGrouping.build(analysis: opposite,
+            family: orientedFamily, windowSeconds: 0.5, polarityMode: .orientToSpatialFamily))
+        #expect(oriented.hierarchy.groups(minimumCorrelation: 0.90).count == 1)
+        #expect(oriented.reorientedEventCount == 1)
         let noShift = try #require(await ArtifactWaveformGrouping.build(analysis: analysis, family: family, windowSeconds: 10))
         #expect(noShift.maximumAlignmentSeconds == 0)
     }

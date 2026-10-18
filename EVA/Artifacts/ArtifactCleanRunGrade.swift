@@ -114,6 +114,70 @@ nonisolated struct ArtifactCleanRunMetrics: Codable, Sendable, Equatable, Hashab
     static let touchTolerance = 1e-4
 }
 
+nonisolated extension ArtifactCleaningSummary {
+    /// Adds the compact event-aware evidence used by Segment Health and the PSA
+    /// Decision Matrix. This scans only the event windows that were already
+    /// cleaned and retains two scalar RMS values plus event IDs — never samples.
+    static func addingEventEvidence(
+        to summaries: [ArtifactCleaningSummary],
+        original: MFFSignalData,
+        cleaned: MFFSignalData,
+        artifacts: [DefinedArtifact],
+        excludedChannels: Set<Int>
+    ) -> [ArtifactCleaningSummary] {
+        guard original.samplingRate > 0,
+              original.data.count == cleaned.data.count,
+              let sampleCount = original.data.first?.count,
+              sampleCount > 0 else { return summaries }
+        let byID = Dictionary(uniqueKeysWithValues: artifacts.map { ($0.id, $0) })
+        return summaries.map { summary in
+            guard let artifact = byID[summary.artifactID] else { return summary }
+            var enriched = summary
+            enriched.correctedEventIDs = artifact.events.map(\.id)
+
+            let requestedChannels = artifact.selectedChannelIndices.isEmpty
+                ? Array(original.data.indices)
+                : artifact.selectedChannelIndices
+            let channels = requestedChannels.filter {
+                original.data.indices.contains($0)
+                    && cleaned.data.indices.contains($0)
+                    && !excludedChannels.contains($0)
+            }
+            guard !channels.isEmpty, !artifact.events.isEmpty else { return enriched }
+
+            var inputSquares = 0.0
+            var outputSquares = 0.0
+            var count = 0
+            for event in artifact.events {
+                let duration = artifact.usesVariableEventDuration
+                    ? max(event.durationSeconds ?? artifact.windowSizeSeconds, 1 / original.samplingRate)
+                    : max(artifact.windowSizeSeconds, 1 / original.samplingRate)
+                let half = duration / 2
+                let lower = max(Int(((event.centerTimeSeconds - half) * original.samplingRate).rounded(.down)), 0)
+                let upper = min(Int(((event.centerTimeSeconds + half) * original.samplingRate).rounded(.up)), sampleCount)
+                guard upper > lower else { continue }
+                for channel in channels {
+                    let before = original.data[channel]
+                    let after = cleaned.data[channel]
+                    guard before.count >= upper, after.count >= upper else { continue }
+                    for sample in lower..<upper {
+                        let x = Double(before[sample])
+                        let y = Double(after[sample])
+                        guard x.isFinite, y.isFinite else { continue }
+                        inputSquares += x * x
+                        outputSquares += y * y
+                        count += 1
+                    }
+                }
+            }
+            guard count > 0 else { return enriched }
+            enriched.inputRMSMicrovolts = Float(sqrt(inputSquares / Double(count)))
+            enriched.outputRMSMicrovolts = Float(sqrt(outputSquares / Double(count)))
+            return enriched
+        }
+    }
+}
+
 nonisolated enum ArtifactCleanRunGrade {
 
     // MARK: Bands (ArtifactCleanRunGradeMeasurementTests)

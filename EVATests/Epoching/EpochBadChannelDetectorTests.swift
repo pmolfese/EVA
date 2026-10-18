@@ -329,6 +329,118 @@ struct PSABuildJobEpochRejectionTests {
         #expect(result?.signal.data[0].contains(500) == true)
     }
 
+    @Test @MainActor func floatingReviewCanRescueExcludedTrialsWithoutMutatingSource() async throws {
+        let thresholds = EpochBadChannelThresholds()
+        var job = makeJob(thresholds: thresholds)
+        job.defersBadChannelDecisions = true
+        let built = try #require(await job.buildEpochs())
+        let originalData = built.signal.data
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: built.signal, segments: built.segments, thresholds: thresholds,
+            detectorSegments: [:], recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions, globallyBadChannels: [],
+            segmentHealthGoodnessScores: [100, 100]
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        model.setChannelDecision(.keep, channels: Set(0..<built.signal.numberOfChannels))
+        model.setEpochDecision(.keep, epoch: 0)
+        model.setEpochDecision(.reject, epoch: 1)
+        let excluded = try #require(model.snapshot().materializedResult())
+        #expect(excluded.segments.count == 1)
+        #expect(model.preparation.segments.count == 2)
+        #expect(model.preparation.sourceSignal.data == originalData)
+
+        model.setEpochDecision(.keep, epoch: 1)
+        let rescued = try #require(model.snapshot().materializedResult())
+        #expect(rescued.segments.count == 2)
+        #expect(rescued.signal.data == originalData)
+        #expect(model.preparation.sourceSignal.data == originalData)
+        let averaged = try #require(rescued.average(colorIndices: [:]))
+        #expect(averaged.segments.reduce(0) { $0 + $1.contributingEpochCount } == 2)
+    }
+
+    @Test @MainActor func waveformEditsOverrideEarlierMatrixChoicesAndStayLocal() async throws {
+        let thresholds = EpochBadChannelThresholds()
+        var job = makeJob(thresholds: thresholds)
+        job.defersBadChannelDecisions = true
+        let built = try #require(await job.buildEpochs())
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: built.signal, segments: built.segments, thresholds: thresholds,
+            detectorSegments: [:], recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions, globallyBadChannels: [],
+            segmentHealthGoodnessScores: [100, 100]
+        )
+        let model = PSADecisionMatrixModel(preparation: preparation)
+        model.setChannelDecision(.keep, channels: Set(0..<built.signal.numberOfChannels))
+        model.setEpochDecision(.keep, epoch: 0)
+        model.setEpochDecision(.keep, epoch: 1)
+        #expect(model.keptEpochCount == 2) // Warm the shared decision cache.
+
+        model.applyWaveformQualityLabel(.bad, epoch: 0)
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        #expect(model.keptEpochCount == 1)
+        #expect(model.categorySummaries.reduce(0) { $0 + $1.kept } == 1)
+        model.setEpochDecision(.keep, epoch: 0) // A later matrix edit wins.
+        #expect(model.resolvedEpochDecision(0) == .keep)
+        model.applyWaveformQualityLabel(.bad, epoch: 0) // So does a later waveform edit.
+        #expect(model.resolvedEpochDecision(0) == .reject)
+        model.applyWaveformQualityLabel(.good, epoch: 0)
+        #expect(model.resolvedEpochDecision(0) == .keep)
+        #expect(model.keptEpochCount == 2)
+        model.applyWaveformQualityLabel(nil, epoch: 0)
+        #expect(model.epochOverrides[0] == nil)
+        #expect(!model.trustedEpochHealth.contains(0))
+
+        let cell = PSADecisionCellID(channelIndex: 1, epochIndex: 1)
+        model.setCellDecision(.interpolate, for: cell)
+        #expect(model.resolvedCellDecision(cell) == .interpolate)
+        #expect(model.resolvedCellDecision(.init(channelIndex: 1, epochIndex: 0)) == .keep)
+        #expect(model.preparation.sourceSignal.data == built.signal.data)
+        model.setCellDecision(.keep, for: cell)
+        #expect(model.resolvedCellDecision(cell) == .keep)
+        model.setCellDecision(.automatic, for: .init(channelIndex: 0, epochIndex: 0))
+        model.recordingInterpolatedChannels = [0, 2]
+        #expect(model.resolvedCellDecision(.init(channelIndex: 0, epochIndex: 0)) == .keep)
+        #expect(model.isChannelInterpolatedAcrossAllEpochs(2))
+        #expect(model.resolvedCellDecision(.init(channelIndex: 2, epochIndex: 1)) == .keep)
+        // An already-applied recording repair is display provenance, not an
+        // instruction to interpolate those samples a second time.
+        let materialized = try #require(model.snapshot().materializedResult())
+        #expect(materialized.signal.data[2] == built.signal.data[2])
+    }
+
+    @Test @MainActor func rebuildingFloatingReviewPreservesDecisionsByTrialIdentity() async throws {
+        let thresholds = EpochBadChannelThresholds()
+        var job = makeJob(thresholds: thresholds)
+        job.defersBadChannelDecisions = true
+        let built = try #require(await job.buildEpochs())
+        let preparation = PSADecisionMatrixPreparation.make(
+            signal: built.signal, segments: built.segments, thresholds: thresholds,
+            detectorSegments: [:], recordingChannelGoodness: [:],
+            electrodePositions: job.electrodePositions, globallyBadChannels: [],
+            segmentHealthGoodnessScores: [100, 100]
+        )
+        let original = PSADecisionMatrixModel(preparation: preparation)
+        original.channelOrder = .goodness
+        original.epochOrder = .category
+        original.setEpochDecision(.reject, epoch: 0)
+        original.setCellDecision(.interpolate, for: .init(channelIndex: 1, epochIndex: 1))
+        var reordered = preparation
+        reordered.segments.swapAt(0, 1)
+        let restored = PSADecisionMatrixModel(preparation: reordered)
+        restored.restoreManualDecisions(from: original)
+        #expect(restored.epochOverrides[1] == .reject)
+        #expect(restored.epochOverrides[0] == nil)
+        #expect(restored.cellOverrides[.init(channelIndex: 1, epochIndex: 0)] == .interpolate)
+        #expect(restored.channelOrder == .goodness)
+        #expect(restored.epochOrder == .category)
+        #expect(!preparation.matchesCurrentReviewInputs(
+            signal: built.signal, segments: reordered.segments,
+            averageReference: false, baselineCorrect: false,
+            globallyBadChannels: [], thresholds: thresholds
+        ))
+    }
+
     @Test @MainActor func explicitMatrixDecisionsOverrideAutomaticThresholds() async {
         let thresholds = EpochBadChannelThresholds(
             minMicrovolts: -100, maxMicrovolts: 100,

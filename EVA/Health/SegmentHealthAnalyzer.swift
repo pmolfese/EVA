@@ -95,6 +95,10 @@ nonisolated struct SegmentHealthArtifactInterval: Codable, Identifiable, Sendabl
     var startSample: Int
     var endSample: Int
     var sourceFile: String
+    /// Optional for compatibility with data written before event-aware cleaning
+    /// provenance existed.
+    var isOcular: Bool? = nil
+    var isCorrected: Bool? = nil
 
     var id: String { artifactID }
 }
@@ -597,7 +601,9 @@ nonisolated enum SegmentHealthAnalyzer {
             artifactOverlapFraction: artifacts.isAssessed && segmentSampleCount > 0
                 ? Double(min(artifactOverlap.samples, segmentSampleCount)) / Double(segmentSampleCount)
                 : (artifacts.isAssessed ? 0 : nil),
-            artifactCount: artifacts.isAssessed ? artifactOverlap.count : nil
+            artifactCount: artifacts.isAssessed ? artifactOverlap.count : nil,
+            uncorrectedArtifactCount: artifacts.isAssessed ? artifactOverlap.uncorrectedCount : nil,
+            uncorrectedOcularArtifactCount: artifacts.isAssessed ? artifactOverlap.uncorrectedOcularCount : nil
         )
     }
 
@@ -697,15 +703,27 @@ nonisolated enum SegmentHealthAnalyzer {
         }
 
         if base.artifactEnabled {
-            if let artifactCount = summary.artifactCount {
+            if let artifactCount = summary.uncorrectedArtifactCount {
+                let ocularCount = summary.uncorrectedOcularArtifactCount ?? 0
+                let ordinarilyWeightedCount = max(artifactCount - ocularCount, 0)
                 metrics.append(metric(
                     name: "Labeled Artifacts",
-                    score: artifactCount == 0 ? 1.0 : 0.0,
+                    score: ordinarilyWeightedCount == 0 ? 1.0 : 0.0,
                     detail: artifactCount == 0
-                        ? "No labeled artifacts in segment"
-                        : "Contains \(artifactCount) labeled artifact\(artifactCount == 1 ? "" : "s")",
+                        ? "No uncorrected labeled artifacts in segment"
+                        : ocularCount == artifactCount
+                            ? "Contains \(ocularCount) uncorrected ocular artifact\(ocularCount == 1 ? "" : "s"); handled by the health cap"
+                            : "Contains \(artifactCount) uncorrected labeled artifact\(artifactCount == 1 ? "" : "s")",
                     weight: base.artifactWeight
                 ))
+                if ocularCount > 0 {
+                    metrics.append(metric(
+                        name: "Uncorrected Ocular Artifact",
+                        score: 0,
+                        detail: "Contains \(ocularCount) uncorrected blink or eye movement; Segment Health is capped at 50%",
+                        weight: 0
+                    ))
+                }
             } else {
                 metrics.append(metric(
                     name: "Labeled Artifacts",
@@ -726,8 +744,10 @@ nonisolated enum SegmentHealthAnalyzer {
         let weightedTotal = assessed.reduce(0) { $0 + $1.score * $1.weight }
         let weightTotal = assessed.reduce(0) { $0 + $1.weight }
         let goodFraction = weightTotal > 0 ? weightedTotal / weightTotal : 0
-        let percentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
-        let grade = HealthScoring.grade(for: goodFraction)
+        let uncappedPercentage = Int((min(max(goodFraction, 0), 1) * 100).rounded())
+        let percentage = (summary.uncorrectedOcularArtifactCount ?? 0) > 0
+            ? min(uncappedPercentage, 50) : uncappedPercentage
+        let grade = HealthScoring.grade(for: Double(percentage) / 100)
         let weakMetrics = assessed
             .filter { $0.score < 0.78 }
             .sorted { $0.score < $1.score }
@@ -815,17 +835,23 @@ nonisolated enum SegmentHealthAnalyzer {
     private static func artifactOverlapSamples(
         in segmentRange: ClosedRange<Int>,
         artifactIntervals: [SegmentHealthArtifactInterval]
-    ) -> (samples: Int, count: Int) {
+    ) -> (samples: Int, count: Int, uncorrectedCount: Int, uncorrectedOcularCount: Int) {
         var overlapSamples = 0
         var overlapCount = 0
+        var uncorrectedCount = 0
+        var uncorrectedOcularCount = 0
         for interval in artifactIntervals {
             let lower = max(segmentRange.lowerBound, interval.startSample)
             let upper = min(segmentRange.upperBound, interval.endSample)
             guard upper >= lower else { continue }
             overlapSamples += upper - lower + 1
             overlapCount += 1
+            if interval.isCorrected != true {
+                uncorrectedCount += 1
+                if interval.isOcular == true { uncorrectedOcularCount += 1 }
+            }
         }
-        return (overlapSamples, overlapCount)
+        return (overlapSamples, overlapCount, uncorrectedCount, uncorrectedOcularCount)
     }
 
 }
@@ -850,4 +876,6 @@ private nonisolated struct SegmentSummary: Sendable {
     var driftRMS: Double = 0
     var artifactOverlapFraction: Double?
     var artifactCount: Int?
+    var uncorrectedArtifactCount: Int?
+    var uncorrectedOcularArtifactCount: Int?
 }

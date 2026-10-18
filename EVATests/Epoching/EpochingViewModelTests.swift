@@ -27,12 +27,43 @@ struct EpochingViewModelTests {
         #expect(vm.skipEyeBlinks)
         #expect(vm.skipEyeMovements)
         #expect(vm.skipIfContainsArtifact)
+        #expect(vm.artifactRejectionPolicy == .uncorrected)
         #expect(vm.escalatesBadChannelsToGlobal)
         #expect(vm.epochedSignal == nil)
         #expect(vm.epochSegments.isEmpty)
         #expect(!vm.isAveraged)
         #expect(vm.showsNoiseBand)
         #expect(!vm.showsButterflyPlot)
+    }
+
+    @MainActor
+    @Test func psaReviewRoutingPreservesDirectAverageAndOptionalReviewSheet() {
+        let vm = EpochingViewModel(store: RecordingStore())
+        for usesMatrix in [false, true] {
+            vm.averageOnApply = false
+            vm.usesDecisionMatrix = usesMatrix
+            #expect(vm.defersPSADecisionsForReview)
+            #expect(!vm.presentsPSADecisionMatrixSheet)
+        }
+        vm.averageOnApply = true
+        vm.usesDecisionMatrix = false
+        #expect(!vm.defersPSADecisionsForReview)
+        #expect(!vm.presentsPSADecisionMatrixSheet)
+        vm.usesDecisionMatrix = true
+        #expect(vm.defersPSADecisionsForReview)
+        #expect(vm.presentsPSADecisionMatrixSheet)
+    }
+
+    @MainActor
+    @Test func artifactRejectionPolicyRoundTrips() {
+        let source = EpochingViewModel(store: RecordingStore())
+        source.artifactRejectionPolicy = .any
+        let parameters = source.parameters
+        #expect(parameters["artifactRejectionPolicy"] == PSAArtifactRejectionPolicy.any.rawValue)
+
+        let restored = EpochingViewModel(store: RecordingStore())
+        restored.apply(parameters: parameters)
+        #expect(restored.artifactRejectionPolicy == .any)
     }
 
     @MainActor
