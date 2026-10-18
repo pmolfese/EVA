@@ -104,6 +104,9 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
     var referenceChannelsByEpoch: [[Int]]
     var appliesAverageReference: Bool
     var appliesBaselineCorrection: Bool
+    /// Geometry-only value computed once, rather than once per epoch decision
+    /// (or, historically, once per painted cell).
+    var spatialAdjacencyRadius: Double
     /// Abbreviated per-channel/per-epoch health. Unlike the absolute extrema
     /// detector, this uses robust within-epoch cross-channel baselines.
     var localFastGoodnessScores: [[Int]]
@@ -225,6 +228,7 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
             referenceChannelsByEpoch: scanRows.map(\.referenceChannels),
             appliesAverageReference: averageReference,
             appliesBaselineCorrection: baselineCorrect,
+            spatialAdjacencyRadius: psaSpatialAdjacencyRadius(positions: electrodePositions),
             localFastGoodnessScores: localScores,
             epochGoodnessScores: epochGoodnessScores,
             epochSetChannelGoodnessScores: epochSetChannelGoodnessScores,
@@ -234,26 +238,6 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
             electrodePositions: electrodePositions,
             globallyBadChannels: globallyBadChannels,
             suggestedRejectedEpochReasons: suggestedRejectedEpochReasons
-        )
-    }
-
-    /// Recreates only the selected trace. The matrix therefore retains one raw
-    /// signal plus compact evidence instead of a second full processed signal.
-    func reviewedWaveform(channel: Int, epoch: Int) -> [Float] {
-        guard segments.indices.contains(epoch), sourceSignal.data.indices.contains(channel) else { return [] }
-        let segment = segments[epoch]
-        let range = segment.startSample..<(segment.endSample + 1)
-        let referenceChannels = referenceChannelsByEpoch.indices.contains(epoch)
-            ? referenceChannelsByEpoch[epoch] : []
-        let mean = appliesAverageReference
-            ? Self.referenceMean(signal: sourceSignal, range: range, channels: referenceChannels)
-            : nil
-        return Self.reviewedSamples(
-            signal: sourceSignal,
-            segment: segment,
-            channel: channel,
-            referenceMean: mean,
-            baselineCorrect: appliesBaselineCorrection
         )
     }
 
@@ -469,7 +453,8 @@ private nonisolated func psaInterpolationFeasibilityReason(
     channelCount: Int,
     positions: [Int: SIMD3<Double>],
     globallyBad: Set<Int>,
-    thresholds: EpochBadChannelThresholds
+    thresholds: EpochBadChannelThresholds,
+    adjacencyRadius: Double
 ) -> String? {
     guard !bad.isEmpty else { return nil }
     let missingPositions = bad.filter { positions[$0] == nil }
@@ -491,13 +476,6 @@ private nonisolated func psaInterpolationFeasibilityReason(
         positions[channel].map { (channel, $0) }
     }
     guard positioned.count > 1 else { return nil }
-    let allPositions = Array(positions.values)
-    let nearestDistances = allPositions.compactMap { point -> Double? in
-        allPositions.lazy.map { psaSpatialDistance(point, $0) }
-            .filter { $0 > 1e-9 }.min()
-    }.sorted()
-    let adjacencyRadius = nearestDistances.isEmpty
-        ? 0.25 : nearestDistances[nearestDistances.count / 2] * 1.75
     var remaining = Set(positioned.map(\.0))
     var largest = 0
     while let seed = remaining.first {
@@ -520,6 +498,18 @@ private nonisolated func psaInterpolationFeasibilityReason(
     return largest >= clusterLimit
         ? "A contiguous cluster of \(largest) bad channels is too broad for reliable interpolation"
         : nil
+}
+
+private nonisolated func psaSpatialAdjacencyRadius(
+    positions: [Int: SIMD3<Double>]
+) -> Double {
+    let allPositions = Array(positions.values)
+    let nearestDistances = allPositions.compactMap { point -> Double? in
+        allPositions.lazy.map { psaSpatialDistance(point, $0) }
+            .filter { $0 > 1e-9 }.min()
+    }.sorted()
+    return nearestDistances.isEmpty
+        ? 0.25 : nearestDistances[nearestDistances.count / 2] * 1.75
 }
 
 private nonisolated func psaSpatialDistance(
@@ -547,8 +537,6 @@ final class PSADecisionMatrixModel {
     var selectedChannels = Set<Int>()
     var selectedEpochs = Set<Int>()
     var suggestedRejectedEpochReasons: [Int: [String]]
-    @ObservationIgnored private var cachedWaveformID: PSADecisionCellID?
-    @ObservationIgnored private var cachedWaveformSamples: [Float] = []
 
     init(preparation: PSADecisionMatrixPreparation) {
         self.preparation = preparation
@@ -688,17 +676,9 @@ final class PSADecisionMatrixModel {
             channelCount: preparation.signal.numberOfChannels,
             positions: preparation.electrodePositions,
             globallyBad: preparation.globallyBadChannels,
-            thresholds: preparation.thresholds
+            thresholds: preparation.thresholds,
+            adjacencyRadius: preparation.spatialAdjacencyRadius
         )
-    }
-
-    func waveformSamples(for id: PSADecisionCellID) -> [Float] {
-        if cachedWaveformID == id { return cachedWaveformSamples }
-        cachedWaveformSamples = preparation.reviewedWaveform(
-            channel: id.channelIndex, epoch: id.epochIndex
-        )
-        cachedWaveformID = id
-        return cachedWaveformSamples
     }
 
     var keptEpochCount: Int { preparation.segments.indices.filter { resolvedEpochDecision($0) == .keep }.count }
@@ -812,7 +792,8 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
             channelCount: preparation.signal.numberOfChannels,
             positions: preparation.electrodePositions,
             globallyBad: preparation.globallyBadChannels,
-            thresholds: preparation.thresholds
+            thresholds: preparation.thresholds,
+            adjacencyRadius: preparation.spatialAdjacencyRadius
         ) != nil { return .reject }
         let goodness = preparation.epochGoodnessScores.indices.contains(epoch)
             ? preparation.epochGoodnessScores[epoch] : 100
@@ -912,6 +893,7 @@ struct PSADecisionMatrixView: View {
     var onAverage: () -> Void
     @State private var dragMode: PSAMatrixDragMode?
     @State private var showsSelectionPopover = false
+    @State private var matrixScrollOffset = CGPoint.zero
 
     private let cellWidth: CGFloat = 28
     private let rowHeight: CGFloat = 24
@@ -1035,7 +1017,9 @@ struct PSADecisionMatrixView: View {
     private var matrix: some View {
         GeometryReader { _ in
             ScrollView([.horizontal, .vertical]) {
-                Canvas { context, _ in drawMatrix(context: &context) }
+                Canvas(opaque: true, rendersAsynchronously: true) { context, _ in
+                    drawMatrix(context: &context)
+                }
                     .frame(
                         width: leftWidth + CGFloat(model.orderedEpochs.count) * cellWidth,
                         height: headerHeight + CGFloat(model.orderedChannels.count) * rowHeight
@@ -1052,6 +1036,11 @@ struct PSADecisionMatrixView: View {
                             }
                     )
             }
+            .onScrollGeometryChange(for: CGPoint.self) { geometry in
+                geometry.contentOffset
+            } action: { _, offset in
+                matrixScrollOffset = offset
+            }
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         }
     }
@@ -1059,80 +1048,143 @@ struct PSADecisionMatrixView: View {
     private func drawMatrix(context: inout GraphicsContext) {
         let channels = model.orderedChannels
         let epochs = model.orderedEpochs
-        context.fill(Path(CGRect(x: 0, y: 0, width: leftWidth, height: headerHeight + CGFloat(channels.count) * rowHeight)),
-                     with: .color(.secondary.opacity(0.07)))
-        context.draw(Text(model.channelHealthScopeLabel).font(.caption.weight(.semibold)),
-                     at: CGPoint(x: 76, y: 16), anchor: .center)
-        for (column, epoch) in epochs.enumerated() {
+        guard !channels.isEmpty, !epochs.isEmpty else { return }
+        let contentBounds = CGRect(
+            x: 0, y: 0,
+            width: leftWidth + CGFloat(epochs.count) * cellWidth,
+            height: headerHeight + CGFloat(channels.count) * rowHeight
+        )
+        let clipped = context.clipBoundingRect.intersection(contentBounds)
+        let visible = clipped.isNull || !clipped.minX.isFinite ? contentBounds : clipped
+        let firstColumn = max(0, Int(floor((visible.minX - leftWidth) / cellWidth)) - 1)
+        let lastColumn = min(epochs.count - 1, Int(ceil((visible.maxX - leftWidth) / cellWidth)) + 1)
+        let firstRow = max(0, Int(floor((visible.minY - headerHeight) / rowHeight)) - 1)
+        let lastRow = min(channels.count - 1, Int(ceil((visible.maxY - headerHeight) / rowHeight)) + 1)
+        let columnRange = firstColumn...max(firstColumn, lastColumn)
+        let rowRange = firstRow...max(firstRow, lastRow)
+        let epochDecisions = epochs.map(model.resolvedEpochDecision)
+
+        context.fill(Path(visible), with: .color(Color(nsColor: .controlBackgroundColor)))
+        var greenCells = Path()
+        var yellowCells = Path()
+        var redCells = Path()
+        var selectedCells = Path()
+        var rejectedCells = Path()
+        var overrideOutlines = Path()
+        var selectedOutline = Path()
+
+        for row in rowRange {
+            let y = headerHeight + CGFloat(row) * rowHeight
+            let channel = channels[row]
+            if model.selectedChannels.contains(channel) {
+                context.fill(Path(CGRect(x: visible.minX, y: y, width: visible.width, height: rowHeight)),
+                             with: .color(.accentColor.opacity(0.12)))
+            }
+            for column in columnRange {
+                let epoch = epochs[column]
+                let id = PSADecisionCellID(channelIndex: channel, epochIndex: epoch)
+                let x = leftWidth + CGFloat(column) * cellWidth
+                let rect = CGRect(x: x + 1, y: y + 1, width: cellWidth - 2, height: rowHeight - 2)
+                let goodness = model.integratedGoodness(channel: channel, epoch: epoch)
+                switch goodness {
+                case 75...: greenCells.addRect(rect)
+                case 45..<75: yellowCells.addRect(rect)
+                default: redCells.addRect(rect)
+                }
+                if model.selectedChannels.contains(channel) || model.selectedEpochs.contains(epoch) {
+                    selectedCells.addRect(rect)
+                }
+                if model.cellOverrides[id] != nil {
+                    overrideOutlines.addRect(rect.insetBy(dx: 1, dy: 1))
+                }
+                if model.selectedCell == id {
+                    selectedOutline.addRect(rect.insetBy(dx: 0.5, dy: 0.5))
+                }
+                if epochDecisions[column] == .reject {
+                    rejectedCells.addRect(rect)
+                }
+            }
+        }
+        context.fill(greenCells, with: .color(.green.opacity(0.86)))
+        context.fill(yellowCells, with: .color(.yellow.opacity(0.86)))
+        context.fill(redCells, with: .color(.red.opacity(0.86)))
+        context.fill(selectedCells, with: .color(.accentColor.opacity(0.18)))
+        context.fill(rejectedCells, with: .color(.black.opacity(0.18)))
+        context.stroke(overrideOutlines, with: .color(.primary), lineWidth: 2)
+        context.stroke(selectedOutline, with: .color(.accentColor), lineWidth: 3)
+
+        // Pin epoch identity to the top of the visible viewport.
+        let pinnedY = visible.minY
+        context.fill(
+            Path(CGRect(x: visible.minX, y: pinnedY, width: visible.width, height: headerHeight)),
+            with: .color(Color(nsColor: .controlBackgroundColor))
+        )
+        for column in columnRange {
+            let epoch = epochs[column]
             let x = leftWidth + CGFloat(column) * cellWidth
+            guard x + cellWidth >= visible.minX + leftWidth else { continue }
             let goodness = model.epochGoodness(epoch)
             let category = String(model.preparation.segments[epoch].category.prefix(3))
             context.draw(Text(category).font(.system(size: 8)).foregroundColor(.secondary),
-                         at: CGPoint(x: x + cellWidth / 2, y: 15), anchor: .center)
-            context.fill(Path(CGRect(x: x + 1, y: 30, width: cellWidth - 2, height: 18)),
-                         with: .color(healthColor(goodness).opacity(0.9)))
-            if model.resolvedEpochDecision(epoch) == .reject {
-                let badge = CGRect(x: x + 1, y: 30, width: cellWidth - 2, height: 18)
+                         at: CGPoint(x: x + cellWidth / 2, y: pinnedY + 15), anchor: .center)
+            let badge = CGRect(x: x + 1, y: pinnedY + 30, width: cellWidth - 2, height: 18)
+            context.fill(Path(badge), with: .color(healthColor(goodness).opacity(0.9)))
+            if epochDecisions[column] == .reject {
                 context.fill(Path(badge), with: .color(.black.opacity(0.28)))
                 context.draw(Text("×").font(.caption.bold()).foregroundColor(.white),
                              at: CGPoint(x: badge.midX, y: badge.midY), anchor: .center)
             }
-            if model.selectedEpochs.contains(epoch) {
-                context.stroke(
-                    Path(CGRect(x: x + 0.5, y: 0.5, width: cellWidth - 1, height: headerHeight + CGFloat(channels.count) * rowHeight - 1)),
-                    with: .color(.accentColor), lineWidth: 2
-                )
-            }
             context.draw(Text("\(epoch + 1)").font(.system(size: 9, design: .monospaced)),
-                         at: CGPoint(x: x + cellWidth / 2, y: 60), anchor: .center)
+                         at: CGPoint(x: x + cellWidth / 2, y: pinnedY + 60), anchor: .center)
         }
-        for (row, channel) in channels.enumerated() {
+
+        // Pin channel identity and overall health to the left edge.
+        let pinnedX = visible.minX
+        context.fill(
+            Path(CGRect(x: pinnedX, y: visible.minY, width: leftWidth, height: visible.height)),
+            with: .color(Color(nsColor: .controlBackgroundColor))
+        )
+        for row in rowRange {
+            let channel = channels[row]
             let y = headerHeight + CGFloat(row) * rowHeight
             let name = model.preparation.signal.channelNames?.indices.contains(channel) == true
                 ? model.preparation.signal.channelNames?[channel] ?? "Ch \(channel + 1)"
                 : "Ch \(channel + 1)"
             let overall = model.displayedChannelGoodness(channel)
             if model.selectedChannels.contains(channel) {
-                context.fill(Path(CGRect(x: 0, y: y, width: leftWidth + CGFloat(epochs.count) * cellWidth, height: rowHeight)),
+                context.fill(Path(CGRect(x: pinnedX, y: y, width: leftWidth, height: rowHeight)),
                              with: .color(.accentColor.opacity(0.12)))
             }
             context.draw(Text(name).font(.system(size: 11, design: .monospaced)),
-                         at: CGPoint(x: 8, y: y + rowHeight / 2), anchor: .leading)
-            context.fill(Path(CGRect(x: 104, y: y + 4, width: 42, height: rowHeight - 8)),
+                         at: CGPoint(x: pinnedX + 8, y: y + rowHeight / 2), anchor: .leading)
+            context.fill(Path(CGRect(x: pinnedX + 104, y: y + 4, width: 42, height: rowHeight - 8)),
                          with: .color(healthColor(overall)))
             context.draw(Text("\(overall)%").font(.system(size: 9).monospacedDigit()).foregroundColor(.white),
-                         at: CGPoint(x: 125, y: y + rowHeight / 2), anchor: .center)
-            for (column, epoch) in epochs.enumerated() {
-                let id = PSADecisionCellID(channelIndex: channel, epochIndex: epoch)
-                let x = leftWidth + CGFloat(column) * cellWidth
-                let rect = CGRect(x: x + 1, y: y + 1, width: cellWidth - 2, height: rowHeight - 2)
-                let goodness = model.integratedGoodness(channel: channel, epoch: epoch)
-                context.fill(Path(rect), with: .color(healthColor(goodness).opacity(0.86)))
-                if model.selectedChannels.contains(channel) || model.selectedEpochs.contains(epoch) {
-                    context.fill(Path(rect), with: .color(.accentColor.opacity(0.18)))
-                }
-                if model.cellOverrides[id] != nil {
-                    context.stroke(Path(rect.insetBy(dx: 1, dy: 1)), with: .color(.primary), lineWidth: 2)
-                }
-                if model.selectedCell == id {
-                    context.stroke(Path(rect.insetBy(dx: 0.5, dy: 0.5)), with: .color(.accentColor), lineWidth: 3)
-                }
-                if model.resolvedEpochDecision(epoch) == .reject {
-                    context.fill(Path(rect), with: .color(.black.opacity(0.18)))
-                }
-            }
+                         at: CGPoint(x: pinnedX + 125, y: y + rowHeight / 2), anchor: .center)
         }
+
+        // The upper-left label remains visible at both scroll extremes.
+        context.fill(
+            Path(CGRect(x: pinnedX, y: pinnedY, width: leftWidth, height: headerHeight)),
+            with: .color(Color(nsColor: .controlBackgroundColor))
+        )
+        context.draw(Text(model.channelHealthScopeLabel).font(.caption.weight(.semibold)),
+                     at: CGPoint(x: pinnedX + 76, y: pinnedY + 16), anchor: .center)
     }
 
     private func handleMatrixDrag(_ value: DragGesture.Value) {
         let channels = model.orderedChannels
         let epochs = model.orderedEpochs
+        let pinnedX = max(matrixScrollOffset.x, 0)
+        let pinnedY = max(matrixScrollOffset.y, 0)
         if dragMode == nil {
-            if value.startLocation.x < leftWidth, value.startLocation.y >= headerHeight {
+            if value.startLocation.x < pinnedX + leftWidth,
+               value.startLocation.y >= pinnedY + headerHeight {
                 let row = Int((value.startLocation.y - headerHeight) / rowHeight)
                 guard channels.indices.contains(row) else { return }
                 dragMode = .channels(anchorRow: row)
-            } else if value.startLocation.y < headerHeight, value.startLocation.x >= leftWidth {
+            } else if value.startLocation.y < pinnedY + headerHeight,
+                      value.startLocation.x >= pinnedX + leftWidth {
                 let column = Int((value.startLocation.x - leftWidth) / cellWidth)
                 guard epochs.indices.contains(column) else { return }
                 dragMode = .epochs(anchorColumn: column)
@@ -1179,9 +1231,6 @@ struct PSADecisionMatrixView: View {
                         Label(reason, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption).foregroundStyle(.orange)
                     }
-                    waveform(id)
-                        .frame(height: 110)
-                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
                     evidenceText(id)
                     Picker("Cell decision", selection: Binding(
                         get: { model.cellOverrides[id] ?? .automatic },
@@ -1283,24 +1332,6 @@ struct PSADecisionMatrixView: View {
             Text(raw.map { String(format: "min %.1f µV · max %.1f µV\nslope %.1f µV/sample · acceleration %.1f", $0.minimumMicrovolts, $0.maximumMicrovolts, $0.maximumSlopeMicrovoltsPerSample, $0.maximumAccelerationMicrovoltsPerSample) } ?? "Unavailable")
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
-    }
-
-    private func waveform(_ id: PSADecisionCellID) -> some View {
-        Canvas { context, size in
-            let values = model.waveformSamples(for: id)
-            guard values.count > 1, let low = values.min(), let high = values.max() else { return }
-            let span = max(high - low, 1e-6)
-            var path = Path()
-            for index in values.indices {
-                let point = CGPoint(
-                    x: CGFloat(index) / CGFloat(values.count - 1) * size.width,
-                    y: size.height - CGFloat((values[index] - low) / span) * size.height
-                )
-                index == 0 ? path.move(to: point) : path.addLine(to: point)
-            }
-            context.stroke(path, with: .color(.accentColor), lineWidth: 1.25)
-        }
-        .padding(6)
     }
 
     private var footer: some View {

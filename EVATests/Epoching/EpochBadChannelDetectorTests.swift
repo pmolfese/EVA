@@ -444,9 +444,7 @@ struct PSABuildJobEpochRejectionTests {
         }
 
         #expect(preparation.sourceSignal.data == sourceSignal.data)
-        let first = result.segments[0]
-        let rawWaveform = Array(sourceSignal.data[0][first.startSample...first.endSample])
-        #expect(preparation.reviewedWaveform(channel: 0, epoch: 0) != rawWaveform)
+        #expect(preparation.evidence[0][0] != preparation.rawEvidence[0][0])
         #expect(preparation.rawEvidence.count == result.segments.count)
         let materialized = try #require(model.snapshot().materializedResult())
         #expect(materialized.signal.data == sourceSignal.data)
