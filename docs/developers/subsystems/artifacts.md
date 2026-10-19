@@ -170,21 +170,44 @@ independently optimized local contrast. Their cohesion values are not calibrated
 to be numerically interchangeable, so the UI labels non-Pearson values
 as `score` and keeps the results preview-only.
 
-The Broader/Finer slider cuts this tree at minimum selected centroid score
-0.65–0.98 (default 0.85); terminal groups retain their actual reported cohesion.
-Representative events are closest to the centroid. Cards are lazy-rendered, and
-filtering a preview preserves the existing eighteen-example grid and waveform
-scores. A three-entry actor cache retains vectors and trees keyed by the review
-analysis key plus polarity and comparison modes. Revision, candidates, definition
-channels/window/taper/reference, excluded channels, and mapped sensor IDs also
-invalidate that key. Cancellation and
-key checks prevent stale publication; no partial tree is cached. Cached cuts
-only traverse nodes and do not touch signal samples. Spatial previews cannot yet
-split classes or modify choices/replay/cleaning; existing waveform-band splitting
-remains available.
+The grouping layer supports two cuts over the same cached hierarchy. **Cohesion**
+cuts at a selected centroid score from 0.50–0.98. It can use the minimum member
+score or the interpolated 10th percentile; every materialized group stores
+minimum, p10, and median fit. **Target count** greedily splits the tree to K seeds,
+then performs up to eight spherical/projective centroid-reassignment passes.
+Representative members are fixed as anchors so no requested cluster disappears.
+The suggested K is the largest drop between consecutive weighted-cohesion gains,
+bounded by the requested maximum. It is a UI heuristic, not model selection.
+Both modes apply a separate outlier floor after assignment; below-floor members
+join the cut's unassigned IDs rather than being forced into a family.
 
-`ArtifactWaveformGrouping` adds a second, strictly nested hierarchy for a selected
-spatial node. It reuses finite complete-core resampled profiles from review,
+Spatial nodes now retain normalized centroids. Centroid cards use a single scale
+across the current cut. Projective centroids get a display-only deterministic
+sign: the upper layout quartile is made positive when available, falling back to
+the largest-magnitude sensor. Representative cards retain measured amplitude and
+sign. Cards report orientation counts relative to the displayed centroid. The UI
+also computes the closest centroid pair over the visible cut. This is quadratic
+only in the number of displayed groups, not the event count.
+
+Representative events remain closest to the centroid. Cards are lazy-rendered,
+and filtering a preview preserves the existing eighteen-example grid and waveform
+scores. Shift selects a contiguous card range; Control/Command toggles individual
+cards. A preview merge rebuilds a centroid/statistics record from the union of
+selected event IDs without mutating the cached tree. It can consequently feed one
+nested waveform hierarchy. Changing a cut invalidates these session-only merges.
+
+A three-entry actor cache retains vectors and trees keyed by the review analysis
+key plus polarity and comparison modes. Revision, candidates, definition
+channels/window/taper/reference, excluded channels, and mapped sensor IDs also
+invalidate that key. Cancellation and key checks prevent stale publication; no
+partial tree is cached. Cached cohesion cuts only traverse nodes; target refinement
+touches normalized feature vectors but never signal samples. Grouping, filtering,
+and preview merges do not modify choices or replay. A separately confirmed class
+move does, as described below.
+
+`ArtifactWaveformGrouping` adds a second hierarchy nested inside one selected
+spatial node or one session-only preview-merged family. It reuses finite
+complete-core resampled profiles from review,
 selects up to five definition channels by summed per-event energy fractions,
 and resamples to at most 64 points per channel. The chosen channel set is fixed
 for the family. Each candidate aligns to the spatial representative's usable
@@ -207,7 +230,7 @@ retain normalized centroids for cheap mean/representative preview rendering;
 signed spatial nodes can omit them, while projective spatial nodes retain their
 canonical centroids so each event's orientation remains recoverable. A separate
 six-entry actor cache is keyed by review analysis key plus spatial node ID.
-Spatial granularity chooses the parent node, while waveform granularity only cuts
+Spatial granularity chooses the parent family, while waveform granularity only cuts
 its cached tree. Detached tasks use cancellation and key guards before cache/UI
 publication.
 Subgroup filters intersect spatial membership and cannot cross families.
@@ -224,10 +247,19 @@ and expose optional amplitude/duration/window gates. Undo restores the previous
 automatic selection without overwriting later manual choices. Changes to input,
 reference, window, or selected class discard the UI's stale undo snapshot.
 
-Splitting moves a similarity group's candidates into a new `DefinedArtifact`.
-It retains independent window/treatment/reference settings and an original-source
-ID, including the ocular channel topology for threshold descendants. Split
-members are removed from the parent rather than cleaned twice. A threshold
+Splitting moves a waveform band, waveform subgroup, or union of selected spatial
+families into a new `DefinedArtifact`. It retains independent
+window/treatment/reference settings and an original-source ID, including the
+ocular channel topology for threshold descendants. `transfer` can instead move
+the same selected candidates to an existing sibling or between the threshold
+blink and movement roots. Choices travel with them and both references are
+rebuilt. Same-root descendants carry their threshold details while the
+detector-owned root retains its complete native candidate ledger and a nil
+`sourceArtifactID`, allowing identical refreshes to recognize the partition.
+Cross-root events use the optional `importedCandidateSourceIDs` map; a refresh of
+their origin removes them from the destination, while a refresh of the destination
+first returns them to their unchanged origin. The source must retain at least one
+candidate. Moved members are removed from the source rather than cleaned twice. A threshold
 refresh with identical inputs preserves the partition; changed detection inputs
 reset the root and remove its derived classes. Define/BCG rescans likewise retire
 their derived classes. Continuous MAAC definitions use their specialized review

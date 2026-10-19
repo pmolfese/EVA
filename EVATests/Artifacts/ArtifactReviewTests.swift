@@ -306,6 +306,73 @@ struct ArtifactReviewTests {
         #expect(output.signal.data[0][300] < signal.data[0][300] * 0.5)
     }
 
+    @Test func transfersSelectionsBetweenSiblingClassesWithoutDuplicatingEvents() throws {
+        let (_, base) = fixture()
+        var root = base
+        root.thresholdOcularKind = .blink
+        root.thresholdOcularCandidates = root.events.map { event in
+            ThresholdOcularCandidate(event: event, startTimeSeconds: event.centerTimeSeconds - 0.05,
+                endTimeSeconds: event.centerTimeSeconds + 0.13, peakMicrovolts: 200)
+        }
+        ArtifactReviewEngine.setChoice(.hold, eventID: "c", artifact: &root)
+        var eyeMovement = try #require(ArtifactReviewEngine.split(
+            eventIDs: ["b"], name: "Eye movement", method: .sspPCA, parent: &root))
+
+        #expect(ArtifactReviewEngine.transfer(eventIDs: ["c"], source: &root, destination: &eyeMovement))
+        #expect(ArtifactReviewEngine.candidates(for: root).map(\.id) == ["a"])
+        #expect(ArtifactReviewEngine.candidates(for: eyeMovement).map(\.id) == ["b", "c"])
+        #expect(eyeMovement.reviewState?.choices["c"]?.decision == .hold)
+        #expect(root.reviewState?.sourceArtifactID == nil)
+        #expect(eyeMovement.reviewState?.sourceArtifactID == root.id)
+        #expect(root.thresholdOcularCandidates?.map(\.id) == ["a", "b", "c"],
+                "The detector root keeps its complete ledger for identical refreshes")
+        #expect(eyeMovement.thresholdOcularCandidates?.map(\.id) == ["b", "c"])
+        #expect(Set(root.events.map(\.id)).isDisjoint(with: eyeMovement.events.map(\.id)))
+        #expect(!ArtifactReviewEngine.transfer(eventIDs: ["a"], source: &root, destination: &eyeMovement),
+                "The last member must remain in its source class")
+
+        #expect(ArtifactReviewEngine.transfer(eventIDs: ["b"], source: &eyeMovement, destination: &root))
+        #expect(root.reviewState?.sourceArtifactID == nil, "Moving back must not turn the root into its own child")
+        #expect(ArtifactReviewEngine.candidates(for: root).map(\.id) == ["a", "b"])
+        #expect(ArtifactReviewEngine.candidates(for: eyeMovement).map(\.id) == ["c"])
+        #expect(root.thresholdOcularCandidates?.map(\.id) == ["a", "b", "c"])
+        #expect(eyeMovement.thresholdOcularCandidates?.map(\.id) == ["c"])
+    }
+
+    @Test func crossDetectorTransferTracksOriginAndDestinationRefreshReturnsTheEvent() throws {
+        let (_, base) = fixture()
+        var blinks = base
+        blinks.name = "Eye Blinks"
+        blinks.thresholdOcularKind = .blink
+        blinks.thresholdOcularCandidates = blinks.events.map { event in
+            ThresholdOcularCandidate(event: event, startTimeSeconds: event.centerTimeSeconds - 0.05,
+                endTimeSeconds: event.centerTimeSeconds + 0.13, peakMicrovolts: 200)
+        }
+        let movementEvents = [event("m1", time: 4), event("m2", time: 5)]
+        var movements = definition(movementEvents)
+        movements.name = "Eye Movements"
+        movements.thresholdOcularKind = .movement
+        movements.thresholdOcularCandidates = movementEvents.map { event in
+            ThresholdOcularCandidate(event: event, startTimeSeconds: event.centerTimeSeconds - 0.05,
+                endTimeSeconds: event.centerTimeSeconds + 0.13, peakMicrovolts: 120)
+        }
+
+        #expect(ArtifactReviewEngine.transfer(eventIDs: ["c"], source: &blinks, destination: &movements))
+        #expect(ArtifactReviewEngine.candidates(for: blinks).map(\.id) == ["a", "b"])
+        #expect(ArtifactReviewEngine.candidates(for: movements).map(\.id) == ["c", "m1", "m2"])
+        #expect(movements.reviewState?.importedCandidateSourceIDs?["c"] == blinks.id)
+        #expect(movements.thresholdOcularCandidates?.map(\.id) == ["m1", "m2"],
+                "A detector root's ledger must contain only its native detections")
+
+        var artifacts = [blinks, movements]
+        ArtifactReviewEngine.removeSplitClasses(from: &artifacts, sourceID: movements.id)
+        let restoredBlinks = try #require(artifacts.first { $0.id == blinks.id })
+        let refreshedMovements = try #require(artifacts.first { $0.id == movements.id })
+        #expect(ArtifactReviewEngine.candidates(for: restoredBlinks).map(\.id) == ["a", "b", "c"])
+        #expect(ArtifactReviewEngine.candidates(for: refreshedMovements).map(\.id) == ["m1", "m2"])
+        #expect(refreshedMovements.reviewState?.importedCandidateSourceIDs == nil)
+    }
+
     @Test func thresholdRefreshPreservesPartitionsThenResetsDescendantsOnNewDetection() throws {
         let (_, base) = fixture()
         let revision = UUID()
@@ -499,6 +566,56 @@ extension ArtifactReviewTests {
         #expect(fine.flatMap(\.eventIDs).sorted() == examples.map(\.id).sorted())
         #expect(fine.allSatisfy { $0.minimumCorrelation >= 0.98 })
         #expect(fine.map(\.eventIDs) == reversed.groups(minimumCorrelation: 0.98).map(\.eventIDs))
+    }
+
+    @Test func robustCohesionKeepsAStableFamilyAndOutlierFloorEjectsTheException() async throws {
+        let base = [-3.0, -2, -1, 1, 2, 3]
+        var examples = (0..<10).map { index in
+            spatialExample("base\(index)", values: base.map { $0 * Double(index + 1) + 12 })
+        }
+        examples.append(spatialExample("outlier", values: [1, -1, 1, -1, 1, -1]))
+        let hierarchy = try #require(await ArtifactSpatialGrouping.build(
+            examples: examples, polarityMode: .ignoreGlobalPolarity))
+
+        let minimum = hierarchy.groups(minimumScore: 0.90, cohesionRule: .minimum)
+        let robust = hierarchy.groups(minimumScore: 0.90, cohesionRule: .tenthPercentile)
+        #expect(minimum.count > robust.count)
+        let robustParent = try #require(robust.first)
+        #expect(robustParent.minimumCorrelation < robustParent.tenthPercentileCorrelation)
+        #expect(robustParent.tenthPercentileCorrelation <= robustParent.medianCorrelation)
+
+        let cut = hierarchy.cohesionCut(minimumScore: 0.90,
+            cohesionRule: .tenthPercentile, outlierFloor: 0.85)
+        #expect(cut.groups.count == 1)
+        #expect(cut.groups[0].eventIDs.count == 10)
+        #expect(cut.unassignedIDs == ["outlier"])
+        #expect(cut.groups[0].minimumCorrelation > 0.999)
+    }
+
+    @Test func targetCountRefinesDeterministicallyAndSelectedGroupsCanMerge() async throws {
+        let examples = (0..<48).map { index in
+            let angle = Double(index) / 48 * 2 * Double.pi
+            return spatialExample("e\(index)", values: (0..<8).map { channel in
+                cos(Double(channel) * 2 * Double.pi / 8 + angle)
+            })
+        }
+        let hierarchy = try #require(await ArtifactSpatialGrouping.build(
+            examples: examples, polarityMode: .ignoreGlobalPolarity))
+        let first = hierarchy.targetCut(count: 5, cohesionRule: .tenthPercentile, outlierFloor: -1)
+        let second = hierarchy.targetCut(count: 5, cohesionRule: .tenthPercentile, outlierFloor: -1)
+        #expect(first.groups.count == 5)
+        #expect(first.groups.map(\.eventIDs) == second.groups.map(\.eventIDs))
+        #expect(first.groups.flatMap(\.eventIDs).sorted() == examples.map(\.id).sorted())
+        #expect(first.unassignedIDs.isEmpty)
+        #expect(first.groups.allSatisfy {
+            $0.minimumCorrelation <= $0.tenthPercentileCorrelation + 1e-12
+                && $0.tenthPercentileCorrelation <= $0.medianCorrelation + 1e-12
+        })
+
+        let merged = try #require(hierarchy.mergedGroup(Array(first.groups.prefix(2)), id: -1000))
+        #expect(Set(merged.eventIDs) == Set(first.groups.prefix(2).flatMap(\.eventIDs)))
+        #expect((2...12).contains(hierarchy.suggestedTargetCount(maximum: 12,
+            cohesionRule: .tenthPercentile)))
     }
 
     @Test func spatialGroupingRejectsInvalidAndInconsistentMontages() async throws {

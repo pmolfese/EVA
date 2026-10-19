@@ -26,6 +26,12 @@ nonisolated enum ArtifactSpatialSimilarityMetric: String, CaseIterable, Identifi
     var id: String { rawValue }
 }
 
+nonisolated enum ArtifactSpatialCohesionRule: String, CaseIterable, Identifiable, Sendable {
+    case minimum = "Minimum"
+    case tenthPercentile = "10th percentile"
+    var id: String { rawValue }
+}
+
 nonisolated struct ArtifactSpatialGroup: Identifiable, Sendable {
     let id: Int
     let eventIDs: [String]
@@ -40,6 +46,8 @@ nonisolated struct ArtifactSpatialGroup: Identifiable, Sendable {
     var orientationSigns: [Int8] = []
     var polarityMode: ArtifactSpatialPolarityMode = .signed
     var similarityMetric: ArtifactSpatialSimilarityMetric = .globalPearson
+    var tenthPercentileCorrelation: Double = -1
+    var medianCorrelation: Double = -1
 
     var positiveOrientationCount: Int { orientationSigns.filter { $0 >= 0 }.count }
     var negativeOrientationCount: Int { orientationSigns.filter { $0 < 0 }.count }
@@ -47,6 +55,11 @@ nonisolated struct ArtifactSpatialGroup: Identifiable, Sendable {
         guard let index = eventIDs.firstIndex(of: eventID), orientationSigns.indices.contains(index) else { return 1 }
         return orientationSigns[index] < 0 ? -1 : 1
     }
+}
+
+nonisolated struct ArtifactSpatialCut: Sendable {
+    let groups: [ArtifactSpatialGroup]
+    let unassignedIDs: [String]
 }
 
 nonisolated struct ArtifactSpatialHierarchy: Sendable {
@@ -59,14 +72,21 @@ nonisolated struct ArtifactSpatialHierarchy: Sendable {
     let unassignedIDs: [String]
     let nodes: [Node]
     let root: Int?
+    var polarityMode: ArtifactSpatialPolarityMode = .signed
+    var similarityMetric: ArtifactSpatialSimilarityMetric = .globalPearson
+    var localNeighborhoods: [[Int]] = []
 
     /// Cutting an already-built tree does not touch signal data or recompute distances.
     func groups(minimumCorrelation: Double) -> [ArtifactSpatialGroup] {
+        groups(minimumScore: minimumCorrelation, cohesionRule: .minimum)
+    }
+
+    func groups(minimumScore: Double, cohesionRule: ArtifactSpatialCohesionRule) -> [ArtifactSpatialGroup] {
         guard let root else { return [] }
         var pending = [root], result: [ArtifactSpatialGroup] = []
         while let index = pending.popLast() {
             let node = nodes[index]
-            if node.children.isEmpty || node.group.minimumCorrelation >= minimumCorrelation {
+            if node.children.isEmpty || cohesion(node.group, rule: cohesionRule) >= minimumScore {
                 result.append(node.group)
             } else {
                 pending.append(contentsOf: node.children.reversed())
@@ -76,6 +96,10 @@ nonisolated struct ArtifactSpatialHierarchy: Sendable {
             if $0.eventIDs.count == $1.eventIDs.count { return $0.id < $1.id }
             return $0.eventIDs.count > $1.eventIDs.count
         }
+    }
+
+    func cohesion(_ group: ArtifactSpatialGroup, rule: ArtifactSpatialCohesionRule) -> Double {
+        rule == .minimum ? group.minimumCorrelation : group.tenthPercentileCorrelation
     }
 }
 
@@ -246,6 +270,67 @@ nonisolated enum ArtifactSpatialGrouping {
         return max(-1, min(1, score))
     }
 
+    static func centroid(features: [ArtifactSpatialFeature], indices: [Int],
+                         polarityMode: ArtifactSpatialPolarityMode) -> [Double]? {
+        guard let first = indices.first, let dimension = features.first?.vector.count else { return nil }
+        if polarityMode == .signed {
+            var sum = [Double](repeating: 0, count: dimension)
+            for index in indices { for c in sum.indices { sum[c] += features[index].vector[c] } }
+            // A perfectly balanced set of opposite fields has no Euclidean
+            // mean. The hierarchy still needs a deterministic axis in order to
+            // split that parent into its two signed children, so retain the
+            // first normalized member only for this degenerate parent case.
+            return normalized(sum) ?? features[first].vector
+        }
+        let anchor = features[first].vector
+        var center = anchor
+        for _ in 0..<12 {
+            var sum = [Double](repeating: 0, count: dimension)
+            for index in indices {
+                let vector = features[index].vector
+                let sign = dot(vector, center) < 0 ? -1.0 : 1.0
+                for c in sum.indices { sum[c] += sign * vector[c] }
+            }
+            guard var next = normalized(sum) else { return nil }
+            if dot(next, anchor) < 0 { next = next.map { -$0 } }
+            let settled = abs(dot(next, center)) > 1 - 1e-12
+            center = next
+            if settled { break }
+        }
+        return center
+    }
+
+    private static func percentile(_ sorted: [Double], fraction: Double) -> Double {
+        guard !sorted.isEmpty else { return -1 }
+        let location = min(max(fraction, 0), 1) * Double(sorted.count - 1)
+        let lower = Int(location), upper = min(lower + 1, sorted.count - 1)
+        let amount = location - Double(lower)
+        return sorted[lower] * (1 - amount) + sorted[upper] * amount
+    }
+
+    static func group(features: [ArtifactSpatialFeature], indices: [Int], id: Int,
+                      polarityMode: ArtifactSpatialPolarityMode,
+                      similarityMetric: ArtifactSpatialSimilarityMetric,
+                      localNeighborhoods: [[Int]]) -> ArtifactSpatialGroup? {
+        guard let center = centroid(features: features, indices: indices, polarityMode: polarityMode) else { return nil }
+        let scores = indices.map {
+            similarityScore(features[$0].vector, center, polarityMode: polarityMode,
+                metric: similarityMetric, localNeighborhoods: localNeighborhoods)
+        }
+        let representative = indices.indices.max { scores[$0] < scores[$1] } ?? 0
+        let sorted = scores.sorted()
+        let signs: [Int8] = indices.map {
+            polarityMode == .ignoreGlobalPolarity && dot(features[$0].vector, center) < 0 ? -1 : 1
+        }
+        return ArtifactSpatialGroup(id: id, eventIDs: indices.map { features[$0].eventID },
+            representativeID: features[indices[representative]].eventID,
+            minimumCorrelation: sorted.first ?? -1, meanFeature: center,
+            orientationSigns: signs, polarityMode: polarityMode,
+            similarityMetric: polarityMode == .signed ? .globalPearson : similarityMetric,
+            tenthPercentileCorrelation: percentile(sorted, fraction: 0.10),
+            medianCorrelation: percentile(sorted, fraction: 0.50))
+    }
+
     /// Bounded parallel normalization, followed by a deterministic divisive spherical tree.
     /// No n×n distance matrix is retained. Raw amplitude is deliberately factored out.
     static func build(examples: [ArtifactReviewExample],
@@ -289,7 +374,7 @@ nonisolated enum ArtifactSpatialGrouping {
         let neighborhoods = localNeighborhoods(channels: channels, layout: layout)
         return hierarchy(features: features, channels: channels,
             unassignedIDs: examples.map(\.id).filter { !assigned.contains($0) }, polarityMode: polarityMode,
-            similarityMetric: similarityMetric, localNeighborhoods: neighborhoods)
+            similarityMetric: similarityMetric, localNeighborhoods: neighborhoods, storesCentroids: true)
     }
 
     /// Shared unit-vector tree builder. Projective mode treats `v` and `-v` as
@@ -303,34 +388,9 @@ nonisolated enum ArtifactSpatialGrouping {
                           localNeighborhoods: [[Int]] = [],
                           storesCentroids: Bool = false) -> ArtifactSpatialHierarchy? {
         guard !Task.isCancelled else { return nil }
-        let dimension = features.first?.vector.count ?? 0
         var nodes: [ArtifactSpatialHierarchy.Node] = []
         func centroid(_ indices: [Int]) -> [Double]? {
-            guard let first = indices.first else { return nil }
-            if polarityMode == .signed {
-                var sum = [Double](repeating: 0, count: dimension)
-                for index in indices { for c in sum.indices { sum[c] += features[index].vector[c] } }
-                return normalized(sum)
-            }
-            // A projective mean: iteratively orient every member toward the
-            // current axis, then average. Anchor the final sign to the first
-            // deterministic member so orientation labels are stable across runs.
-            let anchor = features[first].vector
-            var center = anchor
-            for _ in 0..<12 {
-                var sum = [Double](repeating: 0, count: dimension)
-                for index in indices {
-                    let vector = features[index].vector
-                    let sign = dot(vector, center) < 0 ? -1.0 : 1.0
-                    for c in sum.indices { sum[c] += sign * vector[c] }
-                }
-                guard var next = normalized(sum) else { return nil }
-                if dot(next, anchor) < 0 { next = next.map { -$0 } }
-                let settled = abs(dot(next, center)) > 1 - 1e-12
-                center = next
-                if settled { break }
-            }
-            return center
+            ArtifactSpatialGrouping.centroid(features: features, indices: indices, polarityMode: polarityMode)
         }
         func similarity(_ lhs: [Double], _ rhs: [Double]) -> Double {
             similarityScore(lhs, rhs, polarityMode: polarityMode,
@@ -339,7 +399,6 @@ nonisolated enum ArtifactSpatialGrouping {
         func append(_ indices: [Int], depth: Int) -> Int {
             let center = centroid(indices)
             let correlations = indices.map { index in center.map { similarity(features[index].vector, $0) } ?? -1 }
-            let representative = indices.indices.max { correlations[$0] < correlations[$1] } ?? 0
             let quality = correlations.min() ?? -1
             var children: [Int] = []
             if indices.count > 1, quality < 0.9999, depth < 32, !Task.isCancelled {
@@ -367,23 +426,171 @@ nonisolated enum ArtifactSpatialGrouping {
                 }
             }
             let id = nodes.count
-            let signs: [Int8] = indices.map { index in
-                guard polarityMode == .ignoreGlobalPolarity, let center else { return 1 }
-                return dot(features[index].vector, center) < 0 ? -1 : 1
-            }
-            nodes.append(.init(group: ArtifactSpatialGroup(id: id,
-                eventIDs: indices.map { features[$0].eventID },
-                representativeID: features[indices[representative]].eventID,
-                minimumCorrelation: max(-1, min(quality, 1)),
-                meanFeature: storesCentroids || polarityMode == .ignoreGlobalPolarity ? center ?? [] : [],
-                orientationSigns: signs, polarityMode: polarityMode,
-                similarityMetric: polarityMode == .signed ? .globalPearson : similarityMetric), children: children))
+            var built = ArtifactSpatialGrouping.group(features: features, indices: indices, id: id,
+                polarityMode: polarityMode, similarityMetric: similarityMetric,
+                localNeighborhoods: localNeighborhoods)!
+            if !storesCentroids && polarityMode == .signed { built.meanFeature = [] }
+            nodes.append(.init(group: built, children: children))
             return id
         }
         let root = features.isEmpty ? nil : append(Array(features.indices), depth: 0)
         guard !Task.isCancelled else { return nil }
         return ArtifactSpatialHierarchy(channels: channels, features: features,
-            unassignedIDs: unassignedIDs, nodes: nodes, root: root)
+            unassignedIDs: unassignedIDs, nodes: nodes, root: root,
+            polarityMode: polarityMode,
+            similarityMetric: polarityMode == .signed ? .globalPearson : similarityMetric,
+            localNeighborhoods: localNeighborhoods)
+    }
+}
+
+nonisolated extension ArtifactSpatialHierarchy {
+    private func sorted(_ groups: [ArtifactSpatialGroup]) -> [ArtifactSpatialGroup] {
+        groups.sorted {
+            if $0.eventIDs.count == $1.eventIDs.count { return $0.id < $1.id }
+            return $0.eventIDs.count > $1.eventIDs.count
+        }
+    }
+
+    private func rebuilt(eventIDs: [String], id: Int) -> ArtifactSpatialGroup? {
+        let wanted = Set(eventIDs)
+        let indices = features.indices.filter { wanted.contains(features[$0].eventID) }
+        guard !indices.isEmpty else { return nil }
+        return ArtifactSpatialGrouping.group(features: features, indices: indices, id: id,
+            polarityMode: polarityMode, similarityMetric: similarityMetric,
+            localNeighborhoods: localNeighborhoods)
+    }
+
+    private func pruned(_ source: [ArtifactSpatialGroup], outlierFloor: Double) -> ArtifactSpatialCut {
+        var result: [ArtifactSpatialGroup] = []
+        let initiallyAssigned = Set(source.flatMap(\.eventIDs))
+        var rejected = unassignedIDs + features.map(\.eventID).filter { !initiallyAssigned.contains($0) }
+        let featureByID = Dictionary(uniqueKeysWithValues: features.enumerated().map { ($0.element.eventID, $0.offset) })
+        for original in source {
+            var group: ArtifactSpatialGroup? = original
+            for _ in 0..<8 {
+                guard let current = group else { break }
+                let kept = current.eventIDs.filter { eventID in
+                    guard let index = featureByID[eventID] else { return false }
+                    let score = ArtifactSpatialGrouping.similarityScore(features[index].vector, current.meanFeature,
+                        polarityMode: polarityMode, metric: similarityMetric,
+                        localNeighborhoods: localNeighborhoods)
+                    return score >= outlierFloor
+                }
+                guard kept.count != current.eventIDs.count else { break }
+                rejected.append(contentsOf: current.eventIDs.filter { !kept.contains($0) })
+                group = rebuilt(eventIDs: kept, id: current.id)
+            }
+            if let group { result.append(group) }
+        }
+        return ArtifactSpatialCut(groups: sorted(result), unassignedIDs: Array(Set(rejected)).sorted())
+    }
+
+    func cohesionCut(minimumScore: Double, cohesionRule: ArtifactSpatialCohesionRule,
+                     outlierFloor: Double) -> ArtifactSpatialCut {
+        pruned(groups(minimumScore: minimumScore, cohesionRule: cohesionRule), outlierFloor: outlierFloor)
+    }
+
+    private func targetSeedGroups(count requested: Int,
+                                  cohesionRule: ArtifactSpatialCohesionRule) -> [ArtifactSpatialGroup] {
+        guard let root else { return [] }
+        let target = min(max(requested, 1), features.count)
+        var selected = [root]
+        while selected.count < target {
+            let candidates = selected.filter { !nodes[$0].children.isEmpty }
+            guard let split = candidates.max(by: { lhs, rhs in
+                let left = nodes[lhs], right = nodes[rhs]
+                func gain(_ node: ArtifactSpatialHierarchy.Node) -> Double {
+                    let parent = cohesion(node.group, rule: cohesionRule)
+                    let children = node.children.map { nodes[$0].group }
+                    let weight = max(children.reduce(0) { $0 + $1.eventIDs.count }, 1)
+                    let childScore = children.reduce(0.0) {
+                        $0 + cohesion($1, rule: cohesionRule) * Double($1.eventIDs.count) / Double(weight)
+                    }
+                    return childScore - parent
+                }
+                let a = gain(left), b = gain(right)
+                if a == b { return left.group.eventIDs.count < right.group.eventIDs.count }
+                return a < b
+            }) else { break }
+            selected.removeAll { $0 == split }
+            selected.append(contentsOf: nodes[split].children)
+        }
+        return sorted(selected.map { nodes[$0].group })
+    }
+
+    func targetCut(count requested: Int, cohesionRule: ArtifactSpatialCohesionRule,
+                   outlierFloor: Double) -> ArtifactSpatialCut {
+        let seeds = targetSeedGroups(count: requested, cohesionRule: cohesionRule)
+        guard !seeds.isEmpty else { return ArtifactSpatialCut(groups: [], unassignedIDs: unassignedIDs) }
+        let featureByID = Dictionary(uniqueKeysWithValues: features.enumerated().map { ($0.element.eventID, $0.offset) })
+        let anchors = seeds.compactMap { featureByID[$0.representativeID] }
+        var centers = seeds.map(\.meanFeature)
+        var assignments = [[Int]](repeating: [], count: centers.count)
+        for _ in 0..<8 {
+            let previous = assignments
+            assignments = [[Int]](repeating: [], count: centers.count)
+            for featureIndex in features.indices {
+                if let anchor = anchors.firstIndex(of: featureIndex) {
+                    assignments[anchor].append(featureIndex)
+                    continue
+                }
+                let scores = centers.map {
+                    ArtifactSpatialGrouping.similarityScore(features[featureIndex].vector, $0,
+                        polarityMode: polarityMode, metric: similarityMetric,
+                        localNeighborhoods: localNeighborhoods)
+                }
+                guard let best = scores.indices.max(by: { scores[$0] < scores[$1] }),
+                      scores[best] >= outlierFloor else {
+                    continue
+                }
+                assignments[best].append(featureIndex)
+            }
+            for index in centers.indices {
+                if let center = ArtifactSpatialGrouping.centroid(features: features,
+                    indices: assignments[index], polarityMode: polarityMode) { centers[index] = center }
+            }
+            if assignments == previous { break }
+        }
+        let groups = assignments.enumerated().compactMap { offset, indices in
+            ArtifactSpatialGrouping.group(features: features, indices: indices,
+                id: 1_000_000 + offset, polarityMode: polarityMode,
+                similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods)
+        }
+        return pruned(groups, outlierFloor: outlierFloor)
+    }
+
+    func suggestedTargetCount(maximum: Int = 12,
+                              cohesionRule: ArtifactSpatialCohesionRule) -> Int {
+        let upper = min(maximum, features.count)
+        guard upper >= 2 else { return upper }
+        var previousScore: Double?
+        var improvements: [(count: Int, gain: Double)] = []
+        for count in 1...upper {
+            let groups = targetSeedGroups(count: count, cohesionRule: cohesionRule)
+            let total = max(groups.reduce(0) { $0 + $1.eventIDs.count }, 1)
+            let score = groups.reduce(0.0) {
+                $0 + cohesion($1, rule: cohesionRule) * Double($1.eventIDs.count) / Double(total)
+            }
+            if let previousScore { improvements.append((count, score - previousScore)) }
+            previousScore = score
+        }
+        guard improvements.count >= 2 else { return upper }
+        var bestCount = min(upper, 2), bestDrop = -Double.infinity
+        for index in 1..<improvements.count {
+            let drop = improvements[index - 1].gain - improvements[index].gain
+            if drop > bestDrop { bestDrop = drop; bestCount = improvements[index - 1].count }
+        }
+        return max(2, bestCount)
+    }
+
+    func similarity(between lhs: ArtifactSpatialGroup, and rhs: ArtifactSpatialGroup) -> Double {
+        ArtifactSpatialGrouping.similarityScore(lhs.meanFeature, rhs.meanFeature,
+            polarityMode: polarityMode, metric: similarityMetric,
+            localNeighborhoods: localNeighborhoods)
+    }
+
+    func mergedGroup(_ groups: [ArtifactSpatialGroup], id: Int) -> ArtifactSpatialGroup? {
+        rebuilt(eventIDs: Array(Set(groups.flatMap(\.eventIDs))).sorted(), id: id)
     }
 }
 

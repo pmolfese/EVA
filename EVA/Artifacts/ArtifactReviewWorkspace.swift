@@ -1,4 +1,17 @@
 import SwiftUI
+import AppKit
+
+private enum ArtifactSpatialGroupingControl: String, CaseIterable, Identifiable {
+    case cohesion = "Cohesion"
+    case targetCount = "Target count"
+    var id: String { rawValue }
+}
+
+private enum ArtifactSpatialCardMapMode: String, CaseIterable, Identifiable {
+    case centroid = "Canonical centroids"
+    case representative = "Representative events"
+    var id: String { rawValue }
+}
 
 /// A stable frame keeps workflow tabs in the same place throughout artifact work.
 struct ArtifactWorkspace<Content: View>: View {
@@ -46,10 +59,19 @@ struct ArtifactReviewWorkspace: View {
     @State private var usesSpatialGroups = true
     @State private var spatialHierarchy: ArtifactSpatialHierarchy?
     @State private var spatialLoadedKey = ""
-    @State private var spatialGroupID: Int?
+    @State private var selectedSpatialGroupIDs: Set<Int> = []
+    @State private var spatialSelectionAnchorID: Int?
     @State private var spatialThreshold = 0.85
     @State private var spatialPolarityOverride: ArtifactSpatialPolarityMode?
     @State private var spatialSimilarityMetric = ArtifactSpatialSimilarityMetric.globalPearson
+    @State private var spatialGroupingControl = ArtifactSpatialGroupingControl.cohesion
+    @State private var spatialTargetCount = 6
+    @State private var spatialCohesionRule = ArtifactSpatialCohesionRule.tenthPercentile
+    @State private var spatialOutlierFloor = 0.60
+    @State private var spatialCut: ArtifactSpatialCut?
+    @State private var spatialCutLoadedKey = ""
+    @State private var spatialCardMapMode = ArtifactSpatialCardMapMode.centroid
+    @State private var manuallyMergedSpatialGroups: [ArtifactSpatialGroup] = []
     @State private var waveformGrouping: ArtifactWaveformGroupingResult?
     @State private var waveformLoadedKey = ""
     @State private var waveformGroupID: Int?
@@ -63,6 +85,7 @@ struct ArtifactReviewWorkspace: View {
     @State private var showsSplit = false
     @State private var splitName = "Artifact variation"
     @State private var splitMethod = ArtifactCleaningMethod.obs
+    @State private var splitDestinationID: UUID?
     @State private var ruleUndo: [String: ArtifactReviewChoice]?
     @FocusState private var eventFocus: Bool
 
@@ -71,6 +94,17 @@ struct ArtifactReviewWorkspace: View {
     }
     private var selected: DefinedArtifact? {
         reviewable.first { $0.id == selectedArtifactID } ?? reviewable.first
+    }
+    private var compatibleSplitDestinations: [DefinedArtifact] {
+        guard let selected else { return [] }
+        let sourceID = selected.reviewState?.sourceArtifactID ?? selected.id
+        return reviewable.filter {
+            guard $0.id != selected.id else { return false }
+            let sameSource = ($0.reviewState?.sourceArtifactID ?? $0.id) == sourceID
+            let crossOcular = ArtifactReviewEngine.isThresholdFamily(selected)
+                && ArtifactReviewEngine.isThresholdFamily($0)
+            return sameSource || crossOcular
+        }
     }
     private var analysisKey: String {
         guard let artifact = selected else { return "empty" }
@@ -110,13 +144,58 @@ struct ArtifactReviewWorkspace: View {
             ? "\(analysisKey)/spatial/\(spatialPolarityMode.rawValue)/\(effectiveSpatialSimilarityMetric.rawValue)" : ""
     }
     private var currentSpatial: ArtifactSpatialHierarchy? { spatialLoadedKey == spatialTaskKey ? spatialHierarchy : nil }
-    private var spatialGroups: [ArtifactSpatialGroup] { currentSpatial?.groups(minimumCorrelation: spatialThreshold) ?? [] }
+    private var spatialCutTaskKey: String {
+        guard currentSpatial != nil else { return "" }
+        return "\(spatialTaskKey)/cut/\(spatialGroupingControl.rawValue)/\(spatialTargetCount)/\(spatialThreshold)/\(spatialCohesionRule.rawValue)/\(spatialOutlierFloor)"
+    }
+    private var currentSpatialCut: ArtifactSpatialCut? {
+        spatialCutLoadedKey == spatialCutTaskKey ? spatialCut : nil
+    }
+    private var spatialGroups: [ArtifactSpatialGroup] {
+        var groups = currentSpatialCut?.groups ?? []
+        for merged in manuallyMergedSpatialGroups {
+            let ids = Set(merged.eventIDs)
+            groups.removeAll { !ids.isDisjoint(with: $0.eventIDs) }
+            groups.append(merged)
+        }
+        return groups.sorted {
+            if $0.eventIDs.count == $1.eventIDs.count { return $0.id < $1.id }
+            return $0.eventIDs.count > $1.eventIDs.count
+        }
+    }
+    private var spatialUnassignedIDs: [String] { currentSpatialCut?.unassignedIDs ?? [] }
+    private var spatialCardScale: Double {
+        switch spatialCardMapMode {
+        case .centroid:
+            return max(spatialGroups.compactMap { canonicalTopography(for: $0)?.maximumAbsoluteAmplitude }.max() ?? 1, 1e-9)
+        case .representative:
+            return max(spatialGroups.compactMap { group in
+                currentAnalysis?.examples.first { $0.id == group.representativeID }?.topography?.maximumAbsoluteAmplitude
+            }.max() ?? 1, 1e-9)
+        }
+    }
+    private var closestSpatialGroups: (leftID: Int, rightID: Int, leftIndex: Int, rightIndex: Int, score: Double)? {
+        guard let hierarchy = currentSpatial, spatialGroups.count >= 2 else { return nil }
+        var best: (Int, Int, Int, Int, Double)?
+        for left in 0..<(spatialGroups.count - 1) {
+            for right in (left + 1)..<spatialGroups.count {
+                let score = hierarchy.similarity(between: spatialGroups[left], and: spatialGroups[right])
+                if best == nil || score > best!.4 {
+                    best = (spatialGroups[left].id, spatialGroups[right].id, left, right, score)
+                }
+            }
+        }
+        return best.map { ($0.0, $0.1, $0.2, $0.3, $0.4) }
+    }
     private var selectedSpatialFamily: ArtifactSpatialGroup? {
-        spatialGroups.first { $0.id == spatialGroupID }
+        guard selectedSpatialGroupIDs.count == 1, let id = selectedSpatialGroupIDs.first, id != -1 else { return nil }
+        return spatialGroups.first { $0.id == id }
     }
     private var waveformTaskKey: String {
         guard usesSpatialGroups, let family = selectedSpatialFamily else { return "" }
-        return "\(spatialTaskKey)/waveform/\(family.id)/\(waveformPolarityMode.rawValue)"
+        var hasher = Hasher()
+        hasher.combine(family.eventIDs)
+        return "\(spatialTaskKey)/waveform/\(family.id)/\(hasher.finalize())/\(waveformPolarityMode.rawValue)"
     }
     private var currentWaveform: ArtifactWaveformGroupingResult? {
         !waveformTaskKey.isEmpty && waveformLoadedKey == waveformTaskKey ? waveformGrouping : nil
@@ -127,8 +206,13 @@ struct ArtifactReviewWorkspace: View {
             : result.hierarchy.groups(minimumCorrelation: waveformThreshold).first { $0.id == id }?.eventIDs ?? [])
     }
     private var spatialEventIDs: Set<String>? {
-        guard usesSpatialGroups, let id = spatialGroupID else { return nil }
-        return Set(id == -1 ? currentSpatial?.unassignedIDs ?? [] : spatialGroups.first { $0.id == id }?.eventIDs ?? [])
+        guard usesSpatialGroups, !selectedSpatialGroupIDs.isEmpty else { return nil }
+        var ids = Set<String>()
+        for id in selectedSpatialGroupIDs {
+            if id == -1 { ids.formUnion(spatialUnassignedIDs) }
+            else { ids.formUnion(spatialGroups.first { $0.id == id }?.eventIDs ?? []) }
+        }
+        return ids
     }
     private var examples: [ArtifactReviewExample] {
         let spatialIDs = spatialEventIDs
@@ -214,6 +298,7 @@ struct ArtifactReviewWorkspace: View {
         .frame(height: 770)
         .task(id: analysisKey) { await loadAnalysis() }
         .task(id: spatialTaskKey) { await loadSpatialGrouping() }
+        .task(id: spatialCutTaskKey) { await loadSpatialCut() }
         .task(id: waveformTaskKey) { await loadWaveformGrouping() }
         .onChange(of: waveformTaskKey) { _, _ in
             waveformGroupID = nil
@@ -221,20 +306,27 @@ struct ArtifactReviewWorkspace: View {
         .onChange(of: waveformThreshold) { _, _ in
             waveformGroupID = nil; selectedEventID = nil
         }
-        .onChange(of: spatialThreshold) { _, _ in
-            spatialGroupID = nil; selectedEventID = nil; showsSplit = false
+        .onChange(of: spatialCutTaskKey) { _, _ in
+            clearSpatialSelection()
+            manuallyMergedSpatialGroups = []
+            selectedEventID = nil; showsSplit = false
         }
         .onChange(of: usesSpatialGroups) { _, _ in
-            spatialGroupID = nil; band = nil; selectedEventID = nil; showsSplit = false
+            clearSpatialSelection(); band = nil; selectedEventID = nil; showsSplit = false
         }
         .onChange(of: analysisKey) { _, _ in
-            ruleUndo = nil; spatialGroupID = nil; selectedEventID = nil; showsSplit = false
+            ruleUndo = nil; clearSpatialSelection(); selectedEventID = nil; showsSplit = false
         }
         .onChange(of: selected?.id) { _, _ in
             band = nil
-            spatialGroupID = nil
+            clearSpatialSelection()
             spatialPolarityOverride = nil
             spatialSimilarityMetric = .globalPearson
+            spatialGroupingControl = .cohesion
+            spatialTargetCount = 6
+            spatialCohesionRule = .tenthPercentile
+            spatialOutlierFloor = 0.60
+            manuallyMergedSpatialGroups = []
             waveformPolarityOverride = nil
             selectedEventID = nil
             showsSplit = false
@@ -372,7 +464,7 @@ struct ArtifactReviewWorkspace: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Spatial grouping · preview").font(.callout.weight(.medium))
-                ArtifactReviewHelp(title: "Spatial grouping", text: "Groups compare electrode vectors at each event’s peak global field power, not rendered images. Features are centered and normalized, so strength is ignored. Signed mode keeps opposite polarities separate; Ignore global polarity treats a whole-map sign reversal as the same spatial axis, sign-aligns members before averaging, and retains each event’s orientation. A deterministic divisive spherical clustering tree is computed in the background and cached for this signal revision, definition, channel mask, polarity mode, and comparison cost. Broader/Finer cuts that tree using the minimum selected comparison score to each group’s centroid. The common sensor set must cover at least 80% of the largest usable map; sensors must occur in at least 90% of maps. Events missing any common sensor, incomplete windows, or flat maps remain unassigned. Cards show a representative real event, not an average map. Singletons can appear at fine settings; they are not evidence of a new artifact type. Select a spatial family to inspect waveform subgroups within it. These previews do not change inclusion, waveform scores, or cleaning. Spatial class splitting is a later step.")
+                ArtifactReviewHelp(title: "Spatial grouping", text: "Cohesion cuts the cached divisive tree by its selected minimum or 10th-percentile fit. Target count starts from a requested tree cut, then performs sign-consistent spherical refinement so events can move across early branches. The outlier floor leaves genuinely incompatible maps unassigned instead of forcing them into a family. Canonical centroid cards use a shared scale and orient projective fields with the frontal average positive; representative-event cards retain their raw sign. Shift-click selects a contiguous range. Control-click or Command-click toggles discontiguous cards. Multi-selected families can be preview-merged or moved together into a separate correction class. These controls remain preview-only until a class move is confirmed.")
                 Spacer()
                 Text("Preview only").font(.caption).foregroundStyle(.secondary)
             }
@@ -382,7 +474,7 @@ struct ArtifactReviewWorkspace: View {
                     set: { value in
                         spatialPolarityOverride = value
                         waveformPolarityOverride = nil
-                        spatialGroupID = nil; waveformGroupID = nil; selectedEventID = nil
+                        clearSpatialSelection(); selectedEventID = nil
                     }
                 )) {
                     ForEach(ArtifactSpatialPolarityMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
@@ -397,59 +489,123 @@ struct ArtifactReviewWorkspace: View {
                 .pickerStyle(.menu).frame(width: 260)
                 .disabled(spatialPolarityMode == .signed)
                 .onChange(of: spatialSimilarityMetric) { _, _ in
-                    spatialGroupID = nil; waveformGroupID = nil; selectedEventID = nil
+                    clearSpatialSelection(); selectedEventID = nil
                 }
                 ArtifactReviewHelp(title: "Spatial comparison", text: "Global Pearson is the current whole-map |r| method. Local Pearson averages correlations over overlapping physical electrode neighborhoods after choosing one global sign. Spearman compares electrode ranks and is less sensitive to extreme amplitudes. Robust composite blends global, local, rank, and trimmed correlations. Information composite blends electrode-wise correlation with normalized mutual information, Hellinger histogram affinity, and symmetric correlation ratio; it is experimental because histogram estimates are weak for small montages. Signed polarity always uses ordinary Pearson. All modes preserve electrode identity and use one global orientation—individual regions never flip independently.")
             }
-            HStack {
-                Text("Broader").font(.caption)
-                Slider(value: $spatialThreshold, in: 0.65...0.98, step: 0.01)
-                    .accessibilityLabel("Spatial grouping detail")
-                Text("Finer").font(.caption)
-                Text("\(spatialScoreLabel) ≥ \(spatialThreshold, specifier: "%.2f")").font(.caption.monospacedDigit()).frame(width: 85)
+            HStack(spacing: 8) {
+                Picker("Grouping", selection: $spatialGroupingControl) {
+                    ForEach(ArtifactSpatialGroupingControl.allCases) { value in Text(value.rawValue).tag(value) }
+                }.pickerStyle(.segmented).frame(width: 260)
+                Picker("Cohesion", selection: $spatialCohesionRule) {
+                    ForEach(ArtifactSpatialCohesionRule.allCases) { value in Text(value.rawValue).tag(value) }
+                }.pickerStyle(.segmented).frame(width: 260)
+                ArtifactReviewHelp(title: "Grouping and cohesion", text: "Minimum requires every member to meet the cut and can fragment a family because of one tail event. 10th percentile allows a small tail while still reporting minimum, 10th-percentile, and median fit on every card. Target count requests a number of families and refines their membership; Cohesion lets the score threshold determine the number.")
             }
-            if let hierarchy = currentSpatial {
-                Text("\(spatialGroups.count) groups · \(hierarchy.features.count) mapped · \(hierarchy.unassignedIDs.count) unassigned · \(hierarchy.channels.count) shared sensors")
+            if spatialGroupingControl == .cohesion {
+                HStack {
+                    Text("Broader").font(.caption)
+                    Slider(value: $spatialThreshold, in: 0.50...0.98, step: 0.01)
+                        .accessibilityLabel("Spatial grouping detail")
+                    Text("Finer").font(.caption)
+                    Text("\(spatialScoreLabel) ≥ \(spatialThreshold, specifier: "%.2f")")
+                        .font(.caption.monospacedDigit()).frame(width: 85)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    Stepper("Spatial families: \(spatialTargetCount)", value: $spatialTargetCount,
+                        in: 1...max(1, min(40, currentSpatial?.features.count ?? 1)))
+                    if let hierarchy = currentSpatial {
+                        let suggested = hierarchy.suggestedTargetCount(
+                            maximum: min(40, hierarchy.features.count), cohesionRule: spatialCohesionRule)
+                        Button("Use suggested \(suggested)") { spatialTargetCount = suggested }
+                            .font(.caption)
+                    }
+                    Text("Tree seeds + 8 refinement passes").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 8) {
+                Text("Outlier floor").font(.caption)
+                Slider(value: $spatialOutlierFloor, in: 0.40...0.85, step: 0.01)
+                    .accessibilityLabel("Spatial outlier floor")
+                Text("\(spatialOutlierFloor, specifier: "%.2f")")
+                    .font(.caption.monospacedDigit()).frame(width: 38)
+                ArtifactReviewHelp(title: "Outlier floor", text: "Events scoring below this permissive floor against their assigned centroid stay spatially unassigned. Target count therefore requests K coherent families without forcing every mapped event into one. Tree-unusable events remain unassigned as before.")
+            }
+            HStack(spacing: 8) {
+                Picker("Card maps", selection: $spatialCardMapMode) {
+                    ForEach(ArtifactSpatialCardMapMode.allCases) { value in Text(value.rawValue).tag(value) }
+                }.pickerStyle(.segmented).frame(width: 350)
+                Text("Shared color scale").font(.caption).foregroundStyle(.secondary)
+            }
+            if let hierarchy = currentSpatial, currentSpatialCut != nil {
+                HStack {
+                    Text("\(spatialGroups.count) groups · \(hierarchy.features.count) mapped · \(spatialUnassignedIDs.count) unassigned · \(hierarchy.channels.count) shared sensors")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if selectedSpatialGroupIDs.filter({ $0 != -1 }).count >= 2 {
+                        Button("Merge selected") { mergeSpatialGroups(Array(selectedSpatialGroupIDs)) }
+                            .font(.caption)
+                    }
+                    if !manuallyMergedSpatialGroups.isEmpty {
+                        Button("Clear preview merges") {
+                            manuallyMergedSpatialGroups = []; clearSpatialSelection()
+                        }.font(.caption)
+                    }
+                }
+                if let duplicate = closestSpatialGroups {
+                    HStack(spacing: 8) {
+                        Text("\(duplicate.score >= 0.90 ? "Likely duplicate" : "Closest pair"): Group \(duplicate.leftIndex + 1) + Group \(duplicate.rightIndex + 1) · \(spatialScoreLabel) \(duplicate.score, specifier: "%.2f")")
+                            .font(.caption).foregroundStyle(duplicate.score >= 0.90 ? .orange : .secondary)
+                        Button("Select pair") { selectSpatialPair(duplicate.leftID, duplicate.rightID) }
+                            .font(.caption)
+                        Button("Merge pair") { mergeSpatialGroups([duplicate.leftID, duplicate.rightID]) }
+                            .font(.caption)
+                    }
+                }
+                Text("Click one family for waveform subgroups. Shift-click selects a range; Control-click or Command-click toggles individual families. Multiple families can move together into a new class, a sibling, or the other threshold ocular category below.")
                     .font(.caption).foregroundStyle(.secondary)
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 8) {
                         ForEach(Array(spatialGroups.enumerated()), id: \.element.id) { index, group in
                             let example = result.examples.first { $0.id == group.representativeID }
                             Button {
-                                spatialGroupID = group.id
-                                selectedEventID = group.representativeID
-                                eventFocus = true
+                                selectSpatialGroup(group, at: index)
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Group \(index + 1) · \(group.eventIDs.count)").font(.caption.weight(.medium))
-                                    ArtifactReviewTopomapPreview(topography: example?.topography,
-                                        layout: sensorLayout, scale: example?.topography?.maximumAbsoluteAmplitude ?? 1)
+                                    ArtifactReviewTopomapPreview(
+                                        topography: spatialCardMapMode == .centroid ? canonicalTopography(for: group) : example?.topography,
+                                        layout: sensorLayout, scale: spatialCardScale)
                                         .frame(height: 68)
-                                    Text("Representative event").font(.caption2).foregroundStyle(.secondary)
+                                    Text(spatialCardMapMode == .centroid ? "Canonical centroid" : "Representative event")
+                                        .font(.caption2).foregroundStyle(.secondary)
                                     if group.polarityMode == .ignoreGlobalPolarity {
-                                        Text("+ \(group.positiveOrientationCount) · − \(group.negativeOrientationCount)")
+                                        let counts = displayedOrientationCounts(group)
+                                        Text("+ \(counts.positive) · − \(counts.negative)")
                                             .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                                            .help("Orientation relative to this family’s canonical centroid; the raw event maps are unchanged.")
+                                            .help("Orientation relative to the displayed canonical centroid; raw event maps are unchanged.")
                                     }
-                                    Text(group.eventIDs.count == 1 ? "Single example" : String(format: "Minimum %@ %.2f", group.similarityMetric == .globalPearson ? (group.polarityMode == .ignoreGlobalPolarity ? "|r|" : "r") : "score", group.minimumCorrelation))
+                                    Text(group.eventIDs.count == 1 ? "Single example" : String(format: "Fit min %.2f · p10 %.2f · med %.2f", group.minimumCorrelation, group.tenthPercentileCorrelation, group.medianCorrelation))
                                         .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                                }.frame(width: 145).padding(8)
-                                    .background(spatialGroupID == group.id ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
+                                }.frame(width: 180).padding(8)
+                                    .background(selectedSpatialGroupIDs.contains(group.id) ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
                             }.buttonStyle(.plain)
                         }
-                        if !hierarchy.unassignedIDs.isEmpty {
-                            Button("Unassigned · \(hierarchy.unassignedIDs.count)") {
-                                spatialGroupID = -1; selectedEventID = nil; eventFocus = true
-                            }.tint(spatialGroupID == -1 ? .accentColor : .secondary)
+                        if !spatialUnassignedIDs.isEmpty {
+                            Button("Unassigned · \(spatialUnassignedIDs.count)") {
+                                clearSpatialSelection(); selectedSpatialGroupIDs = [-1]
+                                selectedEventID = spatialUnassignedIDs.first; eventFocus = true
+                            }.tint(selectedSpatialGroupIDs.contains(-1) ? .accentColor : .secondary)
                         }
                     }
-                }.frame(height: spatialPolarityMode == .ignoreGlobalPolarity ? 150 : 133)
+                }.frame(height: spatialPolarityMode == .ignoreGlobalPolarity ? 168 : 151)
                 if hierarchy.features.isEmpty {
                     Text("No comparable spatial features. Check the sensor layout, complete windows, and common good channels.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                ProgressView("Building spatial groups in the background…")
+                ProgressView(currentSpatial == nil ? "Building spatial hierarchy in the background…" : "Refining spatial groups in the background…")
                     .font(.caption).frame(maxWidth: .infinity, minHeight: 90)
             }
         }
@@ -499,7 +655,10 @@ struct ArtifactReviewWorkspace: View {
                         .font(.caption).frame(maxWidth: .infinity, minHeight: 90)
                 }
             }
-        } else if spatialGroupID == nil, currentSpatial?.features.isEmpty == false {
+        } else if selectedSpatialGroupIDs.filter({ $0 != -1 }).count > 1 {
+            Text("Multiple spatial families selected. Merge them for one combined waveform hierarchy, or move them together into a separate artifact class.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if selectedSpatialGroupIDs.isEmpty, currentSpatial?.features.isEmpty == false {
             Text("Select a spatial group to explore its waveform subgroups.")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -545,39 +704,52 @@ struct ArtifactReviewWorkspace: View {
 
     @ViewBuilder
     private func splitControls(_ artifact: DefinedArtifact) -> some View {
+        let hasGroupSelection = usesSpatialGroups ? !selectedSpatialGroupIDs.isEmpty : band != nil
         HStack {
-            Button("All \(currentAnalysis?.examples.count ?? 0)") { band = nil; spatialGroupID = nil; waveformGroupID = nil; eventFocus = true }
-            if usesSpatialGroups, let id = spatialGroupID {
-                Text(id == -1 ? "Spatially unassigned" : waveformGroupID == nil
-                    ? "Spatial family · \(examples.count) examples"
+            Button("All \(currentAnalysis?.examples.count ?? 0)") {
+                band = nil; clearSpatialSelection(); eventFocus = true
+            }
+            if usesSpatialGroups, !selectedSpatialGroupIDs.isEmpty {
+                Text(selectedSpatialGroupIDs.contains(-1) ? "Spatially unassigned"
+                    : selectedSpatialGroupIDs.count > 1 ? "\(selectedSpatialGroupIDs.count) spatial families · \(examples.count) examples"
+                    : waveformGroupID == nil ? "Spatial family · \(examples.count) examples"
                     : waveformGroupID == -1 ? "Waveform unassigned · \(examples.count) examples"
                     : "Waveform subgroup · \(examples.count) examples")
                     .font(.caption).foregroundStyle(.secondary)
             } else if let band { Text(band.rawValue).font(.caption).foregroundStyle(.secondary) }
             Spacer()
-            Button("Split group into class…", systemImage: "arrow.triangle.branch") {
+            Button("Move selection to class…", systemImage: "arrow.triangle.branch") {
                 splitName = "\(artifact.name) variation"
                 splitMethod = .obs
+                splitDestinationID = nil
                 showsSplit = true
             }
-            .disabled(usesSpatialGroups || band == nil || examples.isEmpty || examples.count == ArtifactReviewEngine.candidates(for: artifact).count)
-            ArtifactReviewHelp(title: "Split into a class", text: "Choose a similarity card, then split that entire group into a new artifact class. This moves all events in the filtered group, including examples on other pages, out of the parent class. The new class gets its own average and treatment. This does not perform cleaning.")
+            .disabled(!hasGroupSelection || examples.isEmpty || examples.count == ArtifactReviewEngine.candidates(for: artifact).count)
+            ArtifactReviewHelp(title: "Move into a class", text: "Choose one or more spatial families, a waveform subgroup, or a waveform-similarity card. Move every filtered event into a new class, an existing sibling, or the other threshold ocular category (for example Eye Blinks to Eye Movements). Events leave the current class, carry their decisions, and retain their detector origin, so one occurrence cannot train or receive correction from both classes. Each destination has its own average and treatment. This does not perform cleaning.")
         }
         if showsSplit {
             HStack(alignment: .bottom) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("New class name").font(.caption)
-                    TextField("Artifact variation", text: $splitName)
+                Picker("Destination", selection: $splitDestinationID) {
+                    Text("New class").tag(UUID?.none)
+                    ForEach(compatibleSplitDestinations) { destination in
+                        Text(destination.name).tag(Optional(destination.id))
+                    }
+                }.frame(width: 190)
+                if splitDestinationID == nil {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("New class name").font(.caption)
+                        TextField("Artifact variation", text: $splitName)
+                    }
+                    Picker("Treatment", selection: $splitMethod) {
+                        Text("OBS").tag(ArtifactCleaningMethod.obs)
+                        Text("SSP/PCA").tag(ArtifactCleaningMethod.sspPCA)
+                        Text("Regress").tag(ArtifactCleaningMethod.regression)
+                    }.frame(width: 150)
                 }
-                Picker("Treatment", selection: $splitMethod) {
-                    Text("OBS").tag(ArtifactCleaningMethod.obs)
-                    Text("SSP/PCA").tag(ArtifactCleaningMethod.sspPCA)
-                    Text("Regress").tag(ArtifactCleaningMethod.regression)
-                }.frame(width: 180)
-                Text("Move \(examples.count) events; build a separate average.")
+                Text("Move \(examples.count) events; rebuild source and destination averages.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Cancel") { showsSplit = false }
-                Button("Create class", action: splitClass)
+                Button(splitDestinationID == nil ? "Create class" : "Move to class", action: splitClass)
             }
         }
     }
@@ -869,13 +1041,25 @@ struct ArtifactReviewWorkspace: View {
 
     private func splitClass() {
         let ids = Set(examples.map(\.id))
-        guard let id = selected?.id, let index = artifacts.firstIndex(where: { $0.id == id }),
-              let child = ArtifactReviewEngine.split(eventIDs: ids, name: splitName, method: splitMethod, parent: &artifacts[index]) else { return }
-        artifacts.append(child)
+        guard let id = selected?.id, let index = artifacts.firstIndex(where: { $0.id == id }) else { return }
+        if let destinationID = splitDestinationID,
+           let destinationIndex = artifacts.firstIndex(where: { $0.id == destinationID }), destinationIndex != index {
+            var source = artifacts[index], destination = artifacts[destinationIndex]
+            guard ArtifactReviewEngine.transfer(eventIDs: ids, source: &source, destination: &destination) else { return }
+            artifacts[index] = source; artifacts[destinationIndex] = destination
+            selectedArtifactID = destinationID
+        } else {
+            guard let child = ArtifactReviewEngine.split(eventIDs: ids, name: splitName,
+                method: splitMethod, parent: &artifacts[index]) else { return }
+            artifacts.append(child)
+            selectedArtifactID = child.id
+        }
         onChange()
-        selectedArtifactID = child.id
         band = nil
+        clearSpatialSelection()
+        manuallyMergedSpatialGroups = []
         showsSplit = false
+        splitDestinationID = nil
         ruleUndo = nil
     }
 
@@ -935,6 +1119,120 @@ struct ArtifactReviewWorkspace: View {
         await ArtifactSpatialGroupingCache.shared.insert(hierarchy, for: key)
         guard !Task.isCancelled, spatialTaskKey == key else { return }
         spatialHierarchy = hierarchy; spatialLoadedKey = key
+    }
+
+    @MainActor
+    private func loadSpatialCut() async {
+        let key = spatialCutTaskKey
+        guard !key.isEmpty, let hierarchy = currentSpatial else { return }
+        if spatialCutLoadedKey == key { return }
+        let control = spatialGroupingControl
+        let threshold = spatialThreshold
+        let targetCount = spatialTargetCount
+        let cohesionRule = spatialCohesionRule
+        let outlierFloor = spatialOutlierFloor
+        let worker = Task.detached(priority: .userInitiated) {
+            switch control {
+            case .cohesion:
+                return hierarchy.cohesionCut(minimumScore: threshold,
+                    cohesionRule: cohesionRule, outlierFloor: outlierFloor)
+            case .targetCount:
+                return hierarchy.targetCut(count: targetCount,
+                    cohesionRule: cohesionRule, outlierFloor: outlierFloor)
+            }
+        }
+        let result = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
+        guard !Task.isCancelled, spatialCutTaskKey == key else { return }
+        spatialCut = result; spatialCutLoadedKey = key
+    }
+
+    private func clearSpatialSelection() {
+        selectedSpatialGroupIDs = []
+        spatialSelectionAnchorID = nil
+        waveformGroupID = nil
+    }
+
+    private func canonicalDisplaySign(for group: ArtifactSpatialGroup) -> Double {
+        guard group.polarityMode == .ignoreGlobalPolarity,
+              let layout = sensorLayout, let hierarchy = currentSpatial,
+              group.meanFeature.count == hierarchy.channels.count else { return 1 }
+        let positions = Dictionary(layout.positions.map { ($0.channelIndex, $0) },
+            uniquingKeysWith: { first, _ in first })
+        let located = hierarchy.channels.indices.compactMap { offset -> (Int, Double)? in
+            positions[hierarchy.channels[offset]].map { (offset, $0.y) }
+        }.sorted { $0.1 > $1.1 }
+        let frontal = located.prefix(max(1, located.count / 4))
+        let frontalMean = frontal.reduce(0.0) { $0 + group.meanFeature[$1.0] } / Double(max(frontal.count, 1))
+        if abs(frontalMean) > 1e-10 { return frontalMean < 0 ? -1 : 1 }
+        guard let peak = group.meanFeature.indices.max(by: { abs(group.meanFeature[$0]) < abs(group.meanFeature[$1]) }) else { return 1 }
+        return group.meanFeature[peak] < 0 ? -1 : 1
+    }
+
+    private func canonicalTopography(for group: ArtifactSpatialGroup) -> ArtifactReviewTopography? {
+        guard let hierarchy = currentSpatial, group.meanFeature.count == hierarchy.channels.count,
+              let last = hierarchy.channels.max() else { return nil }
+        let sign = canonicalDisplaySign(for: group)
+        var values = [Double](repeating: 0, count: last + 1)
+        for offset in hierarchy.channels.indices { values[hierarchy.channels[offset]] = sign * group.meanFeature[offset] }
+        let meanSquare = hierarchy.channels.reduce(0.0) { $0 + values[$1] * values[$1] }
+            / Double(max(hierarchy.channels.count, 1))
+        return ArtifactReviewTopography(values: values, channelIndices: hierarchy.channels,
+            sampleIndex: 0, timeSeconds: 0, globalFieldPower: sqrt(meanSquare))
+    }
+
+    private func displayedOrientationCounts(_ group: ArtifactSpatialGroup) -> (positive: Int, negative: Int) {
+        canonicalDisplaySign(for: group) < 0
+            ? (group.negativeOrientationCount, group.positiveOrientationCount)
+            : (group.positiveOrientationCount, group.negativeOrientationCount)
+    }
+
+    private func selectSpatialGroup(_ group: ArtifactSpatialGroup, at index: Int) {
+        let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.shift), let anchorID = spatialSelectionAnchorID,
+           let anchor = spatialGroups.firstIndex(where: { $0.id == anchorID }) {
+            let range = min(anchor, index)...max(anchor, index)
+            let rangeIDs = Set(range.map { spatialGroups[$0].id })
+            if modifiers.contains(.command) || modifiers.contains(.control) {
+                selectedSpatialGroupIDs.formUnion(rangeIDs)
+            } else {
+                selectedSpatialGroupIDs = rangeIDs
+            }
+        } else if modifiers.contains(.command) || modifiers.contains(.control) {
+            if selectedSpatialGroupIDs.contains(group.id) { selectedSpatialGroupIDs.remove(group.id) }
+            else { selectedSpatialGroupIDs.insert(group.id) }
+            spatialSelectionAnchorID = group.id
+        } else {
+            selectedSpatialGroupIDs = [group.id]
+            spatialSelectionAnchorID = group.id
+        }
+        selectedSpatialGroupIDs.remove(-1)
+        waveformGroupID = nil
+        selectedEventID = group.representativeID
+        eventFocus = true
+    }
+
+    private func selectSpatialPair(_ left: Int, _ right: Int) {
+        selectedSpatialGroupIDs = [left, right]
+        spatialSelectionAnchorID = left
+        waveformGroupID = nil
+        selectedEventID = spatialGroups.first { $0.id == left }?.representativeID
+    }
+
+    private func mergeSpatialGroups(_ ids: [Int]) {
+        guard let hierarchy = currentSpatial else { return }
+        let wanted = Set(ids.filter { $0 != -1 })
+        let groups = spatialGroups.filter { wanted.contains($0.id) }
+        guard groups.count >= 2 else { return }
+        let mergedID = -1_000 - manuallyMergedSpatialGroups.count
+        guard let merged = hierarchy.mergedGroup(groups, id: mergedID) else { return }
+        let eventIDs = Set(merged.eventIDs)
+        manuallyMergedSpatialGroups.removeAll { !eventIDs.isDisjoint(with: $0.eventIDs) }
+        manuallyMergedSpatialGroups.append(merged)
+        selectedSpatialGroupIDs = [mergedID]
+        spatialSelectionAnchorID = mergedID
+        waveformGroupID = nil
+        selectedEventID = merged.representativeID
+        eventFocus = true
     }
 
     @MainActor

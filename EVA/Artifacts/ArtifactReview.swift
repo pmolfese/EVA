@@ -58,6 +58,9 @@ nonisolated struct ArtifactReviewState: Codable, Sendable {
     var sourceArtifactID: UUID? = nil
     var sourceThresholdKind: EyeArtifactKind? = nil
     var partitionsSource: Bool? = nil
+    /// Cross-definition moves retain the detector/definition that originally
+    /// produced each imported candidate. Optional for old sidecar compatibility.
+    var importedCandidateSourceIDs: [String: UUID]? = nil
 }
 
 nonisolated enum ArtifactReviewBand: String, CaseIterable, Identifiable, Sendable {
@@ -311,8 +314,130 @@ nonisolated enum ArtifactReviewEngine {
         return child
     }
 
+    /// Moves reviewed candidates into another class. Manual/automatic choices
+    /// and source provenance travel with the events.
+    static func transfer(eventIDs: Set<String>, source: inout DefinedArtifact,
+                         destination: inout DefinedArtifact) -> Bool {
+        prepare(&source); prepare(&destination)
+        guard var sourceState = source.reviewState, var destinationState = destination.reviewState else { return false }
+        let sourceRoot = sourceState.sourceArtifactID ?? source.id
+        let destinationRoot = destinationState.sourceArtifactID ?? destination.id
+        let moved = sourceState.candidates.filter { eventIDs.contains($0.id) }
+        guard !moved.isEmpty, moved.count < sourceState.candidates.count else { return false }
+        let movedIDs = Set(moved.map(\.id))
+        let movedChoices = sourceState.choices.filter { movedIDs.contains($0.key) }
+        let sourceImports = sourceState.importedCandidateSourceIDs ?? [:]
+        let movedOrigins = Dictionary(uniqueKeysWithValues: moved.map {
+            ($0.id, sourceImports[$0.id] ?? sourceRoot)
+        })
+
+        sourceState.candidates.removeAll { movedIDs.contains($0.id) }
+        sourceState.choices = sourceState.choices.filter { !movedIDs.contains($0.key) }
+        sourceState.referenceEventIDs = sourceState.candidates.map(\.id)
+        let remainingSourceImports = sourceImports.filter { !movedIDs.contains($0.key) }
+        sourceState.importedCandidateSourceIDs = remainingSourceImports.isEmpty ? nil : remainingSourceImports
+
+        let existing = Set(destinationState.candidates.map(\.id))
+        destinationState.candidates.append(contentsOf: moved.filter { !existing.contains($0.id) })
+        destinationState.candidates.sort {
+            if $0.centerTimeSeconds == $1.centerTimeSeconds { return $0.id < $1.id }
+            return $0.centerTimeSeconds < $1.centerTimeSeconds
+        }
+        for (id, choice) in movedChoices { destinationState.choices[id] = choice }
+        var destinationImports = destinationState.importedCandidateSourceIDs ?? [:]
+        for (id, origin) in movedOrigins {
+            if origin == destinationRoot { destinationImports.removeValue(forKey: id) }
+            else { destinationImports[id] = origin }
+        }
+        destinationState.importedCandidateSourceIDs = destinationImports.isEmpty ? nil : destinationImports
+        destinationState.referenceEventIDs = destinationState.candidates.map(\.id)
+        destinationState.partitionsSource = true
+        // The detector-owned root has no parent. Keeping its source ID nil is
+        // important because descendant cleanup identifies children by this ID.
+        destinationState.sourceArtifactID = destination.id == destinationRoot ? nil : destinationRoot
+        sourceState.partitionsSource = true
+        sourceState.sourceArtifactID = source.id == sourceRoot ? nil : sourceRoot
+
+        let movedDetails = source.thresholdOcularCandidates?.filter { movedIDs.contains($0.id) } ?? []
+        // The root retains the detector's complete candidate ledger so an
+        // identical detector refresh recognizes the partition. Descendants
+        // carry only the details for their own members.
+        if source.id != sourceRoot {
+            source.thresholdOcularCandidates?.removeAll { movedIDs.contains($0.id) }
+        }
+        if destination.id != destinationRoot, !movedDetails.isEmpty {
+            var details = destination.thresholdOcularCandidates ?? []
+            let detailIDs = Set(details.map(\.id))
+            details.append(contentsOf: movedDetails.filter { !detailIDs.contains($0.id) })
+            destination.thresholdOcularCandidates = details.sorted {
+                if $0.event.centerTimeSeconds == $1.event.centerTimeSeconds { return $0.id < $1.id }
+                return $0.event.centerTimeSeconds < $1.event.centerTimeSeconds
+            }
+        }
+
+        source.reviewState = sourceState
+        destination.reviewState = destinationState
+        commitChoices(&source); commitChoices(&destination)
+        return true
+    }
+
     static func removeSplitClasses(from artifacts: inout [DefinedArtifact], sourceID: UUID) {
+        // If the family being refreshed currently houses events imported from
+        // another detector, return them before its review state is replaced.
+        // This keeps a refresh of only the destination detector from silently
+        // dropping the source detector's still-valid candidates.
+        var returns: [(event: MFFEvent, choice: ArtifactReviewChoice?, origin: UUID)] = []
+        for artifact in artifacts where artifact.id == sourceID || artifact.reviewState?.sourceArtifactID == sourceID {
+            guard let state = artifact.reviewState, let imports = state.importedCandidateSourceIDs else { continue }
+            for event in state.candidates {
+                guard let origin = imports[event.id] else { continue }
+                returns.append((event, state.choices[event.id], origin))
+            }
+        }
+        for item in returns {
+            guard let index = artifacts.firstIndex(where: { $0.id == item.origin }) else { continue }
+            prepare(&artifacts[index])
+            guard var state = artifacts[index].reviewState else { continue }
+            if !state.candidates.contains(where: { $0.id == item.event.id }) {
+                state.candidates.append(item.event)
+                state.candidates.sort {
+                    if $0.centerTimeSeconds == $1.centerTimeSeconds { return $0.id < $1.id }
+                    return $0.centerTimeSeconds < $1.centerTimeSeconds
+                }
+            }
+            if let choice = item.choice { state.choices[item.event.id] = choice }
+            state.referenceEventIDs = state.candidates.map(\.id)
+            artifacts[index].reviewState = state
+            commitChoices(&artifacts[index])
+        }
+
+        if let rootIndex = artifacts.firstIndex(where: { $0.id == sourceID }),
+           var rootState = artifacts[rootIndex].reviewState,
+           let imports = rootState.importedCandidateSourceIDs, !imports.isEmpty {
+            let importedIDs = Set(imports.keys)
+            rootState.candidates.removeAll { importedIDs.contains($0.id) }
+            rootState.choices = rootState.choices.filter { !importedIDs.contains($0.key) }
+            rootState.referenceEventIDs = rootState.candidates.map(\.id)
+            rootState.importedCandidateSourceIDs = nil
+            artifacts[rootIndex].reviewState = rootState
+            commitChoices(&artifacts[rootIndex])
+        }
+
         artifacts.removeAll { $0.reviewState?.sourceArtifactID == sourceID }
+        for index in artifacts.indices {
+            guard var state = artifacts[index].reviewState,
+                  let imports = state.importedCandidateSourceIDs else { continue }
+            let removed = Set(imports.compactMap { $0.value == sourceID ? $0.key : nil })
+            guard !removed.isEmpty else { continue }
+            state.candidates.removeAll { removed.contains($0.id) }
+            state.choices = state.choices.filter { !removed.contains($0.key) }
+            state.referenceEventIDs = state.candidates.map(\.id)
+            let remaining = imports.filter { !removed.contains($0.key) }
+            state.importedCandidateSourceIDs = remaining.isEmpty ? nil : remaining
+            artifacts[index].reviewState = state
+            artifacts[index].thresholdOcularCandidates?.removeAll { removed.contains($0.id) }
+            commitChoices(&artifacts[index])
+        }
     }
 
     static func analyze(artifact: DefinedArtifact, signal: MFFSignalData, excluding: Set<Int>,

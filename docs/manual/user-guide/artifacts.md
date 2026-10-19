@@ -78,18 +78,50 @@ polarity-invariant comparison uses global Pearson correlation to sign-align
 members before forming a centroid, so inverse maps do not cancel. It never takes
 the absolute value of individual sensors. Cards retain and report the number of
 events in each +/− orientation relative to the family's canonical centroid; raw
-maps are unchanged. Move **Broader / Finer** to combine or
-separate families, then click a card to browse its examples. Each card shows a
-representative real event, its count, and the minimum spatial comparison score to
-the group center (`|r|` for Global Pearson). Amplitude is normalized away. The
-displayed setting is spatial cohesion, not artifact confidence. Fine
+maps are unchanged.
+
+Use **Grouping** to choose how the spatial families are formed:
+
+- **Cohesion** lets the score threshold determine the number of groups. **Minimum**
+  requires every member to meet the threshold. **10th percentile** is less likely
+  to split a stable family because of one unusual event; cards still report the
+  minimum, 10th-percentile, and median fit so the tail remains visible.
+- **Target count** requests a fixed number of spatial families. EVA takes a cut
+  from the cached tree, then performs up to eight sign-consistent spherical
+  refinement passes so events can move between the initial branches. **Use
+  suggested K** selects a simple cohesion-gain elbow as a starting point, not a
+  claim that K is biologically correct.
+
+The **Outlier floor** applies in either mode. An event below that permissive fit
+to its assigned centroid remains **Unassigned** instead of being forced into one
+of the requested groups. Amplitude and spatial offset are normalized away. The
+grouping controls describe within-group fit, not artifact confidence; fine
 settings can produce single examples, which do not establish a new artifact type.
+
+Cards default to **Canonical centroids**. Every card uses the same color scale,
+which makes maps with the same shape but different event amplitude directly
+comparable. Projective maps are given a stable display sign—frontal-positive when
+the layout supports it—without changing the raw events. Switch to
+**Representative events** to inspect a real member and its original amplitude and
+sign. The closest pair is reported above the cards, with a **Likely duplicate**
+label at high similarity.
+
+Click one card to browse it. Shift-click selects a contiguous range;
+Control-click or Command-click toggles discontiguous cards. **Merge selected** or
+**Merge pair** combines those families for this preview and enables one waveform
+subgroup analysis across the combined members. **Clear preview merges** restores
+the computed groups. Multi-selection can also move the union into a new class,
+an existing sibling, or between the threshold **Eye Blinks** and **Eye Movements**
+categories. A move is persistent: events leave the source class, carry their
+Include/Hold/Exclude choices and detector origin, and are rebuilt into the
+destination's independent reference and treatment.
+
 Missing layouts, flat maps, incomplete windows, and insufficient shared sensor
 coverage leave events **Unassigned**. Click **All** to clear the preview filter.
-Spatial groups are preview-only: they do not change decisions, cleaning, or
-create classes. Building runs in the background; Broader/Finer reuses the cached
-tree without rescanning the recording. The session cache is refreshed when the
-signal, definition, or eligible sensor mask changes.
+Grouping, selection, and preview merges do not by themselves change decisions or
+cleaning. Building runs in the background; cohesion cuts reuse the cached tree
+without rescanning the recording. The session cache is refreshed when the signal,
+definition, or eligible sensor mask changes.
 
 When global polarity is ignored, **Comparison** offers five preview costs:
 
@@ -107,13 +139,15 @@ When global polarity is ignored, **Comparison** offers five preview costs:
   montages; the Pearson component prevents a matching value distribution at the
   wrong scalp locations from receiving a perfect score.
 
-These scores share the same 0.65–0.98 **Broader / Finer** control, but their
+These scores share the same 0.50–0.98 **Broader / Finer** control, but their
 numeric values are not interchangeable. Compare the resulting maps visually
 rather than treating one threshold as equivalent across costs. Signed polarity
 always uses ordinary Pearson correlation.
 
-Select a spatial group to reveal **Waveform subgroups** beneath it. These compare
-aligned temporal shapes only inside that spatial family. Use the second
+Select one spatial group—or preview-merge several—to reveal **Waveform subgroups**
+beneath it. These compare aligned temporal shapes only inside that spatial family.
+An unmerged multi-selection intentionally pauses waveform grouping because it does
+not yet define one centroid family. Use the second
 **Broader / Finer** slider, then click a **Shape** card to filter the examples
 further. **Whole spatial family** clears just the waveform filter; **All** clears
 both filters. Blue shows the normalized aligned subgroup mean and gray shows a
@@ -155,9 +189,12 @@ scores remain on hold; hold and excluded events are omitted from cleaning.
 manual edits made after the automatic pass. These thresholds are adjustable
 review criteria, not a guarantee that an event is artifact or brain activity.
 
-Choose a similarity band and **Split group into class…** to move its examples
-into a separately named artifact with its own average, window, and treatment.
-The parent no longer contains those events. **Rebuild from included** updates a
+Choose a similarity band, waveform subgroup, or one or more spatial cards and
+select **Move selection to class…**. Create a separately named artifact with its
+own average, window, and treatment, or choose an existing sibling class or the
+other threshold ocular category—for example, move lateral eye-movement families
+out of Eye Blinks into Eye Movements. The source no longer contains those events.
+The last event cannot be moved out of a class. **Rebuild from included** updates a
 class's reference explicitly; changing inclusion alone keeps the reference
 stable. Each class is then available in Clean Artifacts for its own treatment
 and options. Reviewed BCG PCA-S uses the included artifact events as beat
