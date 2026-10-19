@@ -149,20 +149,28 @@ quadratic pairwise matrix is allocated. Recursion is capped at 32. This is a
 spatial browsing heuristic, not a validated artifact classifier or agglomerative
 linkage algorithm.
 
-Projective mode exposes five comparison costs. Every cost first chooses one
-global orientation from Pearson correlation; no neighborhood or histogram term
-may flip signs independently. `Global Pearson` uses `|r|`. `Local Pearson`
+Spatial grouping exposes eight comparison scores. Projective mode evaluates the
+two whole-map orientations and keeps the better score; no neighborhood may flip
+independently. `Global Pearson` uses `|r|`. `Local Pearson`
 averages correlations from one overlapping nearest-neighbor neighborhood per
 sensor, using the layout's 2D coordinates and a montage-scaled neighborhood size
 bounded to 3–12 sensors. If geometry is unavailable it falls back to the global
-score. `Spearman` applies average ranks for ties. `Robust composite` weights
+score. `LPA+` and `LPC+` adapt AFNI's local-Pearson-plus costs to a fixed EEG
+sensor set. Their nonlinear local term uses Fisher-transformed neighborhood
+correlations with strong relationships weighted more heavily. LPA+ rewards
+same contrast; LPC+ rewards opposite contrast. Hellinger affinity, symmetric
+correlation ratio, and normalized information agreement stabilize both scores;
+the volume-overlap term is omitted because every compared map already uses the
+same sensors. `crM` is the product of the two directional binned correlation
+ratios. `Spearman` applies average ranks for ties. `Robust composite` weights
 global Pearson 0.30, local Pearson 0.30, Spearman 0.25, and an 85%-residual-
 trimmed correlation 0.15. `Information composite` weights electrode-wise Pearson
 0.55 and a distributional score 0.45; the latter combines normalized mutual
 information 0.40, Hellinger histogram affinity 0.30, and symmetric binned
 correlation ratio 0.30. Histograms use 3–8 montage-scaled bins. Retaining the
 electrode-wise term prevents identical marginal distributions at different
-locations from scoring perfectly. Signed mode always uses ordinary Pearson.
+locations from scoring perfectly. Signed mode preserves the selected comparison
+score without trying the globally reversed map.
 
 These metrics are AFNI-inspired rather than implementations of AFNI volume
 registration: there is no affine search, image resampling, automask overlap, or
@@ -173,7 +181,7 @@ as `score` and keeps the results preview-only.
 The grouping layer supports two cuts over the same cached hierarchy. **Cohesion**
 cuts at a selected centroid score from 0.50–0.98. It can use the minimum member
 score or the interpolated 10th percentile; every materialized group stores
-minimum, p10, and median fit. **Target count** greedily splits the tree to K seeds,
+minimum, p10, and median fit. **Force count** greedily splits the tree to K seeds,
 then performs up to eight spherical/projective centroid-reassignment passes.
 Representative members are fixed as anchors so no requested cluster disappears.
 The suggested K is the largest drop between consecutive weighted-cohesion gains,
@@ -204,6 +212,13 @@ partial tree is cached. Cached cohesion cuts only traverse nodes; target refinem
 touches normalized feature vectors but never signal samples. Grouping, filtering,
 and preview merges do not modify choices or replay. A separately confirmed class
 move does, as described below.
+
+Review defaults waveform-only hand definitions to **Waveform bands**. Definitions
+that used a topographic reference, plus threshold ocular families, default to
+**Spatial groups**. Ocular spatial review starts with polarity ignored, LPA+, and
+a forced two-family preview. This is only a browsing default: the outlier floor
+can still leave incompatible events unassigned, and the user can request one or
+more families or switch back to cohesion.
 
 `ArtifactWaveformGrouping` adds a second hierarchy nested inside one selected
 spatial node or one session-only preview-merged family. It reuses finite

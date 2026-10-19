@@ -15,11 +15,14 @@ nonisolated enum ArtifactSpatialPolarityMode: String, CaseIterable, Identifiable
     var id: String { rawValue }
 }
 
-/// AFNI-inspired comparison costs for polarity-invariant scalp fields. Signed
-/// grouping deliberately remains ordinary Pearson correlation.
+/// AFNI-inspired comparison scores for scalp fields. Polarity-invariant mode
+/// evaluates both whole-map orientations; signed mode evaluates the raw map.
 nonisolated enum ArtifactSpatialSimilarityMetric: String, CaseIterable, Identifiable, Sendable {
     case globalPearson = "Global Pearson"
     case localPearson = "Local Pearson"
+    case lpaPlus = "LPA+ (same contrast)"
+    case lpcPlus = "LPC+ (opposite contrast)"
+    case correlationRatioProduct = "crM (correlation ratio)"
     case spearman = "Spearman"
     case robustComposite = "Robust composite"
     case informationComposite = "Information composite"
@@ -181,15 +184,31 @@ nonisolated enum ArtifactSpatialGrouping {
         return correlation(lhs, rhs, indices: Array(indices)) ?? dot(lhs, rhs)
     }
 
-    /// Histogram-derived terms are intentionally blended with electrode-wise
-    /// Pearson agreement. Distribution agreement alone would discard scalp location.
-    private static func informationAgreement(_ lhs: [Double], _ rhs: [Double]) -> Double {
+    private struct InformationScores {
+        let normalizedMutualInformation: Double
+        let hellingerAffinity: Double
+        let additiveCorrelationRatio: Double
+        let multiplicativeCorrelationRatio: Double
+    }
+
+    /// Histogram-derived terms are intentionally used as stabilizers for the
+    /// AFNI-inspired costs. On their own they discard electrode identity.
+    private static func informationScores(_ lhs: [Double], _ rhs: [Double]) -> InformationScores {
         let count = lhs.count
-        guard count >= 4 else { return max(0, dot(lhs, rhs)) }
+        guard count >= 4 else {
+            let fallback = max(0, dot(lhs, rhs))
+            return InformationScores(normalizedMutualInformation: fallback,
+                hellingerAffinity: fallback, additiveCorrelationRatio: fallback,
+                multiplicativeCorrelationRatio: fallback)
+        }
         let bins = max(3, min(8, Int(Double(count).squareRoot().rounded())))
         let lower = min(lhs.min() ?? 0, rhs.min() ?? 0)
         let upper = max(lhs.max() ?? 0, rhs.max() ?? 0)
-        guard upper - lower > 1e-12 else { return 0 }
+        guard upper - lower > 1e-12 else {
+            return InformationScores(normalizedMutualInformation: 0,
+                hellingerAffinity: 0, additiveCorrelationRatio: 0,
+                multiplicativeCorrelationRatio: 0)
+        }
         func bin(_ value: Double) -> Int {
             min(bins - 1, max(0, Int((value - lower) / (upper - lower) * Double(bins))))
         }
@@ -227,47 +246,102 @@ nonisolated enum ArtifactSpatialGrouping {
             }
             return max(0, min(1, between / total))
         }
-        let symmetricRatio = (correlationRatio(groups: xb, values: rhs)
-            + correlationRatio(groups: yb, values: lhs)) / 2
-        return 0.4 * normalizedMI + 0.3 * hellingerAffinity + 0.3 * symmetricRatio
+        let forwardRatio = correlationRatio(groups: xb, values: rhs)
+        let reverseRatio = correlationRatio(groups: yb, values: lhs)
+        return InformationScores(normalizedMutualInformation: normalizedMI,
+            hellingerAffinity: hellingerAffinity,
+            additiveCorrelationRatio: (forwardRatio + reverseRatio) / 2,
+            multiplicativeCorrelationRatio: forwardRatio * reverseRatio)
     }
 
-    /// All polarity-invariant costs first choose exactly one orientation from
-    /// global Pearson correlation. Neighborhoods and histogram terms cannot flip
-    /// independently, which preserves the physical meaning of a scalp field.
+    private static func informationAgreement(_ lhs: [Double], _ rhs: [Double]) -> Double {
+        let scores = informationScores(lhs, rhs)
+        return 0.4 * scores.normalizedMutualInformation
+            + 0.3 * scores.hellingerAffinity
+            + 0.3 * scores.additiveCorrelationRatio
+    }
+
+    /// EEG-sensor adaptation of AFNI's local-Pearson aggregation. AFNI applies
+    /// Fisher's transform and squares its magnitude so strong coherent local
+    /// relationships dominate weak neighborhoods. Mapping the aggregate back
+    /// through tanh keeps EVA's public similarity scale in -1...1.
+    private static func nonlinearLocalPearson(_ lhs: [Double], _ rhs: [Double],
+                                              neighborhoods: [[Int]],
+                                              fallback: Double) -> Double {
+        let values = neighborhoods.compactMap { correlation(lhs, rhs, indices: $0) }
+        guard !values.isEmpty else { return fallback }
+        let aggregate = values.reduce(0.0) { result, value in
+            let bounded = min(1 - 1e-9, max(-1 + 1e-9, value))
+            let fisher = atanh(bounded)
+            return result + fisher * abs(fisher)
+        } / Double(values.count)
+        return aggregate.sign == .minus
+            ? -tanh(sqrt(abs(aggregate)))
+            : tanh(sqrt(aggregate))
+    }
+
+    /// Polarity-invariant costs evaluate both *global* orientations and keep the
+    /// better one. Neighborhoods never flip independently, preserving one
+    /// physically meaningful scalp-field axis per event.
     static func similarityScore(_ lhs: [Double], _ rhs: [Double],
                                 polarityMode: ArtifactSpatialPolarityMode,
                                 metric: ArtifactSpatialSimilarityMetric,
                                 localNeighborhoods: [[Int]] = []) -> Double {
         guard lhs.count == rhs.count, !lhs.isEmpty else { return -1 }
-        let raw = dot(lhs, rhs)
-        guard polarityMode == .ignoreGlobalPolarity else { return max(-1, min(1, raw)) }
-        let aligned = raw < 0 ? rhs.map { -$0 } : rhs
-        let global = abs(raw)
-        if global > 1 - 1e-12 { return 1 }
-        func localScore() -> Double {
-            let values = localNeighborhoods.compactMap { correlation(lhs, aligned, indices: $0) }
-            return values.isEmpty ? global : values.reduce(0, +) / Double(values.count)
+        let exact = dot(lhs, rhs)
+        if polarityMode == .ignoreGlobalPolarity, abs(exact) > 1 - 1e-12 { return 1 }
+        if polarityMode == .signed {
+            if metric != .lpcPlus, exact > 1 - 1e-12 { return 1 }
+            if metric == .lpcPlus, exact < -1 + 1e-12 { return 1 }
         }
-        func rankScore() -> Double {
-            guard let a = rankVector(lhs), let b = rankVector(aligned) else { return global }
-            return dot(a, b)
+        func score(_ candidate: [Double]) -> Double {
+            let global = max(-1, min(1, dot(lhs, candidate)))
+            func localScore() -> Double {
+                let values = localNeighborhoods.compactMap { correlation(lhs, candidate, indices: $0) }
+                return values.isEmpty ? global : values.reduce(0, +) / Double(values.count)
+            }
+            func rankScore() -> Double {
+                guard let a = rankVector(lhs), let b = rankVector(candidate) else { return global }
+                return dot(a, b)
+            }
+            switch metric {
+            case .globalPearson:
+                return global
+            case .localPearson:
+                return localScore()
+            case .lpaPlus:
+                let local = abs(nonlinearLocalPearson(lhs, candidate,
+                    neighborhoods: localNeighborhoods, fallback: global))
+                let info = informationScores(lhs, candidate)
+                // AFNI lpa+ defaults: lpa + .4 hel + .4 crA + .2 nmi;
+                // volume-overlap is constant for maps on the same sensors.
+                return (local + 0.4 * info.hellingerAffinity
+                    + 0.4 * info.additiveCorrelationRatio
+                    + 0.2 * info.normalizedMutualInformation) / 2.0
+            case .lpcPlus:
+                let local = nonlinearLocalPearson(lhs, candidate,
+                    neighborhoods: localNeighborhoods, fallback: global)
+                let info = informationScores(lhs, candidate)
+                // AFNI LPC rewards inverse contrast. Its MI term is represented
+                // by the normalized information agreement on this small sensor set.
+                return (-local + 0.4 * info.hellingerAffinity
+                    + 0.4 * info.additiveCorrelationRatio
+                    + 0.4 * info.normalizedMutualInformation) / 2.2
+            case .correlationRatioProduct:
+                return informationScores(lhs, candidate).multiplicativeCorrelationRatio
+            case .spearman:
+                return rankScore()
+            case .robustComposite:
+                return 0.30 * global + 0.30 * localScore()
+                    + 0.25 * rankScore() + 0.15 * trimmedCorrelation(lhs, candidate)
+            case .informationComposite:
+                return 0.55 * global + 0.45 * informationAgreement(lhs, candidate)
+            }
         }
-        let score: Double
-        switch metric {
-        case .globalPearson:
-            score = global
-        case .localPearson:
-            score = localScore()
-        case .spearman:
-            score = rankScore()
-        case .robustComposite:
-            score = 0.30 * global + 0.30 * localScore()
-                + 0.25 * rankScore() + 0.15 * trimmedCorrelation(lhs, aligned)
-        case .informationComposite:
-            score = 0.55 * global + 0.45 * informationAgreement(lhs, aligned)
-        }
-        return max(-1, min(1, score))
+        let direct = score(rhs)
+        let result = polarityMode == .ignoreGlobalPolarity
+            ? max(direct, score(rhs.map { -$0 })) : direct
+        return max(-1, min(1, result))
     }
 
     static func centroid(features: [ArtifactSpatialFeature], indices: [Int],
@@ -326,7 +400,7 @@ nonisolated enum ArtifactSpatialGrouping {
             representativeID: features[indices[representative]].eventID,
             minimumCorrelation: sorted.first ?? -1, meanFeature: center,
             orientationSigns: signs, polarityMode: polarityMode,
-            similarityMetric: polarityMode == .signed ? .globalPearson : similarityMetric,
+            similarityMetric: similarityMetric,
             tenthPercentileCorrelation: percentile(sorted, fraction: 0.10),
             medianCorrelation: percentile(sorted, fraction: 0.50))
     }
@@ -438,7 +512,7 @@ nonisolated enum ArtifactSpatialGrouping {
         return ArtifactSpatialHierarchy(channels: channels, features: features,
             unassignedIDs: unassignedIDs, nodes: nodes, root: root,
             polarityMode: polarityMode,
-            similarityMetric: polarityMode == .signed ? .globalPearson : similarityMetric,
+            similarityMetric: similarityMetric,
             localNeighborhoods: localNeighborhoods)
     }
 }

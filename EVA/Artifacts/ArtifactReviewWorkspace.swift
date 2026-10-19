@@ -3,7 +3,7 @@ import AppKit
 
 private enum ArtifactSpatialGroupingControl: String, CaseIterable, Identifiable {
     case cohesion = "Cohesion"
-    case targetCount = "Target count"
+    case targetCount = "Force count"
     var id: String { rawValue }
 }
 
@@ -56,7 +56,7 @@ struct ArtifactReviewWorkspace: View {
     @State private var analysis: ArtifactReviewAnalysis?
     @State private var loadedKey = ""
     @State private var selectedEventID: String?
-    @State private var usesSpatialGroups = true
+    @State private var usesSpatialGroups = false
     @State private var spatialHierarchy: ArtifactSpatialHierarchy?
     @State private var spatialLoadedKey = ""
     @State private var selectedSpatialGroupIDs: Set<Int> = []
@@ -65,7 +65,7 @@ struct ArtifactReviewWorkspace: View {
     @State private var spatialPolarityOverride: ArtifactSpatialPolarityMode?
     @State private var spatialSimilarityMetric = ArtifactSpatialSimilarityMetric.globalPearson
     @State private var spatialGroupingControl = ArtifactSpatialGroupingControl.cohesion
-    @State private var spatialTargetCount = 6
+    @State private var spatialTargetCount = 2
     @State private var spatialCohesionRule = ArtifactSpatialCohesionRule.tenthPercentile
     @State private var spatialOutlierFloor = 0.60
     @State private var spatialCut: ArtifactSpatialCut?
@@ -134,10 +134,23 @@ struct ArtifactReviewWorkspace: View {
         waveformPolarityOverride ?? (spatialPolarityMode == .ignoreGlobalPolarity ? .orientToSpatialFamily : .preserve)
     }
     private var effectiveSpatialSimilarityMetric: ArtifactSpatialSimilarityMetric {
-        spatialPolarityMode == .signed ? .globalPearson : spatialSimilarityMetric
+        spatialSimilarityMetric
     }
     private var spatialScoreLabel: String {
         effectiveSpatialSimilarityMetric == .globalPearson ? (spatialPolarityMode == .signed ? "r" : "|r|") : "score"
+    }
+    private func prefersSpatialGroups(_ artifact: DefinedArtifact?) -> Bool {
+        guard let artifact else { return false }
+        return artifact.topography != nil || ArtifactReviewEngine.isThresholdFamily(artifact)
+    }
+    private func resetGroupingDefaults(for artifact: DefinedArtifact?) {
+        usesSpatialGroups = prefersSpatialGroups(artifact)
+        spatialPolarityOverride = nil
+        spatialSimilarityMetric = artifact?.type == .ocular ? .lpaPlus : .globalPearson
+        spatialGroupingControl = artifact?.type == .ocular ? .targetCount : .cohesion
+        spatialTargetCount = 2
+        spatialCohesionRule = .tenthPercentile
+        spatialOutlierFloor = 0.60
     }
     private var spatialTaskKey: String {
         usesSpatialGroups && currentAnalysis != nil
@@ -263,7 +276,7 @@ struct ArtifactReviewWorkspace: View {
                                 }
                                 Picker("Group by", selection: $usesSpatialGroups) {
                                     Text("Waveform bands").tag(false)
-                                    Text("Spatial groups").tag(true)
+                                    Text("Spatial families").tag(true)
                                 }.pickerStyle(.segmented).frame(width: 310)
                                 if usesSpatialGroups {
                                     spatialGroupingPreview(result)
@@ -300,6 +313,7 @@ struct ArtifactReviewWorkspace: View {
         .task(id: spatialTaskKey) { await loadSpatialGrouping() }
         .task(id: spatialCutTaskKey) { await loadSpatialCut() }
         .task(id: waveformTaskKey) { await loadWaveformGrouping() }
+        .onAppear { resetGroupingDefaults(for: selected) }
         .onChange(of: waveformTaskKey) { _, _ in
             waveformGroupID = nil
         }
@@ -320,12 +334,7 @@ struct ArtifactReviewWorkspace: View {
         .onChange(of: selected?.id) { _, _ in
             band = nil
             clearSpatialSelection()
-            spatialPolarityOverride = nil
-            spatialSimilarityMetric = .globalPearson
-            spatialGroupingControl = .cohesion
-            spatialTargetCount = 6
-            spatialCohesionRule = .tenthPercentile
-            spatialOutlierFloor = 0.60
+            resetGroupingDefaults(for: selected)
             manuallyMergedSpatialGroups = []
             waveformPolarityOverride = nil
             selectedEventID = nil
@@ -463,8 +472,8 @@ struct ArtifactReviewWorkspace: View {
     private func spatialGroupingPreview(_ result: ArtifactReviewAnalysis) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Spatial grouping · preview").font(.callout.weight(.medium))
-                ArtifactReviewHelp(title: "Spatial grouping", text: "Cohesion cuts the cached divisive tree by its selected minimum or 10th-percentile fit. Target count starts from a requested tree cut, then performs sign-consistent spherical refinement so events can move across early branches. The outlier floor leaves genuinely incompatible maps unassigned instead of forcing them into a family. Canonical centroid cards use a shared scale and orient projective fields with the frontal average positive; representative-event cards retain their raw sign. Shift-click selects a contiguous range. Control-click or Command-click toggles discontiguous cards. Multi-selected families can be preview-merged or moved together into a separate correction class. These controls remain preview-only until a class move is confirmed.")
+                Text("Spatial families · preview").font(.callout.weight(.medium))
+                ArtifactReviewHelp(title: "Spatial families", text: "These are alternate views of the matched events, not separate artifact definitions or cleaning passes. Force count directly requests N families and then refines membership across early tree branches. Cohesion instead lets a score threshold determine the count. The outlier floor leaves genuinely incompatible maps unassigned rather than inventing another family. Canonical centroid cards use a shared scale and orient projective fields with the frontal average positive; representative-event cards retain their raw sign. Shift-click selects a contiguous range. Control-click or Command-click toggles discontiguous cards. Multi-selected families can be preview-merged or moved together into a separate correction class.")
                 Spacer()
                 Text("Preview only").font(.caption).foregroundStyle(.secondary)
             }
@@ -487,11 +496,10 @@ struct ArtifactReviewWorkspace: View {
                     ForEach(ArtifactSpatialSimilarityMetric.allCases) { metric in Text(metric.rawValue).tag(metric) }
                 }
                 .pickerStyle(.menu).frame(width: 260)
-                .disabled(spatialPolarityMode == .signed)
                 .onChange(of: spatialSimilarityMetric) { _, _ in
                     clearSpatialSelection(); selectedEventID = nil
                 }
-                ArtifactReviewHelp(title: "Spatial comparison", text: "Global Pearson is the current whole-map |r| method. Local Pearson averages correlations over overlapping physical electrode neighborhoods after choosing one global sign. Spearman compares electrode ranks and is less sensitive to extreme amplitudes. Robust composite blends global, local, rank, and trimmed correlations. Information composite blends electrode-wise correlation with normalized mutual information, Hellinger histogram affinity, and symmetric correlation ratio; it is experimental because histogram estimates are weak for small montages. Signed polarity always uses ordinary Pearson. All modes preserve electrode identity and use one global orientation—individual regions never flip independently.")
+                ArtifactReviewHelp(title: "Spatial comparison", text: "Global Pearson compares the whole map. Local Pearson averages overlapping physical sensor neighborhoods. LPA+ is the AFNI-inspired same-contrast composite and is the ocular default: nonlinear local correlation stabilized by Hellinger, correlation-ratio, and information agreement. LPC+ is its opposite-contrast counterpart. crM is the product of the two directional correlation ratios and tolerates nonlinear intensity relationships, but can ignore sensor identity more readily than Pearson. Spearman compares ranks. Robust and Information composites retain the earlier experimental blends. Ignore global polarity evaluates exactly two whole-map orientations; individual regions never flip independently.")
             }
             HStack(spacing: 8) {
                 Picker("Grouping", selection: $spatialGroupingControl) {
@@ -500,7 +508,7 @@ struct ArtifactReviewWorkspace: View {
                 Picker("Cohesion", selection: $spatialCohesionRule) {
                     ForEach(ArtifactSpatialCohesionRule.allCases) { value in Text(value.rawValue).tag(value) }
                 }.pickerStyle(.segmented).frame(width: 260)
-                ArtifactReviewHelp(title: "Grouping and cohesion", text: "Minimum requires every member to meet the cut and can fragment a family because of one tail event. 10th percentile allows a small tail while still reporting minimum, 10th-percentile, and median fit on every card. Target count requests a number of families and refines their membership; Cohesion lets the score threshold determine the number.")
+                ArtifactReviewHelp(title: "Grouping and cohesion", text: "Force count is the direct control when you want one, two, or another fixed number of spatial families; it refines membership after the tree seed and may leave true outliers unassigned. Cohesion lets the score threshold determine the count. Minimum requires every member to meet the cut and can fragment a family because of one tail event. 10th percentile tolerates a small tail while reporting minimum, 10th-percentile, and median fit on every card.")
             }
             if spatialGroupingControl == .cohesion {
                 HStack {
@@ -513,8 +521,14 @@ struct ArtifactReviewWorkspace: View {
                 }
             } else {
                 HStack(spacing: 10) {
-                    Stepper("Spatial families: \(spatialTargetCount)", value: $spatialTargetCount,
+                    Stepper("Force spatial families: \(spatialTargetCount)", value: $spatialTargetCount,
                         in: 1...max(1, min(40, currentSpatial?.features.count ?? 1)))
+                    ForEach(1...3, id: \.self) { count in
+                        Button("\(count)") { spatialTargetCount = count }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(count > (currentSpatial?.features.count ?? 0))
+                    }
                     if let hierarchy = currentSpatial {
                         let suggested = hierarchy.suggestedTargetCount(
                             maximum: min(40, hierarchy.features.count), cohesionRule: spatialCohesionRule)
@@ -530,7 +544,7 @@ struct ArtifactReviewWorkspace: View {
                     .accessibilityLabel("Spatial outlier floor")
                 Text("\(spatialOutlierFloor, specifier: "%.2f")")
                     .font(.caption.monospacedDigit()).frame(width: 38)
-                ArtifactReviewHelp(title: "Outlier floor", text: "Events scoring below this permissive floor against their assigned centroid stay spatially unassigned. Target count therefore requests K coherent families without forcing every mapped event into one. Tree-unusable events remain unassigned as before.")
+                ArtifactReviewHelp(title: "Outlier floor", text: "Events scoring below this permissive floor against their assigned centroid stay spatially unassigned. Force count therefore requests K coherent families without forcing every mapped event into one. Tree-unusable events remain unassigned as before.")
             }
             HStack(spacing: 8) {
                 Picker("Card maps", selection: $spatialCardMapMode) {
@@ -555,7 +569,7 @@ struct ArtifactReviewWorkspace: View {
                 }
                 if let duplicate = closestSpatialGroups {
                     HStack(spacing: 8) {
-                        Text("\(duplicate.score >= 0.90 ? "Likely duplicate" : "Closest pair"): Group \(duplicate.leftIndex + 1) + Group \(duplicate.rightIndex + 1) · \(spatialScoreLabel) \(duplicate.score, specifier: "%.2f")")
+                        Text("\(duplicate.score >= 0.90 ? "Likely duplicate" : "Closest pair"): Family \(duplicate.leftIndex + 1) + Family \(duplicate.rightIndex + 1) · \(spatialScoreLabel) \(duplicate.score, specifier: "%.2f")")
                             .font(.caption).foregroundStyle(duplicate.score >= 0.90 ? .orange : .secondary)
                         Button("Select pair") { selectSpatialPair(duplicate.leftID, duplicate.rightID) }
                             .font(.caption)
@@ -573,7 +587,7 @@ struct ArtifactReviewWorkspace: View {
                                 selectSpatialGroup(group, at: index)
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Group \(index + 1) · \(group.eventIDs.count)").font(.caption.weight(.medium))
+                                    Text("Family \(index + 1) · \(group.eventIDs.count)").font(.caption.weight(.medium))
                                     ArtifactReviewTopomapPreview(
                                         topography: spatialCardMapMode == .centroid ? canonicalTopography(for: group) : example?.topography,
                                         layout: sensorLayout, scale: spatialCardScale)

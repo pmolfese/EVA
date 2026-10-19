@@ -548,6 +548,20 @@ extension ArtifactReviewTests {
         let information = ArtifactSpatialGrouping.similarityScore(vector, shuffled,
             polarityMode: .ignoreGlobalPolarity, metric: .informationComposite)
         #expect(information < 0.85, "Distribution agreement must not erase electrode identity")
+
+        let lpaSame = ArtifactSpatialGrouping.similarityScore(vector, vector,
+            polarityMode: .signed, metric: .lpaPlus, localNeighborhoods: neighborhoods)
+        let lpcSame = ArtifactSpatialGrouping.similarityScore(vector, vector,
+            polarityMode: .signed, metric: .lpcPlus, localNeighborhoods: neighborhoods)
+        let lpcOpposite = ArtifactSpatialGrouping.similarityScore(vector, inverse,
+            polarityMode: .signed, metric: .lpcPlus, localNeighborhoods: neighborhoods)
+        #expect(lpcOpposite > lpcSame, "LPC+ should favor inverse contrast in signed mode")
+        #expect(lpaSame > 0.99)
+        #expect(lpcOpposite > 0.99)
+
+        let crM = ArtifactSpatialGrouping.similarityScore(vector, nonlinear,
+            polarityMode: .ignoreGlobalPolarity, metric: .correlationRatioProduct)
+        #expect(crM >= 0 && crM <= 1)
     }
 
     @Test func spatialCutsAreNestedDeterministicAndDoNotLoseEvents() async throws {

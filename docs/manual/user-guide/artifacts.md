@@ -189,6 +189,18 @@ scores remain on hold; hold and excluded events are omitted from cleaning.
 manual edits made after the automatic pass. These thresholds are adjustable
 review criteria, not a guarantee that an event is artifact or brain activity.
 
+Spatial cards are **families inside the currently selected artifact**, not new
+artifact definitions and not additional cleaning passes. Waveform-only hand
+definitions therefore open on Waveform bands first. Topography-defined and
+threshold ocular artifacts open on Spatial groups. For ocular review, **Force
+count** starts at two families; set it to one when all matches should be treated
+as one blink family, or raise it when blinks and lateral movements need separate
+inspection. The outlier floor may still leave genuinely incompatible maps
+unassigned. **LPA+** is the default ocular comparison; **LPC+** explores inverse-
+contrast structure, and **crM** tolerates nonlinear amplitude relationships.
+These AFNI-inspired scores compare fixed EEG sensor maps rather than registering
+or resampling images.
+
 Choose a similarity band, waveform subgroup, or one or more spatial cards and
 select **Move selection to class…**. Create a separately named artifact with its
 own average, window, and treatment, or choose an existing sibling class or the
