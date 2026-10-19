@@ -154,15 +154,8 @@ extension WaveformView {
         let events = segmentableEvents(for: signal)
         let allSummaries = groupedPSAEventSummaries(events)
         let summaries = filteredPSAEventSummaries(allSummaries)
-        let segmentFieldBinding = Binding<PSASegmentField>(
-            get: { epoching.segmentField },
-            set: { newField in
-                epoching.segmentField = newField
-                reconcilePSAEventSelection(for: events)
-            }
-        )
 
-        return VStack(alignment: .leading, spacing: 16) {
+        return VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
                 Text("PSA Segmentation")
                     .font(.title3.weight(.semibold))
@@ -171,30 +164,233 @@ extension WaveformView {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(20)
 
+            Divider()
+            HSplitView {
+                psaCategoryTable(events: events, allSummaries: allSummaries, summaries: summaries)
+                    .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                psaConfigurationInspector(events: events)
+                    .frame(minWidth: 380, idealWidth: 400, maxWidth: 480, maxHeight: .infinity)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                // The running pipeline used to flash its accumulating audit/status
+                // string here (often a long red list of bad channels and segments).
+                // Keep errors available after a run stops, but do not present an
+                // internal log beside the single progress indicator.
+                if !epoching.isApplying, let psaStatus = epoching.statusMessage {
+                    Text(psaStatus)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
+                HStack(spacing: 10) {
+                    Spacer()
+                    if epoching.isApplying {
+                        if let segmentingProgress = epoching.segmentingProgress {
+                            ProgressView(value: segmentingProgress)
+                                .controlSize(.small)
+                                .frame(width: 80)
+                        } else {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(epoching.phaseMessage ?? "Working…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Cancel") {
+                        epoching.showsSheet = false
+                    }
+                    .disabled(epoching.isApplying)
+                    Button("Apply") {
+                        psaTask?.cancel()
+                        psaTask = Task {
+                            await applyPSA(to: signal)
+                            if !Task.isCancelled {
+                                psaTask = nil
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canApplyPSA(events: events) || epoching.isApplying)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(
+            minWidth: 1060, idealWidth: 1200, maxWidth: 1700,
+            minHeight: 560, idealHeight: 720, maxHeight: 1300
+        )
+    }
+
+    private func psaConfigurationInspector(events: [MFFEvent]) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Epoch Window")
+                    .font(.headline)
+                PSAEpochWindowPreview(
+                    preStimulus: epoching.preStimulus,
+                    postStimulus: epoching.postStimulus,
+                    baselineCorrected: epoching.baselineCorrected
+                )
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                    GridRow {
+                        Text("Pre-stimulus (s)")
+                            .font(.caption.weight(.semibold))
+                        TextField("Pre", value: $epoching.preStimulus, format: .number.precision(.fractionLength(3)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                    }
+                    GridRow {
+                        Text("Post-stimulus (s)")
+                            .font(.caption.weight(.semibold))
+                        TextField("Post", value: $epoching.postStimulus, format: .number.precision(.fractionLength(3)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                    }
+                    GridRow {
+                        Text("Offset (s)")
+                            .font(.caption.weight(.semibold))
+                        TextField("Offset", value: $epoching.offset, format: .number.precision(.fractionLength(3)))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                            .help("Ignored for categories that use a DIN timing marker.")
+                    }
+                    GridRow {
+                        Text("DIN Tolerance (s)")
+                            .font(.caption.weight(.semibold))
+                        TextField(
+                            "Tolerance", value: $epoching.timingTolerance, format: .number.precision(.fractionLength(3))
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .help(
+                            "Maximum time between an event and a DIN marker for them to be paired. Events with no DIN within this window are skipped."
+                        )
+                    }
+                }
+
+                let missedCount = psaMissedDINCount(events: events)
+                if missedCount > 0 {
+                    Label(
+                        "\(missedCount) selected event\(missedCount == 1 ? "" : "s") with no DIN within ±\(String(format: "%.3f", epoching.timingTolerance)) s — will be skipped",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+                PSAInspectorSection("Artifact Handling") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Skip epochs containing artifacts", isOn: $epoching.skipIfContainsArtifact)
+                        HStack(spacing: 8) {
+                            Text("Reject").foregroundStyle(.secondary)
+                            Picker("Artifact rule", selection: $epoching.artifactRejectionPolicy) {
+                                ForEach(PSAArtifactRejectionPolicy.allCases) { policy in
+                                    Text(policy.rawValue).tag(policy)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity)
+                            .disabled(!epoching.skipIfContainsArtifact)
+                            Button {
+                                epoching.showsArtifactRejectionOptions = true
+                            } label: {
+                                Image(systemName: "slider.horizontal.3")
+                            }
+                            .buttonStyle(.borderless)
+                            .disabled(!epoching.skipIfContainsArtifact)
+                            .accessibilityLabel("Artifact rejection options")
+                            .help("Choose which artifact kinds cause an epoch to be rejected.")
+                            .popover(isPresented: $epoching.showsArtifactRejectionOptions) {
+                                psaArtifactRejectionOptionsPopover()
+                            }
+                        }
+
+                        Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
+                            .help(
+                                "Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages."
+                            )
+
+                    }
+                }
+                Divider()
+                PSAInspectorSection("Channel Interpolation") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
+                            .help(
+                                "Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected."
+                            )
+
+                        epochBadChannelInlineOptions()
+                            .disabled(!epoching.interpolatesBadChannelsPerEpoch)
+
+                    }
+                }
+                Divider()
+                PSAInspectorSection("Output", initiallyExpanded: true) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Average by category", isOn: $epoching.averageOnApply)
+                            Toggle("Use Decision Matrix", isOn: $epoching.usesDecisionMatrix)
+                                .toggleStyle(.checkbox)
+                                .disabled(!epoching.averageOnApply)
+                                .help(
+                                    "Review channel × epoch health before averaging. Cell decisions override the automatic thresholds."
+                                )
+                        }
+                        Toggle("Average reference", isOn: $epoching.averageReference)
+                            .help(
+                                "Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values)."
+                            )
+                        Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
+                            .help("Subtract each epoch's mean over the pre-stimulus interval from the whole epoch.")
+                    }
+                }
+            }
+            .toggleStyle(.checkbox)
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func psaCategoryTable(
+        events: [MFFEvent], allSummaries: [EventSummary], summaries: [EventSummary]
+    ) -> some View {
+        let rows = psaCategoryTableRows(events: events, allSummaries: allSummaries, summaries: summaries)
+        return VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("Segment On")
-                    .font(.caption.weight(.semibold))
-                    .fixedSize()
-
-                Spacer(minLength: 10)
-
-                Picker("Segment On", selection: segmentFieldBinding) {
+                Text("Events & Categories").font(.headline)
+                Spacer()
+                Picker(
+                    "Segment On",
+                    selection: Binding(
+                        get: { epoching.segmentField },
+                        set: {
+                            epoching.segmentField = $0
+                            reconcilePSAEventSelection(for: events)
+                        }
+                    )
+                ) {
                     ForEach(PSASegmentField.allCases) { field in
                         Text(field.rawValue).tag(field)
                     }
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 150)
+                .frame(width: 190)
+            }
+            .padding(16)
 
-                Spacer(minLength: 12)
-
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Filter events", text: $epoching.eventSearchText)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
                 if !epoching.eventSearchText.isEmpty {
                     Button {
                         epoching.eventSearchText = ""
@@ -205,9 +401,54 @@ extension WaveformView {
                     .foregroundStyle(.secondary)
                     .help("Clear filter")
                 }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
 
-                Spacer(minLength: 10)
+            Table(rows) {
+                TableColumn("Event / Group") { row in
+                    psaCategoryEventCell(row)
+                }
+                .width(min: 135, ideal: 150)
+                TableColumn("Count") { row in
+                    Text("\(row.count)")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .width(40)
+                TableColumn("Category") { row in
+                    psaCategoryNameCell(row, events: events)
+                }
+                .width(min: 115, ideal: 140)
+                TableColumn("Onset") { row in
+                    psaCategoryOnsetCell(row, allSummaries: allSummaries)
+                }
+                .width(min: 150, ideal: 160)
+                TableColumn("") { row in
+                    psaCategoryRemoveCell(row)
+                }
+                .width(22)
+            }
+            .overlay {
+                if allSummaries.isEmpty {
+                    ContentUnavailableView(
+                        epoching.segmentField == .artifact ? "No Artifacts Detected" : "No Events",
+                        systemImage: epoching.segmentField == .artifact
+                            ? "waveform.path.ecg.rectangle" : "list.bullet.rectangle",
+                        description: Text(
+                            epoching.segmentField == .artifact
+                                ? "Enable eye blink, eye movement, or ECG/QRS detection in the Artifacts panel first."
+                                : "This recording has no events to segment on.")
+                    )
+                } else if rows.isEmpty {
+                    ContentUnavailableView(
+                        "No Matches", systemImage: "magnifyingglass",
+                        description: Text("No events match the filter."))
+                }
+            }
 
+            HStack {
                 Button {
                     categoryGroupMode = .codes
                     categoryGroupSelectedCodes.removeAll()
@@ -220,208 +461,171 @@ extension WaveformView {
                     Label("Group…", systemImage: "plus.circle")
                 }
                 .disabled(allSummaries.isEmpty)
-                .help("Combine several event codes/labels into one pooled category, or sub-select one code's events by a regex on their description.")
+                .help(
+                    "Combine several event codes/labels into one pooled category, or sub-select one code's events by a regex on their description."
+                )
                 .popover(isPresented: binding(recordingStore.events, \.showsCategoryGroupPopover)) {
                     categoryGroupPopover(events: events, allSummaries: allSummaries)
                 }
-            }
-
-            // Master/detail: the event list (left) grows to fill the sheet's
-            // height, while the run parameters and options sit in a fixed-width
-            // column on the right. The whole sheet is resizable (see the frame
-            // at the end), so dragging it taller gives the list more rows.
-            HStack(alignment: .top, spacing: 16) {
-                if allSummaries.isEmpty {
-                    ContentUnavailableView(
-                        epoching.segmentField == .artifact ? "No Artifacts Detected" : "No Events",
-                        systemImage: epoching.segmentField == .artifact ? "waveform.path.ecg.rectangle" : "list.bullet.rectangle",
-                        description: Text(epoching.segmentField == .artifact
-                            ? "Enable eye blink, eye movement, or ECG/QRS detection in the Artifacts panel first."
-                            : "This recording has no events to segment on.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                } else if summaries.isEmpty {
-                    ContentUnavailableView(
-                        "No Matches",
-                        systemImage: "magnifyingglass",
-                        description: Text("No artifact types match the filter.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(summaries) { summary in
-                                psaSegmentEventRow(summary: summary, allSummaries: allSummaries)
-                            }
-                            if !epoching.categoryGroups.isEmpty {
-                                Divider().padding(.vertical, 2)
-                                ForEach(epoching.categoryGroups.keys.sorted(), id: \.self) { groupName in
-                                    psaCategoryGroupRow(groupName: groupName, allSummaries: allSummaries)
-                                }
-                            }
-                            if !epoching.categoryRegexRules.isEmpty {
-                                Divider().padding(.vertical, 2)
-                                ForEach(epoching.categoryRegexRules.keys.sorted(), id: \.self) { ruleID in
-                                    psaCategoryRegexRuleRow(ruleID: ruleID, events: events)
-                                }
-                            }
-                        }
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                }
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-
-                        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                            GridRow {
-                                Text("Pre-stimulus (s)")
-                                    .font(.caption.weight(.semibold))
-                                TextField("Pre", value: $epoching.preStimulus, format: .number.precision(.fractionLength(3)))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                            }
-                            GridRow {
-                                Text("Post-stimulus (s)")
-                                    .font(.caption.weight(.semibold))
-                                TextField("Post", value: $epoching.postStimulus, format: .number.precision(.fractionLength(3)))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                            }
-                            GridRow {
-                                Text("Offset (s)")
-                                    .font(.caption.weight(.semibold))
-                                TextField("Offset", value: $epoching.offset, format: .number.precision(.fractionLength(3)))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                                    .help("Ignored for categories that use a DIN timing marker.")
-                            }
-                            GridRow {
-                                Text("DIN Tolerance (s)")
-                                    .font(.caption.weight(.semibold))
-                                TextField("Tolerance", value: $epoching.timingTolerance, format: .number.precision(.fractionLength(3)))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 100)
-                                    .help("Maximum time between an event and a DIN marker for them to be paired. Events with no DIN within this window are skipped.")
-                            }
-                        }
-
-                        let missedCount = psaMissedDINCount(events: events)
-                        if missedCount > 0 {
-                            Label("\(missedCount) selected event\(missedCount == 1 ? "" : "s") with no DIN within ±\(String(format: "%.3f", epoching.timingTolerance)) s — will be skipped", systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 8) {
-                                Toggle("Skip if contains", isOn: $epoching.skipIfContainsArtifact)
-                                Picker("Artifact rule", selection: $epoching.artifactRejectionPolicy) {
-                                    ForEach(PSAArtifactRejectionPolicy.allCases) { policy in
-                                        Text(policy.rawValue).tag(policy)
-                                    }
-                                }
-                                .labelsHidden()
-                                .frame(width: 175)
-                                .disabled(!epoching.skipIfContainsArtifact)
-                                Button {
-                                    epoching.showsArtifactRejectionOptions = true
-                                } label: {
-                                    Image(systemName: "slider.horizontal.3")
-                                }
-                                .buttonStyle(.borderless)
-                                .disabled(!epoching.skipIfContainsArtifact)
-                                .help("Choose which artifact kinds cause an epoch to be rejected.")
-                                .popover(isPresented: $epoching.showsArtifactRejectionOptions) {
-                                    psaArtifactRejectionOptionsPopover()
-                                }
-                            }
-
-                            Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
-                                .help("Excludes segments manually marked Bad in Segment Health (right-click a segment while View > Show Segment Health is on) from category averages.")
-
-                            Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
-                                .help("Detects channels that are only bad WITHIN a given epoch (min/max/slope/acceleration) and interpolates just that epoch, instead of leaving a transient per-trial artifact uncorrected.")
-
-                            epochBadChannelInlineOptions()
-                                .padding(.leading, 18)
-                                .disabled(!epoching.interpolatesBadChannelsPerEpoch)
-
-                            HStack(spacing: 16) {
-                                Toggle("Average by category", isOn: $epoching.averageOnApply)
-                                Toggle("Use Decision Matrix", isOn: $epoching.usesDecisionMatrix)
-                                    .toggleStyle(.checkbox)
-                                    .disabled(!epoching.averageOnApply)
-                                    .help("Review channel × epoch health before averaging. Cell decisions override the automatic thresholds.")
-                            }
-                            Toggle("Average reference", isOn: $epoching.averageReference)
-                                .help("Re-reference to the common average of the good channels (excludes bad channels, uses interpolated values).")
-                            Toggle("Baseline correct (pre-stimulus)", isOn: $epoching.baselineCorrected)
-                                .help("Subtract each epoch's mean over the pre-stimulus interval from the whole epoch.")
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(width: 380)
-            }
-            .frame(maxHeight: .infinity)
-
-            // The running pipeline used to flash its accumulating audit/status
-            // string here (often a long red list of bad channels and segments).
-            // Keep errors available after a run stops, but do not present an
-            // internal log beside the single progress indicator.
-            if !epoching.isApplying, let psaStatus = epoching.statusMessage {
-                Text(psaStatus)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            HStack(spacing: 10) {
                 Spacer()
-                if epoching.isApplying {
-                    if let segmentingProgress = epoching.segmentingProgress {
-                        ProgressView(value: segmentingProgress)
-                            .controlSize(.small)
-                            .frame(width: 80)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(epoching.phaseMessage ?? "Working…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Button("Cancel") {
-                    epoching.showsSheet = false
-                }
-                .disabled(epoching.isApplying)
-                Button("Apply") {
-                    psaTask?.cancel()
-                    psaTask = Task {
-                        await applyPSA(to: signal)
-                        if !Task.isCancelled {
-                            psaTask = nil
-                        }
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(!canApplyPSA(events: events) || epoching.isApplying)
+                Text(
+                    "\(epoching.selectedEventCodes.count) selected · \(epoching.categoryGroups.count) groups · \(epoching.categoryRegexRules.count) regex rules"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
+            .padding(12)
         }
-        .padding(20)
-        .frame(
-            minWidth: 1080, idealWidth: 1140, maxWidth: 1500,
-            minHeight: 560, idealHeight: 660, maxHeight: 1300
-        )
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 
-    func psaSegmentEventRow(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
+    func psaCategoryTableRows(
+        events: [MFFEvent], allSummaries: [EventSummary], summaries: [EventSummary]
+    ) -> [PSACategoryTableRow] {
+        var rows = summaries.map { PSACategoryTableRow(id: "event:\($0.code)", kind: .event($0), count: $0.count) }
+        // Groups and regex rules remain available while filtering event codes,
+        // including regex-only configurations with no source code selected.
+        rows += epoching.categoryGroups.keys.sorted().map { name in
+            let members = epoching.categoryGroups[name] ?? []
+            let count = allSummaries.filter { members.contains($0.code) }.reduce(0) { $0 + $1.count }
+            return PSACategoryTableRow(id: "group:\(name)", kind: .group(name), count: count)
+        }
+        rows += epoching.categoryRegexRules.keys.sorted().map { id in
+            let rule = epoching.categoryRegexRules[id]
+            let count =
+                rule.flatMap {
+                    regexMatchPreview(
+                        sourceCode: $0.sourceCode, pattern: $0.pattern,
+                        matchField: $0.matchField, categoryNameTemplate: $0.categoryName, events: events)
+                }?.matched ?? 0
+            return PSACategoryTableRow(id: "regex:\(id)", kind: .regex(id), count: count)
+        }
+        return rows
+    }
+
+    @ViewBuilder
+    private func psaCategoryEventCell(_ row: PSACategoryTableRow) -> some View {
+        switch row.kind {
+        case .event(let summary):
+            Toggle(isOn: psaEventCodeBinding(summary.code)) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.code).font(.system(.body, design: .monospaced))
+                    if let detail = summary.detail {
+                        Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1).help(detail)
+                    }
+                }
+            }
+            .toggleStyle(.checkbox)
+            .accessibilityLabel("Include \(summary.code)")
+        case .group(let name):
+            let members = epoching.categoryGroups[name] ?? []
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                    Text("\(members.intersection(epoching.selectedEventCodes).count) of \(members.count) codes")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "square.stack.3d.up").foregroundStyle(.secondary)
+            }
+        case .regex(let id):
+            if let rule = epoching.categoryRegexRules[id] {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(rule.categoryName)
+                        Text("\(rule.sourceCode) · \(rule.matchField.rawValue)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "text.magnifyingglass").foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func psaCategoryNameCell(_ row: PSACategoryTableRow, events: [MFFEvent]) -> some View {
+        switch row.kind {
+        case .event(let summary):
+            TextField("Category", text: psaCategoryBinding(summary.code))
+                .textFieldStyle(.plain)
+                .disabled(!epoching.selectedEventCodes.contains(summary.code))
+                .accessibilityLabel("Category for \(summary.code)")
+        case .group(let name):
+            Text(name).foregroundStyle(.secondary)
+                .help(
+                    "Pooled category — produces averaged segments for the group in addition to each member's own category."
+                )
+        case .regex(let id):
+            if let rule = epoching.categoryRegexRules[id] {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(rule.pattern).font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary).lineLimit(1).help(rule.pattern)
+                    if rule.categoryName.contains("$"),
+                        let preview = regexMatchPreview(
+                            sourceCode: rule.sourceCode, pattern: rule.pattern, matchField: rule.matchField,
+                            categoryNameTemplate: rule.categoryName, events: events
+                        ), !preview.categories.isEmpty
+                    {
+                        Text("→ \(regexCategoryListSummary(preview.categories))")
+                            .font(.caption2)
+                            .foregroundStyle(preview.categories.count <= 1 ? .orange : .secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .help("Regex sub-selection — matching events are filed under this category in addition to their own.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func psaCategoryOnsetCell(_ row: PSACategoryTableRow, allSummaries: [EventSummary]) -> some View {
+        switch row.kind {
+        case .event(let summary):
+            psaEventOnsetControls(summary: summary, allSummaries: allSummaries)
+        case .group(let name):
+            let members = epoching.categoryGroups[name] ?? []
+            Toggle("DIN", isOn: psaCategoryGroupDINBinding(members: members, allSummaries: allSummaries))
+                .toggleStyle(.checkbox)
+                .disabled(members.intersection(epoching.selectedEventCodes).isEmpty)
+                .help("Enable each member code's own nearest-marker DIN pairing, all at once.")
+        case .regex(let id):
+            if let rule = epoching.categoryRegexRules[id] {
+                Text("From \(rule.sourceCode)").font(.caption).foregroundStyle(.secondary)
+                    .help(
+                        "Uses the source code's onset and DIN settings, even when that code is not individually selected."
+                    )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func psaCategoryRemoveCell(_ row: PSACategoryTableRow) -> some View {
+        switch row.kind {
+        case .event:
+            EmptyView()
+        case .group(let name):
+            Button {
+                epoching.categoryGroups.removeValue(forKey: name)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this group. Member codes keep their own individual categories.")
+            .accessibilityLabel("Remove group \(name)")
+        case .regex(let id):
+            Button {
+                epoching.categoryRegexRules.removeValue(forKey: id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this rule.")
+            .accessibilityLabel("Remove regex rule")
+        }
+    }
+
+    private func psaEventOnsetControls(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
         let timingOptions = psaTimingMarkerOptions(in: allSummaries, excluding: summary.code)
         let isSelected = epoching.selectedEventCodes.contains(summary.code)
         let usesTimingMarker = epoching.timingMarkerEnabledValues.contains(summary.code)
@@ -432,37 +636,15 @@ extension WaveformView {
         let isRegexSource = epoching.categoryRegexRules.values.contains { $0.sourceCode == summary.code }
         let isDINEligible = isSelected || isRegexSource
 
-        return HStack(spacing: 12) {
-            Toggle(isOn: psaEventCodeBinding(summary.code)) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(summary.code)
-                        .font(.system(.body, design: .monospaced))
-                    if let detail = summary.detail {
-                        Text(detail)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-            }
-            .frame(width: 150, alignment: .leading)
-
-            Text("\(summary.count)")
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 44, alignment: .trailing)
-
-            TextField("Category", text: psaCategoryBinding(summary.code))
-                .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 170)
-                .disabled(!isSelected)
-
+        return HStack(spacing: 6) {
             Toggle("DIN", isOn: psaTimingMarkerEnabledBinding(summary.code, options: timingOptions))
                 .toggleStyle(.checkbox)
                 .disabled(!isDINEligible || timingOptions.isEmpty)
-                .help(isSelected || !isRegexSource
-                    ? "Use the nearest selected timing marker as this category's onset."
-                    : "This code isn't selected on its own, but feeds a regex category below — DIN still applies to that category's onset.")
+                .help(
+                    isSelected || !isRegexSource
+                        ? "Use the nearest selected timing marker as this category's onset."
+                        : "This code isn't selected on its own, but feeds a regex category below — DIN still applies to that category's onset."
+                )
 
             Picker("Timing Marker", selection: psaTimingMarkerSelectionBinding(summary.code, options: timingOptions)) {
                 if timingOptions.isEmpty {
@@ -475,11 +657,12 @@ extension WaveformView {
             }
             .labelsHidden()
             .pickerStyle(.menu)
-            .frame(width: 128)
+            .frame(maxWidth: .infinity)
             .disabled(!isDINEligible || !usesTimingMarker || timingOptions.isEmpty)
             .help("Marker group whose nearest event supplies the true onset time.")
         }
     }
+
 
     /// Popover listing which artifact kinds reject an epoch. Moved out of the
     /// main PSA panel so the panel stays compact; opened from the "Skip if
@@ -1217,59 +1400,6 @@ extension WaveformView {
         categoryGroupName = ""
     }
 
-    /// A row for a pooled category group, styled like `psaSegmentEventRow` so
-    /// it sits in the same list. The DIN toggle is a bulk shortcut: it applies
-    /// each member's OWN nearest-marker DIN setting (no separate group-level
-    /// timing config) — the group's segments always share timing with that
-    /// member's own individually-tagged segments.
-    func psaCategoryGroupRow(groupName: String, allSummaries: [EventSummary]) -> some View {
-        let members = epoching.categoryGroups[groupName] ?? []
-        let selectedMembers = members.intersection(epoching.selectedEventCodes)
-        let totalCount = allSummaries.filter { members.contains($0.code) }.reduce(0) { $0 + $1.count }
-
-        return HStack(spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: "square.stack.3d.up.fill")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(groupName)
-                        .font(.system(.body, design: .monospaced).weight(.semibold))
-                    Text("\(selectedMembers.count) of \(members.count) codes")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 150, alignment: .leading)
-
-            Text("\(totalCount)")
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 44, alignment: .trailing)
-
-            Text(groupName)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 170, alignment: .leading)
-                .help("Pooled category — produces averaged segments for the group in addition to each member's own category.")
-
-            Toggle("DIN", isOn: psaCategoryGroupDINBinding(members: members, allSummaries: allSummaries))
-                .toggleStyle(.checkbox)
-                .disabled(selectedMembers.isEmpty)
-                .help("Enable each member code's own nearest-marker DIN pairing, all at once.")
-
-            Spacer(minLength: 0)
-                .frame(width: 128)
-
-            Button {
-                epoching.categoryGroups.removeValue(forKey: groupName)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Remove this group. Member codes keep their own individual categories.")
-        }
-    }
-
     /// Bulk DIN toggle for a group: on = enable each selected member's own
     /// DIN pairing (seeding a default marker if it has none yet); off =
     /// disable DIN for all of them. Never introduces a separate group-level
@@ -1298,71 +1428,6 @@ extension WaveformView {
                 }
             }
         )
-    }
-
-    /// A row for a regex sub-selection rule, styled like `psaCategoryGroupRow`
-    /// so it sits in the same list — including the same count column, computed
-    /// by re-running the rule's pattern against `sourceCode`'s current events
-    /// (cheap: a handful of codes, not the whole recording).
-    func psaCategoryRegexRuleRow(ruleID: String, events: [MFFEvent]) -> some View {
-        let rule = epoching.categoryRegexRules[ruleID]
-        let preview = rule.flatMap {
-            regexMatchPreview(
-                sourceCode: $0.sourceCode,
-                pattern: $0.pattern,
-                matchField: $0.matchField,
-                categoryNameTemplate: $0.categoryName,
-                events: events
-            )
-        }
-        let matchCount = preview?.matched ?? 0
-        let categoryCount = preview?.categories.count ?? 0
-
-        return HStack(spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: "text.magnifyingglass")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(rule?.categoryName ?? "")
-                        .font(.system(.body, design: .monospaced).weight(.semibold))
-                    Text("\(rule?.sourceCode ?? "") · \(rule?.matchField.rawValue ?? "")")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 150, alignment: .leading)
-
-            Text("\(matchCount)")
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(width: 44, alignment: .trailing)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(rule?.pattern ?? "")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if let rule, rule.categoryName.contains("$"), let categories = preview?.categories, !categories.isEmpty {
-                    Text("→ \(regexCategoryListSummary(categories))")
-                        .font(.caption2)
-                        .foregroundStyle(categoryCount <= 1 ? .orange : .secondary)
-                        .lineLimit(1)
-                }
-            }
-            .frame(minWidth: 170, alignment: .leading)
-            .help("Regex sub-selection — matching events are filed under this category in addition to their own.")
-
-            Spacer(minLength: 0)
-
-            Button {
-                epoching.categoryRegexRules.removeValue(forKey: ruleID)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Remove this rule.")
-        }
     }
 
     func psaCategoryBinding(_ code: String) -> Binding<String> {

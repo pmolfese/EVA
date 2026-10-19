@@ -143,8 +143,11 @@ each event's orientation relative to the canonical centroid. It therefore treats
 losing the original orientation. Ocular, saccadic-spike, and corneo-retinal
 classes default to projective mode; other classes default to signed mode. Up to
 four task-group batches normalize vectors concurrently inside a
-cancellable detached worker. A deterministic divisive spherical clustering tree
-uses farthest seeds and up to twelve two-centroid refinements per split; no
+cancellable detached worker. The root split is computed once, then its two
+independent subtrees are built as bounded concurrent tasks and deterministically
+reindexed before publication. This uses parallel cores without creating a task
+per node. A deterministic divisive spherical clustering tree uses farthest seeds
+and up to twelve two-centroid refinements per split; no
 quadratic pairwise matrix is allocated. Recursion is capped at 32. This is a
 spatial browsing heuristic, not a validated artifact classifier or agglomerative
 linkage algorithm.
@@ -178,6 +181,23 @@ independently optimized local contrast. Their cohesion values are not calibrated
 to be numerically interchangeable, so the UI labels non-Pearson values
 as `score` and keeps the results preview-only.
 
+Each node evaluates its centroid and member scores once and reuses them for
+split selection and stored cohesion statistics. Farthest-seed scores are also
+computed once per candidate, avoiding repeated scoring in comparator calls.
+Tree completion uses a bounded budget of up to eight branch workers (limited by
+active CPU count); branches smaller than 128 members stay serial. Left/right
+joins preserve deterministic postorder IDs.
+
+Review requests an initial frontier for the active cut before full completion.
+Target-count frontiers expand one level ahead and use the same weighted split-gain
+ordering as the full tree; cohesion frontiers expand only below-threshold nodes.
+The resulting requested cut is exact, not an approximation. Already evaluated
+nodes/splits are reused during completion. Partial hierarchies are marked
+`isComplete = false`, never enter the hierarchy caches, and are only displayed for
+the matching source/cut request. Exact requested-cut results may be cached. Cut
+changes during completion wait for the final tree; suggested K is hidden until
+completion. Cancellation prevents publishing a completed result or stale preview.
+
 The grouping layer supports two cuts over the same cached hierarchy. **Cohesion**
 cuts at a selected centroid score from 0.50–0.98. It can use the minimum member
 score or the interpolated 10th percentile; every materialized group stores
@@ -202,20 +222,33 @@ and filtering a preview preserves the existing eighteen-example grid and wavefor
 scores. Shift selects a contiguous card range; Control/Command toggles individual
 cards. A preview merge rebuilds a centroid/statistics record from the union of
 selected event IDs without mutating the cached tree. It can consequently feed one
-nested waveform hierarchy. Changing a cut invalidates these session-only merges.
+nested waveform hierarchy. The Review UI presents maps in an adaptive center grid
+and moves clustering and rule controls into collapsible inspector sections. The
+artifact source list uses a separate multi-selection set from the primary detail
+artifact: Shift selects a range, Command/Control toggles items, and a treatment
+change mutates the compatible highlighted artifacts in one transaction. Dragging
+a card anywhere into the artifact sidebar extracts it;
+when the dragged card belongs to a multi-selection, the selected union is used.
+Changing a cut invalidates session-only merges.
 
 A three-entry actor cache retains vectors and trees keyed by the review analysis
 key plus polarity and comparison modes. Revision, candidates, definition
 channels/window/taper/reference, excluded channels, and mapped sensor IDs also
 invalidate that key. Cancellation and key checks prevent stale publication; no
-partial tree is cached. Cached cohesion cuts only traverse nodes; target refinement
+partial tree is cached. The workspace additionally retains completed analyses
+(12 entries), spatial hierarchies (24), cuts (48), and waveform results (12).
+Synchronous keyed lookups let a returning artifact render cached results without
+waiting for the analysis → hierarchy → cut task chain. Keys include layout
+positions/name and threshold candidate spans, as well as the source inputs above.
+Old entries are evicted in insertion/update order. Cached cohesion cuts only
+traverse nodes; target refinement
 touches normalized feature vectors but never signal samples. Grouping, filtering,
 and preview merges do not modify choices or replay. A separately confirmed class
 move does, as described below.
 
 Review defaults waveform-only hand definitions to **Waveform bands**. Definitions
 that used a topographic reference, plus threshold ocular families, default to
-**Spatial groups**. Ocular spatial review starts with polarity ignored, LPA+, and
+**Spatial groups**. Ocular spatial review starts with polarity ignored, Global Pearson, and
 a forced two-family preview. This is only a browsing default: the outlier floor
 can still leave incompatible events unassigned, and the user can request one or
 more families or switch back to cohesion.
@@ -279,6 +312,16 @@ refresh with identical inputs preserves the partition; changed detection inputs
 reset the root and remove its derived classes. Define/BCG rescans likewise retire
 their derived classes. Continuous MAAC definitions use their specialized review
 workflows instead of this event-based workspace.
+
+Drag-to-extract uses the same move transaction but marks the child with the
+optional `displaysAsStandaloneArtifact` review flag. The sidebar therefore shows
+it as a top-level artifact while `sourceArtifactID` remains intact for duplicate
+prevention and detector refresh semantics. The new artifact defaults to Standard
+OBS and can receive any compatible treatment. Its spatial review starts with a
+forced count of one because the drag already represents an explicit family choice;
+the user can raise that count to inspect substructure. The source stays selected;
+removing the extracted members changes its analysis key, so its remaining spatial
+hierarchy is visibly rebuilt and re-sorted in the background.
 
 Review choices and classes round-trip through the existing optional sidecar
 fields. Reviewed regression averages are re-derived at execution time; reviewed

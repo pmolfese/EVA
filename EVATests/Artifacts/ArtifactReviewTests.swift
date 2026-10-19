@@ -306,6 +306,24 @@ struct ArtifactReviewTests {
         #expect(output.signal.data[0][300] < signal.data[0][300] * 0.5)
     }
 
+    @Test func extractedSpatialFamilyIsTopLevelButKeepsSourceProvenance() throws {
+        let (_, base) = fixture()
+        var artifact = base
+        let extracted = try #require(ArtifactReviewEngine.split(eventIDs: ["b"],
+            name: "Eye movement", method: .obs, displaysAsStandaloneArtifact: true,
+            parent: &artifact))
+
+        #expect(extracted.reviewState?.displaysAsStandaloneArtifact == true)
+        #expect(extracted.reviewState?.sourceArtifactID == artifact.id)
+        #expect(extracted.reviewState?.sourceArtifactID != nil,
+                "Top-level presentation must not erase detector lineage")
+        #expect(ArtifactReviewEngine.candidates(for: artifact).map(\.id) == ["a", "c"])
+        #expect(ArtifactReviewEngine.candidates(for: extracted).map(\.id) == ["b"])
+        let decoded = try JSONDecoder().decode(ArtifactReplayPayload.self,
+            from: JSONEncoder().encode(ArtifactReplayPayload(artifacts: [artifact, extracted])))
+        #expect(decoded.artifacts[1].reviewState?.displaysAsStandaloneArtifact == true)
+    }
+
     @Test func transfersSelectionsBetweenSiblingClassesWithoutDuplicatingEvents() throws {
         let (_, base) = fixture()
         var root = base
@@ -502,6 +520,75 @@ extension ArtifactReviewTests {
         #expect(group.minimumCorrelation > 0.999)
         #expect(!group.meanFeature.isEmpty, "The polarity-aligned centroid must not cancel to zero")
         #expect(group.eventIDs.allSatisfy { abs(group.orientationSign(for: $0)) == 1 })
+    }
+
+    private actor SpatialPreviewRecorder {
+        var hierarchy: ArtifactSpatialHierarchy?
+        func store(_ value: ArtifactSpatialHierarchy) { hierarchy = value }
+    }
+
+    @Test func progressiveSpatialCutsMatchCompletedTreeAndParallelMatchesSerial() async throws {
+        let count = 144 // Exercise bounded parallel branches as well as serial leaves.
+        let layout = SensorLayout(name: "ring", positions: (0..<12).map { index in
+            let angle = Double(index) * 2 * .pi / 12
+            return SensorPosition(channelIndex: index, x: cos(angle), y: sin(angle))
+        })
+        let examples = (0..<count).map { event in
+            spatialExample(String(format: "e%04d", event), values: (0..<12).map { channel in
+                let angle = Double(channel) * 2 * .pi / 12
+                let family = Double(event % 3) * 0.8
+                return cos(angle + family) + 0.08 * sin(Double((event + 1) * (channel + 2)))
+            })
+        }
+        func check(_ a: ArtifactSpatialCut, _ b: ArtifactSpatialCut) {
+            #expect(a.groups.map(\.eventIDs) == b.groups.map(\.eventIDs))
+            #expect(a.groups.map(\.meanFeature) == b.groups.map(\.meanFeature))
+            #expect(a.groups.map(\.representativeID) == b.groups.map(\.representativeID))
+            #expect(a.groups.map(\.orientationSigns) == b.groups.map(\.orientationSigns))
+            #expect(a.unassignedIDs == b.unassignedIDs)
+        }
+        for metric in ArtifactSpatialSimilarityMetric.allCases {
+            for polarity in ArtifactSpatialPolarityMode.allCases {
+                for request in [ArtifactSpatialInitialCut.targetCount(1, .minimum),
+                                .targetCount(3, .tenthPercentile), .cohesion(0.90, .tenthPercentile)] {
+                    let recorder = SpatialPreviewRecorder()
+                    let full = try #require(await ArtifactSpatialGrouping.build(examples: examples, layout: layout,
+                        polarityMode: polarity, similarityMetric: metric, initialCut: request,
+                        onInitialHierarchy: { await recorder.store($0) }))
+                    let preview = try #require(await recorder.hierarchy)
+                    #expect(!preview.isComplete)
+                    #expect(full.isComplete)
+                    switch request {
+                    case let .targetCount(count, rule):
+                        check(preview.targetCut(count: count, cohesionRule: rule, outlierFloor: 0.60),
+                              full.targetCut(count: count, cohesionRule: rule, outlierFloor: 0.60))
+                    case let .cohesion(threshold, rule):
+                        check(preview.cohesionCut(minimumScore: threshold, cohesionRule: rule, outlierFloor: 0.60),
+                              full.cohesionCut(minimumScore: threshold, cohesionRule: rule, outlierFloor: 0.60))
+                    }
+                    let serial = try #require(ArtifactSpatialGrouping.hierarchy(features: full.features,
+                        channels: full.channels, unassignedIDs: full.unassignedIDs, polarityMode: polarity,
+                        similarityMetric: metric, localNeighborhoods: full.localNeighborhoods, storesCentroids: true))
+                    #expect(full.nodes.map { $0.group.eventIDs } == serial.nodes.map { $0.group.eventIDs })
+                    #expect(full.nodes.map { $0.group.meanFeature } == serial.nodes.map { $0.group.meanFeature })
+                    #expect(full.nodes.map { $0.group.minimumCorrelation } == serial.nodes.map { $0.group.minimumCorrelation })
+                    #expect(full.nodes.map(\.children) == serial.nodes.map(\.children))
+                    let cache = ArtifactSpatialGroupingCache()
+                    await cache.insert(preview, for: "preview")
+                    #expect(await cache.value(for: "preview") == nil)
+                }
+            }
+        }
+    }
+
+    @Test func progressiveCancellationNeverReturnsCompletedHierarchy() async {
+        let worker = Task {
+            await ArtifactSpatialGrouping.build(examples: [spatialExample("a", values: [-1, 0, 1])],
+                initialCut: .targetCount(1, .minimum), onInitialHierarchy: { _ in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                })
+        }
+        #expect(await worker.value == nil)
     }
 
     @Test func afniInspiredSpatialCostsArePolarityInvariantButKeepOneGlobalOrientation() async throws {

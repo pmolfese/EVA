@@ -14,6 +14,39 @@ When creating epochs, choose:
 - Whether to apply average reference
 - Inclusion or exclusion rules for bad channels and artifacts
 
+The PSA configuration sheet uses an editable **Events & Categories** table and a
+resizable inspector. Drag the divider to give either side more room. The table
+keeps event selection, counts, category names, and each code's DIN toggle and
+timing-marker picker together. **Segment On** still supports codes, labels, and
+artifacts, and the event filter and clear button remain available.
+
+**Group…** creates either pooled categories or regex sub-selections, including
+label/description matching, capture-group category names, suggestions, and match
+previews. Groups and regex rules appear alongside events in the table and remain
+visible when filtering event codes. The trash buttons remove them; a group's DIN
+toggle still applies each selected member's own timing-marker settings. A regex
+rule inherits its source code's onset settings even when that code is unchecked.
+
+The inspector contains all processing options:
+
+- **Epoch Window:** pre-stimulus and post-stimulus durations, offset, DIN
+  tolerance, and warnings about events without a matching DIN. The preview marks
+  onset and shades the pre-stimulus baseline when baseline correction is enabled.
+- **Artifact Handling:** artifact rejection on/off, uncorrected-versus-any-artifact
+  policy, and exclusion of epochs labeled Bad. The sliders button opens the
+  existing artifact selector, including detected ocular artifacts, unreliable MRI
+  spans, user-defined artifacts, and the optional rejection sub-window with its
+  start/end values and clamping warnings.
+- **Channel Interpolation:** per-epoch interpolation, minimum/maximum amplitude,
+  slope and acceleration thresholds, rejection limits in percent or channel
+  count, global escalation with its percentage threshold, and Reset to Defaults.
+- **Output:** averaging by category, optional Decision Matrix review, average
+  reference, and pre-stimulus baseline correction.
+
+Expand the inspector sections to edit their options; the inspector scrolls
+independently of the table. **Apply**, **Cancel**, progress, validation, and error
+reporting retain their existing behavior.
+
 ## Review Epochs In The Decision Matrix
 
 After PSA segmentation, the Decision Matrix opens as a compact floating window
@@ -43,6 +76,14 @@ the usual direct averaging. Checking both keeps the guided PSA review sheet
 - Hover over an epoch-health badge or channel-health strip for a small health
   summary, without selecting anything. This works in Overview and the pinned
   Detail headers, including after sorting or scrolling.
+  Hovering an epoch status icon also explains its meaning: ocular, cardiac/BCG,
+  MRI/gradient, timing/marker, or another exclusion. These symbols are in the
+  horizontally scrollable legend; an artifact icon alone does not mean rejection.
+- Cell and epoch details show **corrected**, **uncorrected**, and **correction
+  disabled** event counts. Expand artifact events for cleaning method and RMS
+  evidence. A channel selection summarizes artifacts across the reviewed epochs,
+  counting overlapping events once—not once per channel. This is event/epoch-level
+  context, not proof that an individual channel is artifact-free after cleaning.
 - **Max interpolated / epoch** adjusts the number of channels allowed to be
   repaired in each epoch. Counts and exclusions update immediately using the
   cached evidence, and averaging uses the same limit. Raising it can rescue an

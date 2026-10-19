@@ -34,26 +34,99 @@ private struct ArtifactInspectorField<Content: View>: View {
     }
 }
 
-private struct ArtifactInspectorSection<Content: View>: View {
+private struct ArtifactInspectorDisclosureSection<Content: View>: View {
     let title: String
-    @ViewBuilder let content: () -> Content
+    @State private var isExpanded: Bool
+    let content: Content
+
+    init(
+        title: String,
+        initiallyExpanded: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        _isExpanded = State(initialValue: initiallyExpanded)
+        self.content = content()
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.callout.weight(.semibold)).accessibilityAddTraits(.isHeader)
-            content()
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                content
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 10)
+        } label: {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+        }
+        .padding(11)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private enum ArtifactDefinitionTypeFamily: String, CaseIterable, Identifiable {
+    case eye = "Eye"
+    case eyeMovement = "Eye Move"
+    case bcg = "BCG"
+    case muscle = "Muscle"
+    case heart = "Heart"
+    case movement = "Movement"
+    case other = "Other"
+
+    var id: Self { self }
+
+    var systemImage: String {
+        switch self {
+        case .eye: return "eye"
+        case .eyeMovement: return "arrow.left.and.right"
+        case .bcg: return "dot.radiowaves.left.and.right"
+        case .muscle: return "waveform.path"
+        case .heart: return "heart"
+        case .movement: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .other: return "ellipsis"
         }
     }
+
+    var defaultType: DefinedArtifactType {
+        switch self {
+        case .eye: return .ocular
+        case .eyeMovement: return .corneoRetinal
+        case .bcg: return .bcg
+        case .muscle: return .muscle
+        case .heart: return .ecg
+        case .movement: return .movement
+        case .other: return .other
+        }
+    }
+
+    func contains(_ type: DefinedArtifactType) -> Bool {
+        switch self {
+        case .eye:
+            return type == .ocular || type == .saccadicSpike
+        default:
+            return type == defaultType
+        }
+    }
+}
+
+private enum ArtifactDefinitionMode: String, CaseIterable, Identifiable {
+    case waveform = "Waveform"
+    case spatial = "Spatial"
+    case sequence = "Sequence"
+
+    var id: Self { self }
 }
 
 extension WaveformView {
     // MARK: - Artifact template definition
 
     /// Whether the topography panel is actually running the Continuous scan
-    /// style right now — gated to Ocular artifacts using a single-map
+    /// style right now — gated to eye artifacts using a single-map
     /// reference (Map sequence is always its own kind of "continuous").
     var isContinuousScan: Bool {
-        template.type == .ocular
+        (template.type == .ocular || template.type == .corneoRetinal)
             && template.topographyMode != .trajectory
             && template.topographyScanStyle == .continuous
     }
@@ -72,6 +145,9 @@ extension WaveformView {
         if text.contains("saccadic spike") || text.contains("sacc-sp") || text.contains("spike potential") {
             return .saccadicSpike
         }
+        if text.contains("corneo") || text.contains("eye movement") || text.contains("eye-movement") {
+            return .corneoRetinal
+        }
         if text.contains("ecg") || text.contains("heart") || text.contains("cardiac") {
             return .ecg
         }
@@ -80,6 +156,9 @@ extension WaveformView {
         }
         if text.contains("eye") || text.contains("blink") || text.contains("ocular") || text.contains("eog") {
             return .ocular
+        }
+        if text.contains("movement") || text.contains("motion") {
+            return .movement
         }
         return .other
     }
@@ -238,60 +317,32 @@ extension WaveformView {
         let comparisonChannels = Array(signal.data.indices)
 
         return VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Define Artifact").font(.title3.weight(.semibold))
-                    Spacer()
-                    if let range = template.selectionRange {
-                        Text(selectionDescription(range, in: signal))
-                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }
-                }
-                artifactIdentitySection
-                Picker("Artifact definition section", selection: $template.definitionPanel) {
-                    ForEach(ArtifactDefinitionPanel.allCases) { panel in
-                        Text(panel.rawValue).tag(panel)
-                    }
-                }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 250)
-            }
-            .padding(.horizontal, 20).padding(.vertical, 16)
-
-            Divider()
             HStack(alignment: .top, spacing: 0) {
-                ScrollView {
-                    Group {
-                        switch template.definitionPanel {
-                        case .waveforms:
-                            artifactWaveformConfigurationSection(selectedChannels: selectedChannels)
-                        case .topography:
-                            artifactTopographyConfigurationSection(signal: signal)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(20)
-                }
-                .frame(width: 320)
-                .background(.primary.opacity(0.025))
-
+                artifactDefinitionTypeRail
                 Divider()
+
                 VStack(spacing: 0) {
+                    artifactDefinitionModeBar
+                    Divider()
+
                     ScrollView {
                         VStack(alignment: .leading, spacing: 16) {
-                            Text("Template & results").font(.callout.weight(.semibold))
                             artifactDefinitionPreview(signal: signal)
                         }
                         .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .padding(20)
+                        .padding(18)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     if template.result != nil {
                         artifactDefinitionComparisonSection(signal: signal)
-                            .padding(.horizontal, 20).padding(.bottom, 20)
+                            .padding(.horizontal, 18).padding(.bottom, 18)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider()
+                artifactDefinitionInspector(signal: signal, selectedChannels: selectedChannels)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -348,9 +399,17 @@ extension WaveformView {
             if template.mergeBehavior != defaultMergeBehavior {
                 template.mergeBehavior = defaultMergeBehavior
             }
-            // Continuous topography scanning is gated to Ocular artifacts.
-            if newType != .ocular, template.topographyScanStyle != .windowed {
+            // Continuous topography scanning is gated to eye artifacts.
+            if newType != .ocular, newType != .corneoRetinal,
+               template.topographyScanStyle != .windowed {
                 template.topographyScanStyle = .windowed
+            }
+            if newType == .corneoRetinal {
+                template.definitionPanel = .topography
+                template.topographyMode = .peak
+                template.topographyMetric = .absolutePearson
+                template.topographyScanStyle = .continuous
+                template.threshold = 0.80
             }
             if newType == .bcg {
                 // Manual-exemplar PCA-S starts with the full evolving scalp
@@ -411,8 +470,168 @@ extension WaveformView {
         }
     }
 
+    private var artifactDefinitionTypeFamily: ArtifactDefinitionTypeFamily {
+        ArtifactDefinitionTypeFamily.allCases.first { $0.contains(template.type) } ?? .other
+    }
+
+    private var artifactDefinitionMode: ArtifactDefinitionMode {
+        if template.definitionPanel == .waveforms { return .waveform }
+        return template.topographyMode == .trajectory ? .sequence : .spatial
+    }
+
+    private var artifactDefinitionModeBinding: Binding<ArtifactDefinitionMode> {
+        Binding(
+            get: { artifactDefinitionMode },
+            set: { selectArtifactDefinitionMode($0) }
+        )
+    }
+
+    private var artifactDefinitionRecommendedMode: ArtifactDefinitionMode {
+        switch template.type {
+        case .ocular, .saccadicSpike, .corneoRetinal:
+            return .spatial
+        case .bcg, .movement:
+            return .sequence
+        case .muscle, .ecg, .other:
+            return .waveform
+        }
+    }
+
+    private var artifactDefinitionRecommendationText: String {
+        switch template.type {
+        case .ocular:
+            return "Eye includes blinks and saccades"
+        case .saccadicSpike:
+            return "Short ocular spike potential"
+        case .corneoRetinal:
+            return "Directional corneo-retinal eye movement"
+        case .bcg:
+            return "Changing spatial pattern across the cardiac cycle"
+        case .muscle:
+            return "Brief broadband muscle activity"
+        case .ecg:
+            return "Recurring cardiac waveform"
+        case .movement:
+            return "Broad, evolving movement artifact"
+        case .other:
+            return "Custom artifact exemplar"
+        }
+    }
+
+    private func selectArtifactDefinitionTypeFamily(_ family: ArtifactDefinitionTypeFamily) {
+        guard !family.contains(template.type) else { return }
+        template.type = family.defaultType
+    }
+
+    private func selectArtifactDefinitionMode(_ mode: ArtifactDefinitionMode) {
+        switch mode {
+        case .waveform:
+            template.definitionPanel = .waveforms
+        case .spatial:
+            template.definitionPanel = .topography
+            if !template.topographyMode.isEnabled || template.topographyMode == .trajectory {
+                template.topographyMode = .peak
+            }
+        case .sequence:
+            template.definitionPanel = .topography
+            template.topographyMode = .trajectory
+        }
+    }
+
+    private var artifactDefinitionTypeRail: some View {
+        VStack(spacing: 7) {
+            ForEach(ArtifactDefinitionTypeFamily.allCases) { family in
+                Button {
+                    selectArtifactDefinitionTypeFamily(family)
+                } label: {
+                    ToolbarIcon(
+                        name: family.rawValue,
+                        systemName: family.systemImage,
+                        label: family.rawValue,
+                        isActive: artifactDefinitionTypeFamily == family
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Define a \(family.rawValue.lowercased()) artifact")
+                .accessibilityLabel("\(family.rawValue) artifact type")
+                .accessibilityAddTraits(artifactDefinitionTypeFamily == family ? .isSelected : [])
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 10)
+        .frame(width: 90)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.42))
+    }
+
+    private var artifactDefinitionModeBar: some View {
+        HStack(spacing: 10) {
+            Label(artifactDefinitionRecommendationText, systemImage: "info.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
+            Button("Recommended: \(artifactDefinitionRecommendedMode.rawValue)") {
+                selectArtifactDefinitionMode(artifactDefinitionRecommendedMode)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(.accentColor)
+            .help("Apply the recommended definition mode for this artifact type.")
+
+            Spacer(minLength: 8)
+
+            Picker("Definition mode", selection: artifactDefinitionModeBinding) {
+                ForEach(ArtifactDefinitionMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 270)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 50)
+        .background(.primary.opacity(0.018))
+    }
+
+    private func artifactDefinitionInspector(
+        signal: MFFSignalData,
+        selectedChannels: [Int]
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("\(artifactDefinitionTypeFamily.rawValue) Artifact")
+                        .font(.title3.weight(.semibold))
+                    Spacer()
+                    if let range = template.selectionRange {
+                        Text(selectionDescription(range, in: signal))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                ArtifactInspectorDisclosureSection(title: "Essentials", initiallyExpanded: true) {
+                    artifactIdentitySection
+                }
+
+                switch template.definitionPanel {
+                case .waveforms:
+                    artifactWaveformConfigurationSection(selectedChannels: selectedChannels)
+                case .topography:
+                    artifactTopographyConfigurationSection(signal: signal)
+                }
+            }
+            .padding(14)
+        }
+        .frame(width: 330)
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.30))
+    }
+
     var artifactIdentitySection: some View {
-        HStack(alignment: .top, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             ArtifactInspectorField(
                 title: "Name",
                 help: "A human-readable label for this artifact template. This is saved in the JSON so you can recognize the exemplar later."
@@ -420,19 +639,22 @@ extension WaveformView {
                 TextField("Artifact name", text: $template.name)
                     .textFieldStyle(.roundedBorder)
             }
-            ArtifactInspectorField(
-                title: "Type",
-                help: "Used by Clean Artifacts to group ocular, ECG, BCG, and other artifact definitions."
-            ) {
-                Picker("Type", selection: $template.type) {
-                    ForEach(DefinedArtifactType.allCases.filter { $0 != .corneoRetinal && $0 != .movement && $0 != .muscle }) { type in
-                        Text(type.rawValue).tag(type)
+
+            if artifactDefinitionTypeFamily == .eye {
+                ArtifactInspectorField(
+                    title: "Ocular Subtype",
+                    help: "Blink and saccadic spike stay within the Eye family. Longer corneo-retinal eye movements have their own top-level type and cleaning strategy."
+                ) {
+                    Picker("Ocular Subtype", selection: $template.type) {
+                        Text("Blink").tag(DefinedArtifactType.ocular)
+                        Text("Saccade").tag(DefinedArtifactType.saccadicSpike)
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
                 }
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
             }
-            .frame(width: 210)
+
             ArtifactInspectorField(
                 title: "Event Code",
                 help: "The event marker name inserted for each match. These generated markers appear in the Events panel and can be used by PSA artifact rejection."
@@ -440,13 +662,12 @@ extension WaveformView {
                 TextField("Event code", text: $template.eventCode)
                     .textFieldStyle(.roundedBorder)
             }
-            .frame(width: 150)
         }
     }
 
     func artifactWaveformConfigurationSection(selectedChannels: [Int]) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
-            ArtifactInspectorSection(title: "Match channels") {
+        VStack(alignment: .leading, spacing: 10) {
+            ArtifactInspectorDisclosureSection(title: "Match Channels", initiallyExpanded: true) {
                 ArtifactInspectorField(
                     title: "Channels",
                     help: "Chooses which channels define the template score. Clicked Channel is fastest and easiest to interpret; Ocular Channels is useful for blinks; All Channels uses a weighted spatial template."
@@ -483,8 +704,7 @@ extension WaveformView {
                     .frame(maxWidth: .infinity)
                 }
             }
-            Divider()
-            ArtifactInspectorSection(title: "Window & timing") {
+            ArtifactInspectorDisclosureSection(title: "Window & Timing") {
                 HStack(alignment: .top, spacing: 12) {
                     ArtifactInspectorField(
                         title: "Window (s)",
@@ -509,8 +729,7 @@ extension WaveformView {
                         .textFieldStyle(.roundedBorder)
                 }
             }
-            Divider()
-            ArtifactInspectorSection(title: "Merge nearby matches") {
+            ArtifactInspectorDisclosureSection(title: "Merge Nearby Matches") {
                 ArtifactInspectorField(
                     title: "Merge (s)",
                     help: "Hits within this time window of each other are merged into one artifact event, keeping the highest-scoring match. This prevents double-counting the same artifact. Pre-filled from the artifact Type — BCG/ECG default to 0.25 s (a 240 BPM physiological ceiling), since two hits closer than that are almost certainly the same beat; adjust freely."
@@ -536,8 +755,8 @@ extension WaveformView {
     }
 
     func artifactTopographyConfigurationSection(signal: MFFSignalData) -> some View {
-        VStack(alignment: .leading, spacing: 20) {
-            ArtifactInspectorSection(title: "Spatial matching") {
+        VStack(alignment: .leading, spacing: 10) {
+            ArtifactInspectorDisclosureSection(title: "Spatial Matching", initiallyExpanded: true) {
                 ArtifactInspectorField(
                     title: "Reference",
                     help: "Scans for the exemplar's scalp voltage pattern across electrodes. Middle map, Peak map, and Average map use one reference map. Map sequence uses the whole time course across the highlighted window and can shift or stretch to match artifacts with similar spatial evolution."
@@ -560,7 +779,7 @@ extension WaveformView {
                 }
                 ArtifactInspectorField(
                     title: "Scan",
-                    help: "Windowed scores fixed-length candidate windows against the reference map (the original behavior). Continuous instead traces how closely every sample matches the reference and marks each continuous above-threshold stretch as one artifact, so its reported duration reflects how long the topography actually stayed similar — no fixed window length. Only available for Ocular artifacts using a single-map reference (Middle/Peak/Average, not Map sequence)."
+                    help: "Windowed scores fixed-length candidate windows against the reference map (the original behavior). Continuous instead traces how closely every sample matches the reference and marks each continuous above-threshold stretch as one artifact, so its reported duration reflects how long the topography actually stayed similar — no fixed window length. Available for Eye and Eye Movement artifacts using a single-map reference (Middle/Peak/Average, not Map sequence)."
                 ) {
                     Picker("Scan", selection: $template.topographyScanStyle) {
                         ForEach(ArtifactTopographyScanStyle.allCases) { value in Text(value.rawValue).tag(value) }
@@ -568,10 +787,13 @@ extension WaveformView {
                     .labelsHidden()
                     .frame(maxWidth: .infinity)
                     .pickerStyle(.segmented)
-                    .disabled(template.type != .ocular || template.topographyMode == .trajectory)
+                    .disabled(
+                        (template.type != .ocular && template.type != .corneoRetinal)
+                            || template.topographyMode == .trajectory
+                    )
                 }
-                if template.type != .ocular {
-                    Text("Ocular artifacts only").font(.caption2).foregroundStyle(.secondary)
+                if template.type != .ocular, template.type != .corneoRetinal {
+                    Text("Eye artifacts only").font(.caption2).foregroundStyle(.secondary)
                 } else if template.topographyMode == .trajectory {
                     Text("Map sequence is always continuous").font(.caption2).foregroundStyle(.secondary)
                 }
@@ -602,9 +824,8 @@ extension WaveformView {
                     artifactThresholdControl
                 }
             }
-            Divider()
             if isContinuousScan {
-                ArtifactInspectorSection(title: "Continuous-event duration") {
+                ArtifactInspectorDisclosureSection(title: "Continuous-Event Duration") {
                     HStack(alignment: .top, spacing: 12) {
                         ArtifactInspectorField(
                             title: "Min Dur (s)",
@@ -629,9 +850,8 @@ extension WaveformView {
                             .textFieldStyle(.roundedBorder)
                     }
                 }
-                Divider()
             }
-            ArtifactInspectorSection(title: "Window & sequence") {
+            ArtifactInspectorDisclosureSection(title: "Window & Sequence") {
                 HStack(alignment: .top, spacing: 12) {
                     ArtifactInspectorField(
                         title: "Window (s)",
@@ -678,8 +898,7 @@ extension WaveformView {
                     }
                 }
             }
-            Divider()
-            ArtifactInspectorSection(title: "Merge nearby matches") {
+            ArtifactInspectorDisclosureSection(title: "Merge Nearby Matches") {
                 ArtifactInspectorField(
                     title: "Merge (s)",
                     help: isContinuousScan

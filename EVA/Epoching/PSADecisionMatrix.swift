@@ -89,6 +89,61 @@ nonisolated struct PSAArtifactEventDetail: Identifiable, Sendable {
     var rmsChangeFraction: Float?
 
     var id: String { eventID }
+    var correctionState: PSAArtifactCorrectionState {
+        isCorrected ? .corrected : (hasCorrection ? .disabled : .uncorrected)
+    }
+}
+
+nonisolated enum PSAArtifactCorrectionState: Int {
+    case corrected, disabled, uncorrected
+}
+
+nonisolated struct PSAArtifactCorrectionSummary {
+    var corrected = 0
+    var uncorrected = 0
+    var disabled = 0
+    var affectedEpochs = 0
+    var eventCount: Int { corrected + uncorrected + disabled }
+    var statusText: String {
+        guard eventCount > 0 else { return "No artifact events recorded" }
+        return [(corrected, "corrected"), (uncorrected, "uncorrected"), (disabled, "correction disabled")]
+            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
+    }
+}
+
+/// The canvas, legend, and hover explanation share one icon vocabulary.
+nonisolated enum PSAEpochStatusIcon: String, CaseIterable {
+    case ocular = "eye.fill"
+    case correctedOcular = "eye.circle.fill"
+    case cardiac = "waveform.path.ecg"
+    case gradient = "bolt.fill"
+    case timing = "clock.badge.exclamationmark"
+    case exclusion = "xmark"
+    case otherArtifact = "exclamationmark.triangle.fill"
+
+    var title: String {
+        switch self {
+        case .ocular: return "Blink / eye movement"
+        case .correctedOcular: return "Corrected ocular artifact"
+        case .cardiac: return "Cardiac / BCG artifact"
+        case .gradient: return "MRI / gradient artifact"
+        case .timing: return "Timing / marker issue"
+        case .exclusion: return "Other epoch exclusion"
+        case .otherArtifact: return "Other artifact"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .ocular: return "An eye blink or eye movement is associated with this epoch."
+        case .correctedOcular: return "Ocular artifact correction was applied; this is not proof that all residual artifact is gone."
+        case .cardiac: return "A cardiac, pulse, or ballistocardiogram artifact is associated with this epoch."
+        case .gradient: return "An MRI or gradient artifact is associated with this epoch."
+        case .timing: return "An epoch timing marker is missing or has a timing issue."
+        case .exclusion: return "The epoch is excluded by a manual decision, health threshold, or interpolation constraint."
+        case .otherArtifact: return "An artifact event is associated with this epoch."
+        }
+    }
 }
 
 nonisolated enum PSAChannelMatrixOrder: String, CaseIterable, Identifiable {
@@ -612,6 +667,7 @@ final class PSADecisionMatrixModel {
     @ObservationIgnored private var checkedFeasibility = Set<Int>()
     @ObservationIgnored private var cachedFeasibilityReasons: [Int: String] = [:]
     @ObservationIgnored private var cachedBadChannelCounts: [Int: Int] = [:]
+    @ObservationIgnored private var cachedAllArtifactCorrectionSummary: PSAArtifactCorrectionSummary?
 
     private func invalidateDecisionCache() {
         decisionRevision &+= 1
@@ -711,6 +767,49 @@ final class PSADecisionMatrixModel {
             : 100
     }
 
+    /// Event-aware, not channel-specific provenance. An event overlapping
+    /// multiple selected epochs is counted once; mixed records use the more
+    /// conservative correction status. The all-epochs channel summary is cached.
+    func artifactCorrectionSummary(for epochs: Set<Int>? = nil) -> PSAArtifactCorrectionSummary {
+        if epochs == nil, let cachedAllArtifactCorrectionSummary { return cachedAllArtifactCorrectionSummary }
+        var states: [String: PSAArtifactCorrectionState] = [:]
+        var summary = PSAArtifactCorrectionSummary()
+        for epoch in epochs ?? Set(preparation.segments.indices) {
+            let details = preparation.artifactEventsByEpoch[epoch, default: []]
+            if !details.isEmpty { summary.affectedEpochs += 1 }
+            for detail in details {
+                let old = states[detail.eventID] ?? .corrected
+                states[detail.eventID] = detail.correctionState.rawValue > old.rawValue ? detail.correctionState : old
+            }
+        }
+        for state in states.values {
+            switch state {
+            case .corrected: summary.corrected += 1
+            case .uncorrected: summary.uncorrected += 1
+            case .disabled: summary.disabled += 1
+            }
+        }
+        if epochs == nil { cachedAllArtifactCorrectionSummary = summary }
+        return summary
+    }
+
+    func epochStatusIcon(for epoch: Int) -> PSAEpochStatusIcon? {
+        guard preparation.segments.indices.contains(epoch) else { return nil }
+        let details = preparation.artifactEventsByEpoch[epoch, default: []]
+        let representative = details.first(where: { !$0.isCorrected }) ?? details.first
+        guard representative != nil || resolvedEpochDecision(epoch) == .reject else { return nil }
+        let description = representative.map { "\($0.code) \($0.label)" }
+            ?? rejectionReasons(for: epoch).joined(separator: " ")
+        let text = description.lowercased()
+        if ["eye", "blink", "ocular"].contains(where: text.contains) {
+            return !details.isEmpty && details.allSatisfy(\.isCorrected) ? .correctedOcular : .ocular
+        }
+        if ["bcg", "pulse", "cardiac", "ecg", "heart"].contains(where: text.contains) { return .cardiac }
+        if ["mri", "gradient"].contains(where: text.contains) { return .gradient }
+        if ["timing", "marker"].contains(where: text.contains) { return .timing }
+        return details.isEmpty ? .exclusion : .otherArtifact
+    }
+
     func healthHoverSummary(for target: PSAMatrixHealthHoverTarget?) -> String {
         switch target {
         case .epoch(let epoch):
@@ -721,14 +820,15 @@ final class PSADecisionMatrixModel {
                 "Segment Health: \(epochGoodness(epoch))%",
                 resolvedEpochDecision(epoch) == .reject ? "Excluded from average" : "Kept for average"
             ]
+            if let icon = epochStatusIcon(for: epoch) { lines.append("\(icon.title): \(icon.explanation)") }
             let reasons = rejectionReasons(for: epoch)
             if !reasons.isEmpty { lines.append(reasons.joined(separator: " · ")) }
             lines.append("Interpolation: \(badChannelCount(epoch: epoch)) channels · limit \(interpolationChannelLimit)")
             if let reason = interpolationFeasibilityReason(epoch: epoch) { lines.append(reason) }
             let artifacts = preparation.artifactEventsByEpoch[epoch, default: []]
             if !artifacts.isEmpty {
-                let corrected = artifacts.filter(\.isCorrected).count
-                lines.append("Artifact events: \(corrected) corrected · \(artifacts.count - corrected) uncorrected/disabled")
+                let labels = Set(artifacts.map(\.label)).sorted().joined(separator: ", ")
+                lines.append("\(labels): \(artifactCorrectionSummary(for: [epoch]).statusText)")
             }
             if epochOverrides[epoch] == .keep {
                 lines.append("Manual Keep overrides automatic exclusions.")
@@ -750,6 +850,8 @@ final class PSADecisionMatrixModel {
             if channelPriorKind == .segmentMedian {
                 lines.append("Median channel-in-epoch evidence, not whole-recording Channel Health.")
             }
+            lines.append("Artifacts across reviewed epochs: \(artifactCorrectionSummary().statusText)")
+            lines.append("Correction status is event/epoch-level, not channel-specific proof.")
             lines.append("Blue indicates interpolation; the health score remains the underlying evidence.")
             return lines.joined(separator: "\n")
         case nil:
@@ -1476,6 +1578,10 @@ struct PSADecisionMatrixView: View {
                     legendSymbol("Correction disabled", systemName: "slash.circle.fill", color: .gray)
                     legendSymbol("Excluded epoch", systemName: "xmark.rectangle.fill", color: .red)
                     legendSymbol("Manual decision", systemName: "square", color: .primary)
+                    ForEach(PSAEpochStatusIcon.allCases, id: \.rawValue) { icon in
+                        legendSymbol(icon.title, systemName: icon.rawValue, color: .secondary)
+                            .help(icon.explanation + " Symbol = artifact type or issue; purple = correction applied, orange = uncorrected, gray = correction disabled. An icon alone does not mean the epoch is rejected.")
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -1697,6 +1803,7 @@ struct PSADecisionMatrixView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                 selectedEpochRejectionSummary(Set(selection.epochs))
+                artifactCorrectionInfo(epochs: Set(selection.epochs))
                 Button("Zoom to Selection") {
                     detailChannels = Set(selection.channels)
                     detailEpochs = Set(selection.epochs)
@@ -2103,8 +2210,8 @@ struct PSADecisionMatrixView: View {
                 context.fill(Path(badge), with: .color(.black.opacity(0.28)))
             }
             let artifactDetails = model.preparation.artifactEventsByEpoch[epoch, default: []]
-            if !artifactDetails.isEmpty || epochDecisions[column] == .reject {
-                var icon = context.resolve(Image(systemName: epochArtifactSymbol(epoch)))
+            if let statusIcon = model.epochStatusIcon(for: epoch) {
+                var icon = context.resolve(Image(systemName: statusIcon.rawValue))
                 if artifactDetails.isEmpty {
                     icon.shading = .color(.white)
                 } else if artifactDetails.allSatisfy(\.isCorrected) {
@@ -2154,35 +2261,6 @@ struct PSADecisionMatrixView: View {
         )
         context.draw(Text(model.channelHealthScopeLabel).font(.caption.weight(.semibold)),
                      at: CGPoint(x: pinnedX + 76, y: pinnedY + 16), anchor: .center)
-    }
-
-    private func epochArtifactSymbol(_ epoch: Int) -> String {
-        if let detail = model.preparation.artifactEventsByEpoch[epoch]?.first {
-            let code = detail.code.lowercased()
-            if code.contains("eye") || code.contains("blink") || code.contains("ocular") {
-                return detail.isCorrected ? "eye.circle.fill" : "eye.fill"
-            }
-            if code.contains("bcg") || code.contains("pulse") || code.contains("cardiac")
-                || code.contains("ecg") || code.contains("heart") {
-                return "waveform.path.ecg"
-            }
-        }
-        let reasons = model.suggestedRejectedEpochReasons[epoch, default: []]
-            .joined(separator: " ").lowercased()
-        if reasons.contains("eye") || reasons.contains("blink") || reasons.contains("ocular") {
-            return "eye.fill"
-        }
-        if reasons.contains("bcg") || reasons.contains("pulse") || reasons.contains("cardiac")
-            || reasons.contains("ecg") || reasons.contains("heartbeat") {
-            return "waveform.path.ecg"
-        }
-        if reasons.contains("mri") || reasons.contains("gradient") {
-            return "bolt.fill"
-        }
-        if reasons.contains("timing") || reasons.contains("marker") {
-            return "clock.badge.exclamationmark"
-        }
-        return "xmark"
     }
 
     private func handleMatrixDrag(_ value: DragGesture.Value) {
@@ -2249,6 +2327,7 @@ struct PSADecisionMatrixView: View {
                 Text(category).font(.caption).foregroundStyle(.secondary)
             }
             cellEpochOutcome(epoch)
+            artifactCorrectionInfo(epochs: [epoch])
             HStack(spacing: 12) {
                 Text("Cell \(model.integratedGoodness(channel: id.channelIndex, epoch: epoch))%")
                     .help("Integrated cell score: channel-in-epoch evidence, channel prior, and epoch health.")
@@ -2304,14 +2383,8 @@ struct PSADecisionMatrixView: View {
             Divider()
             let artifacts = model.preparation.artifactEventsByEpoch[epoch, default: []]
             if !artifacts.isEmpty {
-                DisclosureGroup(isExpanded: $showsArtifactDetails) {
+                DisclosureGroup("Artifact events (\(artifacts.count))", isExpanded: $showsArtifactDetails) {
                     artifactDetailsView(epoch: epoch).padding(.top, 4)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Artifacts (\(artifacts.count))")
-                        Text(artifactStateSummary(artifacts))
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
                 }
                 .font(.caption)
             }
@@ -2361,12 +2434,39 @@ struct PSADecisionMatrixView: View {
         }
     }
 
-    private func artifactStateSummary(_ details: [PSAArtifactEventDetail]) -> String {
-        let applied = details.filter(\.isCorrected).count
-        let disabled = details.filter { $0.hasCorrection && !$0.isCorrected }.count
-        let uncorrected = details.filter { !$0.hasCorrection && !$0.isCorrected }.count
-        return [(applied, "corrected"), (uncorrected, "uncorrected"), (disabled, "disabled")]
-            .filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }.joined(separator: " · ")
+    private func artifactCorrectionInfo(epochs: Set<Int>? = nil) -> some View {
+        let summary = model.artifactCorrectionSummary(for: epochs)
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(epochs == nil ? "Artifacts across reviewed epochs" : "Epoch artifacts")
+                .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+            if summary.eventCount == 0 {
+                Text(summary.statusText).font(.caption2).foregroundStyle(.secondary)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { artifactCorrectionCounts(summary) }.fixedSize()
+                    VStack(alignment: .leading, spacing: 2) { artifactCorrectionCounts(summary) }
+                }
+                if epochs == nil {
+                    Text("In \(summary.affectedEpochs) epoch\(summary.affectedEpochs == 1 ? "" : "s") · not channel-specific")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .font(.caption2)
+        .help("Counts unique artifact events. Corrected means the recorded cleaning method was applied, not that every channel is artifact-free. Select a cell or single epoch and expand artifact events for method and RMS evidence.")
+    }
+
+    @ViewBuilder
+    private func artifactCorrectionCounts(_ summary: PSAArtifactCorrectionSummary) -> some View {
+        if summary.corrected > 0 {
+            Label("\(summary.corrected) corrected", systemImage: "checkmark.circle.fill").foregroundStyle(.purple)
+        }
+        if summary.uncorrected > 0 {
+            Label("\(summary.uncorrected) uncorrected", systemImage: "exclamationmark.circle.fill").foregroundStyle(.orange)
+        }
+        if summary.disabled > 0 {
+            Label("\(summary.disabled) correction disabled", systemImage: "slash.circle.fill").foregroundStyle(.secondary)
+        }
     }
 
     private func selectedEpochRejectionSummary(_ epochs: Set<Int>) -> some View {
@@ -2410,6 +2510,7 @@ struct PSADecisionMatrixView: View {
                 .font(.headline)
             Text(model.selectedChannels.sorted().map { channelName($0) }.joined(separator: ", "))
                 .font(.caption).foregroundStyle(.secondary).lineLimit(4)
+            artifactCorrectionInfo()
             Text("Rejecting a channel here means interpolating it within every kept epoch; it does not change recording-wide Channel Health.")
                 .font(.caption).foregroundStyle(.secondary)
             Button("Reject Selected Channels (Interpolate)") {
@@ -2433,6 +2534,14 @@ struct PSADecisionMatrixView: View {
             Text(model.selectedEpochs.sorted().map { "#\($0 + 1) \(model.preparation.segments[$0].category)" }.joined(separator: ", "))
                 .font(.caption).foregroundStyle(.secondary).lineLimit(5)
             selectedEpochRejectionSummary(model.selectedEpochs)
+            artifactCorrectionInfo(epochs: model.selectedEpochs)
+            if model.selectedEpochs.count == 1, let epoch = model.selectedEpochs.first,
+               model.preparation.artifactEventsByEpoch[epoch]?.isEmpty == false {
+                DisclosureGroup("Artifact event details", isExpanded: $showsArtifactDetails) {
+                    artifactDetailsView(epoch: epoch).padding(.top, 4)
+                }
+                .font(.caption)
+            }
             let interpolationWarnings = Set(model.selectedEpochs.compactMap {
                 model.interpolationFeasibilityReason(epoch: $0)
             })

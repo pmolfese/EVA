@@ -36,11 +36,17 @@ final class PSADecisionMatrixLayoutTests: XCTestCase {
             suggestedRejectedEpochReasons: [0: ["Eye Blink"]], artifactEventsByEpoch: [0: artifacts]
         )
 
-        for (width, height, floating, dark) in [(760.0, 480.0, true, false),
-                                                (900.0, 560.0, true, true),
-                                                (1320.0, 820.0, false, false)] {
+        for (width, height, floating, dark, selection) in [(760.0, 480.0, true, false, "cell"),
+                                                (900.0, 560.0, true, true, "cell"),
+                                                (1320.0, 820.0, false, false, "cell"),
+                                                (900.0, 560.0, true, false, "epoch"),
+                                                (900.0, 560.0, true, true, "channel")] {
             let model = PSADecisionMatrixModel(preparation: preparation)
-            model.selectCell(.init(channelIndex: 5, epochIndex: 0))
+            switch selection {
+            case "epoch": model.selectEpochs([0])
+            case "channel": model.selectChannels([5])
+            default: model.selectCell(.init(channelIndex: 5, epochIndex: 0))
+            }
             let view = PSADecisionMatrixView(
                 model: model, isApplying: false, isRunningFullChannelHealth: false,
                 allowsFullHealthUpgrade: false, fallbackMessage: "", progress: nil, progressMessage: nil,
@@ -71,7 +77,7 @@ final class PSADecisionMatrixLayoutTests: XCTestCase {
             let image = NSImage(size: host.bounds.size)
             image.addRepresentation(bitmap)
             let attachment = XCTAttachment(image: image)
-            attachment.name = "Compact matrix \(Int(width))x\(Int(height)) \(dark ? "dark" : "light")"
+            attachment.name = "Compact matrix \(Int(width))x\(Int(height)) \(dark ? "dark" : "light") \(selection)"
             attachment.lifetime = .keepAlways
             add(attachment)
         }

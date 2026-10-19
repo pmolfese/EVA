@@ -106,6 +106,19 @@ the layout supports it—without changing the raw events. Switch to
 sign. The closest pair is reported above the cards, with a **Likely duplicate**
 label at high similarity.
 
+Review uses a macOS-style three-column layout. The artifact source list is on the
+left, maps and waveforms occupy the center canvas, and the right Inspector holds
+the controls. **Essentials** contains the family count, polarity, and comparison
+metric. **Quality & Display**, **Waveform Subgroups**, and **Auto-Selection**
+expand only when needed; collapsing them never resets their values. The collapsed
+Auto-Selection row continues to show its proposed Include/Exclude/Hold counts.
+
+The artifact source list also supports batch treatment changes. Click one item,
+Shift-click a contiguous range, or Command-click/Control-click discontiguous
+items. The Inspector reports the number selected and shows **Mixed** when their
+treatments differ. Choosing a treatment applies it to every highlighted artifact;
+the center canvas continues to inspect the most recently clicked item.
+
 Click one card to browse it. Shift-click selects a contiguous range;
 Control-click or Command-click toggles discontiguous cards. **Merge selected** or
 **Merge pair** combines those families for this preview and enables one waveform
@@ -116,12 +129,35 @@ categories. A move is persistent: events leave the source class, carry their
 Include/Hold/Exclude choices and detector origin, and are rebuilt into the
 destination's independent reference and treatment.
 
+You can also drag a spatial card anywhere over the left artifact sidebar. EVA
+creates a new top-level artifact named from the source and family, moves the
+family out of the source, and keeps the source selected while its remaining
+families rebuild and re-sort.
+If the dragged card is part of a multi-selection, all selected families move
+together. The new artifact starts with Standard OBS, but its Treatment menu is
+independent. Its spatial review starts at **Force count: 1** so the family is not
+immediately split again; raise the count if you want to inspect substructure.
+Detector provenance is retained internally even though the entry is not indented,
+preventing the same events from being duplicated during refresh.
+
 Missing layouts, flat maps, incomplete windows, and insufficient shared sensor
 coverage leave events **Unassigned**. Click **All** to clear the preview filter.
 Grouping, selection, and preview merges do not by themselves change decisions or
-cleaning. Building runs in the background; cohesion cuts reuse the cached tree
-without rescanning the recording. The session cache is refreshed when the signal,
-definition, or eligible sensor mask changes.
+cleaning. Building runs in the background; feature extraction uses bounded
+batches and up to eight independent hierarchy branches can build concurrently.
+EVA builds the branches needed for your requested family count or cohesion first,
+so those families can appear before the rest of the hierarchy finishes. The
+remaining branches complete in the background. Changing the requested cut during
+that interval may wait for the full tree. The suggested count becomes available
+when the tree is complete. Cohesion cuts reuse the cached tree without rescanning
+the recording. The session cache is
+refreshed when the signal, definition, or eligible sensor mask changes.
+Completed analyses, spatial trees, family cuts, and waveform subgroup results are
+also retained in a bounded workspace cache, so returning to a recently reviewed
+artifact reuses the results immediately. A first visit or changed input still
+requires background processing. Beside the family-count arrows, **1**, **2**, and
+**3** buttons quickly set the requested count; counts above the usable event count
+are disabled.
 
 When global polarity is ignored, **Comparison** offers five preview costs:
 
@@ -196,8 +232,11 @@ threshold ocular artifacts open on Spatial groups. For ocular review, **Force
 count** starts at two families; set it to one when all matches should be treated
 as one blink family, or raise it when blinks and lateral movements need separate
 inspection. The outlier floor may still leave genuinely incompatible maps
-unassigned. **LPA+** is the default ocular comparison; **LPC+** explores inverse-
-contrast structure, and **crM** tolerates nonlinear amplitude relationships.
+unassigned. **Global Pearson** with **Ignore global polarity** is the default
+ocular comparison, so matching whole-scalp patterns can share a family even when
+their signs are reversed. **LPA+** offers an alternative local comparison;
+**LPC+** explores inverse-contrast structure, and **crM** tolerates nonlinear
+amplitude relationships.
 These AFNI-inspired scores compare fixed EEG sensor maps rather than registering
 or resampling images.
 

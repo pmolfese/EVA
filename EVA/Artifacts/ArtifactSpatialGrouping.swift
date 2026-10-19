@@ -36,7 +36,7 @@ nonisolated enum ArtifactSpatialCohesionRule: String, CaseIterable, Identifiable
 }
 
 nonisolated struct ArtifactSpatialGroup: Identifiable, Sendable {
-    let id: Int
+    var id: Int
     let eventIDs: [String]
     let representativeID: String
     /// Minimum selected comparison score to this group's normalized centroid.
@@ -65,6 +65,12 @@ nonisolated struct ArtifactSpatialCut: Sendable {
     let unassignedIDs: [String]
 }
 
+/// The initial frontier uses the same split-gain ordering as a completed cut.
+nonisolated enum ArtifactSpatialInitialCut: Sendable {
+    case targetCount(Int, ArtifactSpatialCohesionRule)
+    case cohesion(Double, ArtifactSpatialCohesionRule)
+}
+
 nonisolated struct ArtifactSpatialHierarchy: Sendable {
     struct Node: Sendable {
         let group: ArtifactSpatialGroup
@@ -78,6 +84,7 @@ nonisolated struct ArtifactSpatialHierarchy: Sendable {
     var polarityMode: ArtifactSpatialPolarityMode = .signed
     var similarityMetric: ArtifactSpatialSimilarityMetric = .globalPearson
     var localNeighborhoods: [[Int]] = []
+    var isComplete = true
 
     /// Cutting an already-built tree does not touch signal data or recompute distances.
     func groups(minimumCorrelation: Double) -> [ArtifactSpatialGroup] {
@@ -386,6 +393,25 @@ nonisolated enum ArtifactSpatialGrouping {
                       polarityMode: ArtifactSpatialPolarityMode,
                       similarityMetric: ArtifactSpatialSimilarityMetric,
                       localNeighborhoods: [[Int]]) -> ArtifactSpatialGroup? {
+        evaluate(features: features, indices: indices, polarityMode: polarityMode,
+            similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods)?.group(id: id)
+    }
+
+    private struct Evaluation: Sendable {
+        let indices: [Int]
+        let scores: [Double]
+        let summary: ArtifactSpatialGroup
+        func group(id: Int) -> ArtifactSpatialGroup {
+            var result = summary
+            result.id = id
+            return result
+        }
+    }
+
+    private static func evaluate(features: [ArtifactSpatialFeature], indices: [Int],
+                                 polarityMode: ArtifactSpatialPolarityMode,
+                                 similarityMetric: ArtifactSpatialSimilarityMetric,
+                                 localNeighborhoods: [[Int]]) -> Evaluation? {
         guard let center = centroid(features: features, indices: indices, polarityMode: polarityMode) else { return nil }
         let scores = indices.map {
             similarityScore(features[$0].vector, center, polarityMode: polarityMode,
@@ -396,13 +422,14 @@ nonisolated enum ArtifactSpatialGrouping {
         let signs: [Int8] = indices.map {
             polarityMode == .ignoreGlobalPolarity && dot(features[$0].vector, center) < 0 ? -1 : 1
         }
-        return ArtifactSpatialGroup(id: id, eventIDs: indices.map { features[$0].eventID },
+        let summary = ArtifactSpatialGroup(id: 0, eventIDs: indices.map { features[$0].eventID },
             representativeID: features[indices[representative]].eventID,
             minimumCorrelation: sorted.first ?? -1, meanFeature: center,
             orientationSigns: signs, polarityMode: polarityMode,
             similarityMetric: similarityMetric,
             tenthPercentileCorrelation: percentile(sorted, fraction: 0.10),
             medianCorrelation: percentile(sorted, fraction: 0.50))
+        return Evaluation(indices: indices, scores: scores, summary: summary)
     }
 
     /// Bounded parallel normalization, followed by a deterministic divisive spherical tree.
@@ -410,7 +437,9 @@ nonisolated enum ArtifactSpatialGrouping {
     static func build(examples: [ArtifactReviewExample],
                       layout: SensorLayout? = nil,
                       polarityMode: ArtifactSpatialPolarityMode = .signed,
-                      similarityMetric: ArtifactSpatialSimilarityMetric = .globalPearson) async -> ArtifactSpatialHierarchy? {
+                      similarityMetric: ArtifactSpatialSimilarityMetric = .globalPearson,
+                      initialCut: ArtifactSpatialInitialCut? = nil,
+                      onInitialHierarchy: (@Sendable (ArtifactSpatialHierarchy) async -> Void)? = nil) async -> ArtifactSpatialHierarchy? {
         guard !Task.isCancelled else { return nil }
         let maps = examples.compactMap(\.topography)
         var counts: [Int: Int] = [:]
@@ -446,9 +475,234 @@ nonisolated enum ArtifactSpatialGrouping {
         guard !Task.isCancelled else { return nil }
         let assigned = Set(features.map(\.eventID))
         let neighborhoods = localNeighborhoods(channels: channels, layout: layout)
-        return hierarchy(features: features, channels: channels,
+        return await parallelHierarchy(features: features, channels: channels,
             unassignedIDs: examples.map(\.id).filter { !assigned.contains($0) }, polarityMode: polarityMode,
-            similarityMetric: similarityMetric, localNeighborhoods: neighborhoods, storesCentroids: true)
+            similarityMetric: similarityMetric, localNeighborhoods: neighborhoods, storesCentroids: true,
+            initialCut: initialCut, onInitialHierarchy: onInitialHierarchy)
+    }
+
+    private struct HierarchySubtree: Sendable {
+        var nodes: [ArtifactSpatialHierarchy.Node]
+        var root: Int
+    }
+
+    private static func splitIndices(features: [ArtifactSpatialFeature], evaluation: Evaluation, depth: Int,
+                                     polarityMode: ArtifactSpatialPolarityMode,
+                                     similarityMetric: ArtifactSpatialSimilarityMetric,
+                                     localNeighborhoods: [[Int]]) -> (left: [Int], right: [Int])? {
+        let indices = evaluation.indices
+        guard indices.count > 1, depth < 32, !Task.isCancelled else { return nil }
+        func center(_ members: [Int]) -> [Double]? {
+            centroid(features: features, indices: members, polarityMode: polarityMode)
+        }
+        func similarity(_ lhs: [Double], _ rhs: [Double]) -> Double {
+            similarityScore(lhs, rhs, polarityMode: polarityMode,
+                metric: similarityMetric, localNeighborhoods: localNeighborhoods)
+        }
+        let scores = evaluation.scores
+        guard (scores.min() ?? -1) < 0.9999 else { return nil }
+        let seedA = indices[indices.indices.min { scores[$0] < scores[$1] } ?? 0]
+        let seedScores = indices.map { similarity(features[$0].vector, features[seedA].vector) }
+        let seedB = indices[indices.indices.min { seedScores[$0] < seedScores[$1] }!]
+        var a = features[seedA].vector, b = features[seedB].vector
+        var left: [Int] = [], right: [Int] = []
+        for _ in 0..<12 {
+            guard !Task.isCancelled else { return nil }
+            let previous = left
+            left = []; right = []
+            for index in indices {
+                if similarity(features[index].vector, a) >= similarity(features[index].vector, b) {
+                    left.append(index)
+                } else {
+                    right.append(index)
+                }
+            }
+            guard !left.isEmpty, !right.isEmpty else { return nil }
+            a = center(left) ?? a; b = center(right) ?? b
+            if left == previous { break }
+        }
+        return left.isEmpty || right.isEmpty ? nil : (left, right)
+    }
+
+    private static func hierarchySubtree(features: [ArtifactSpatialFeature], indices: [Int], depth: Int,
+                                         polarityMode: ArtifactSpatialPolarityMode,
+                                         similarityMetric: ArtifactSpatialSimilarityMetric,
+                                         localNeighborhoods: [[Int]],
+                                         storesCentroids: Bool) -> HierarchySubtree? {
+        guard !indices.isEmpty, !Task.isCancelled else { return nil }
+        var nodes: [ArtifactSpatialHierarchy.Node] = []
+        func append(_ members: [Int], depth: Int) -> Int {
+            let evaluation = evaluate(features: features, indices: members,
+                polarityMode: polarityMode, similarityMetric: similarityMetric,
+                localNeighborhoods: localNeighborhoods)!
+            var children: [Int] = []
+            if let split = splitIndices(features: features, evaluation: evaluation, depth: depth,
+                polarityMode: polarityMode, similarityMetric: similarityMetric,
+                localNeighborhoods: localNeighborhoods) {
+                children = [append(split.left, depth: depth + 1), append(split.right, depth: depth + 1)]
+            }
+            let id = nodes.count
+            var built = evaluation.group(id: id)
+            if !storesCentroids && polarityMode == .signed { built.meanFeature = [] }
+            nodes.append(.init(group: built, children: children))
+            return id
+        }
+        let root = append(indices, depth: depth)
+        return Task.isCancelled ? nil : HierarchySubtree(nodes: nodes, root: root)
+    }
+
+    private struct PlannedNode: Sendable {
+        let evaluation: Evaluation
+        let depth: Int
+        // nil means not yet split; [] means a terminal node.
+        var children: [Int]?
+    }
+
+    private static func joined(_ evaluation: Evaluation, children: [HierarchySubtree],
+                               storesCentroids: Bool) -> HierarchySubtree {
+        var nodes: [ArtifactSpatialHierarchy.Node] = []
+        var roots: [Int] = []
+        for child in children {
+            let offset = nodes.count
+            roots.append(child.root + offset)
+            for node in child.nodes {
+                var group = node.group
+                group.id += offset
+                nodes.append(.init(group: group, children: node.children.map { $0 + offset }))
+            }
+        }
+        let root = nodes.count
+        var group = evaluation.group(id: root)
+        if !storesCentroids && group.polarityMode == .signed { group.meanFeature = [] }
+        nodes.append(.init(group: group, children: roots))
+        return HierarchySubtree(nodes: nodes, root: root)
+    }
+
+    /// At most eight independent branch workers; small branches stay serial.
+    /// Joining in left/right order preserves deterministic postorder node IDs.
+    private static func completeSubtree(features: [ArtifactSpatialFeature], plan: [PlannedNode],
+                                        index: Int, parallelBudget: Int,
+                                        polarityMode: ArtifactSpatialPolarityMode,
+                                        similarityMetric: ArtifactSpatialSimilarityMetric,
+                                        localNeighborhoods: [[Int]], storesCentroids: Bool) async -> HierarchySubtree? {
+        guard !Task.isCancelled else { return nil }
+        let node = plan[index]
+        var localPlan = plan
+        let children: [Int]
+        if let planned = node.children { children = planned }
+        else if let split = splitIndices(features: features, evaluation: node.evaluation, depth: node.depth,
+            polarityMode: polarityMode, similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods) {
+            children = [localPlan.count, localPlan.count + 1]
+            for members in [split.left, split.right] {
+                guard let evaluation = evaluate(features: features, indices: members,
+                    polarityMode: polarityMode, similarityMetric: similarityMetric,
+                    localNeighborhoods: localNeighborhoods) else { return nil }
+                localPlan.append(.init(evaluation: evaluation, depth: node.depth + 1))
+            }
+        } else { children = [] }
+        guard !children.isEmpty else {
+            return Task.isCancelled ? nil : joined(node.evaluation, children: [], storesCentroids: storesCentroids)
+        }
+        let left: HierarchySubtree?, right: HierarchySubtree?
+        if parallelBudget > 1 && node.evaluation.indices.count >= 128 {
+            let frozenPlan = localPlan
+            async let a = completeSubtree(features: features, plan: frozenPlan, index: children[0],
+                parallelBudget: parallelBudget / 2, polarityMode: polarityMode,
+                similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods, storesCentroids: storesCentroids)
+            async let b = completeSubtree(features: features, plan: frozenPlan, index: children[1],
+                parallelBudget: parallelBudget - parallelBudget / 2, polarityMode: polarityMode,
+                similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods, storesCentroids: storesCentroids)
+            (left, right) = await (a, b)
+        } else {
+            left = await completeSubtree(features: features, plan: localPlan, index: children[0], parallelBudget: 1,
+                polarityMode: polarityMode, similarityMetric: similarityMetric,
+                localNeighborhoods: localNeighborhoods, storesCentroids: storesCentroids)
+            right = await completeSubtree(features: features, plan: localPlan, index: children[1], parallelBudget: 1,
+                polarityMode: polarityMode, similarityMetric: similarityMetric,
+                localNeighborhoods: localNeighborhoods, storesCentroids: storesCentroids)
+        }
+        guard let left, let right, !Task.isCancelled else { return nil }
+        return joined(node.evaluation, children: [left, right], storesCentroids: storesCentroids)
+    }
+
+    private static func parallelHierarchy(features: [ArtifactSpatialFeature], channels: [Int],
+                                          unassignedIDs: [String], polarityMode: ArtifactSpatialPolarityMode,
+                                          similarityMetric: ArtifactSpatialSimilarityMetric,
+                                          localNeighborhoods: [[Int]], storesCentroids: Bool,
+                                          initialCut: ArtifactSpatialInitialCut?,
+                                          onInitialHierarchy: (@Sendable (ArtifactSpatialHierarchy) async -> Void)?) async -> ArtifactSpatialHierarchy? {
+        guard !Task.isCancelled else { return nil }
+        func hierarchy(_ tree: HierarchySubtree?, complete: Bool) -> ArtifactSpatialHierarchy {
+            ArtifactSpatialHierarchy(channels: channels, features: features, unassignedIDs: unassignedIDs,
+                nodes: tree?.nodes ?? [], root: tree?.root, polarityMode: polarityMode,
+                similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods, isComplete: complete)
+        }
+        guard let root = evaluate(features: features, indices: Array(features.indices), polarityMode: polarityMode,
+            similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods) else {
+            return Task.isCancelled ? nil : hierarchy(nil, complete: true)
+        }
+        var plan = [PlannedNode(evaluation: root, depth: 0)]
+        func expand(_ index: Int) {
+            guard plan[index].children == nil, !Task.isCancelled else { return }
+            let node = plan[index]
+            guard let split = splitIndices(features: features, evaluation: node.evaluation, depth: node.depth,
+                polarityMode: polarityMode, similarityMetric: similarityMetric,
+                localNeighborhoods: localNeighborhoods) else { plan[index].children = []; return }
+            let children = [plan.count, plan.count + 1]
+            for members in [split.left, split.right] {
+                let evaluation = evaluate(features: features, indices: members, polarityMode: polarityMode,
+                    similarityMetric: similarityMetric, localNeighborhoods: localNeighborhoods)!
+                plan.append(.init(evaluation: evaluation, depth: node.depth + 1))
+            }
+            plan[index].children = children
+        }
+        func cohesion(_ index: Int, _ rule: ArtifactSpatialCohesionRule) -> Double {
+            let group = plan[index].evaluation.summary
+            return rule == .minimum ? group.minimumCorrelation : group.tenthPercentileCorrelation
+        }
+        if let initialCut, let onInitialHierarchy {
+            switch initialCut {
+            case let .targetCount(requested, rule):
+                var frontier = [0]
+                while frontier.count < min(max(1, requested), features.count), !Task.isCancelled {
+                    // Looking ahead one level is necessary to preserve the full
+                    // tree's split-gain ordering, rather than approximating K seeds.
+                    for index in frontier { expand(index) }
+                    let candidates = frontier.filter { !(plan[$0].children ?? []).isEmpty }
+                    func gain(_ index: Int) -> Double {
+                        let children = plan[index].children!
+                        let total = children.reduce(0) { $0 + plan[$1].evaluation.indices.count }
+                        return children.reduce(0.0) {
+                            $0 + cohesion($1, rule) * Double(plan[$1].evaluation.indices.count) / Double(max(1, total))
+                        } - cohesion(index, rule)
+                    }
+                    guard let best = candidates.max(by: {
+                        let a = gain($0), b = gain($1)
+                        return a == b ? plan[$0].evaluation.indices.count < plan[$1].evaluation.indices.count : a < b
+                    }) else { break }
+                    frontier.removeAll { $0 == best }
+                    frontier.append(contentsOf: plan[best].children!)
+                }
+            case let .cohesion(threshold, rule):
+                var pending = [0]
+                while let index = pending.popLast(), !Task.isCancelled {
+                    if cohesion(index, rule) < threshold {
+                        expand(index)
+                        pending.append(contentsOf: (plan[index].children ?? []).reversed())
+                    }
+                }
+            }
+            guard !Task.isCancelled else { return nil }
+            func snapshot(_ index: Int) -> HierarchySubtree {
+                joined(plan[index].evaluation, children: (plan[index].children ?? []).map(snapshot), storesCentroids: storesCentroids)
+            }
+            await onInitialHierarchy(hierarchy(snapshot(0), complete: false))
+        }
+        let budget = max(1, min(8, ProcessInfo.processInfo.activeProcessorCount))
+        guard let tree = await completeSubtree(features: features, plan: plan, index: 0, parallelBudget: budget,
+            polarityMode: polarityMode, similarityMetric: similarityMetric,
+            localNeighborhoods: localNeighborhoods, storesCentroids: storesCentroids), !Task.isCancelled else { return nil }
+        return hierarchy(tree, complete: true)
     }
 
     /// Shared unit-vector tree builder. Projective mode treats `v` and `-v` as
@@ -462,55 +716,16 @@ nonisolated enum ArtifactSpatialGrouping {
                           localNeighborhoods: [[Int]] = [],
                           storesCentroids: Bool = false) -> ArtifactSpatialHierarchy? {
         guard !Task.isCancelled else { return nil }
-        var nodes: [ArtifactSpatialHierarchy.Node] = []
-        func centroid(_ indices: [Int]) -> [Double]? {
-            ArtifactSpatialGrouping.centroid(features: features, indices: indices, polarityMode: polarityMode)
-        }
-        func similarity(_ lhs: [Double], _ rhs: [Double]) -> Double {
-            similarityScore(lhs, rhs, polarityMode: polarityMode,
-                metric: similarityMetric, localNeighborhoods: localNeighborhoods)
-        }
-        func append(_ indices: [Int], depth: Int) -> Int {
-            let center = centroid(indices)
-            let correlations = indices.map { index in center.map { similarity(features[index].vector, $0) } ?? -1 }
-            let quality = correlations.min() ?? -1
-            var children: [Int] = []
-            if indices.count > 1, quality < 0.9999, depth < 32, !Task.isCancelled {
-                let seedA = indices[indices.indices.min { correlations[$0] < correlations[$1] } ?? 0]
-                let seedB = indices.min {
-                    similarity(features[$0].vector, features[seedA].vector)
-                        < similarity(features[$1].vector, features[seedA].vector)
-                }!
-                var a = features[seedA].vector, b = features[seedB].vector
-                var left: [Int] = [], right: [Int] = []
-                for _ in 0..<12 {
-                    if Task.isCancelled { break }
-                    let previous = left
-                    left = []; right = []
-                    for index in indices {
-                        if similarity(features[index].vector, a) >= similarity(features[index].vector, b) { left.append(index) }
-                        else { right.append(index) }
-                    }
-                    if left.isEmpty || right.isEmpty { break }
-                    a = centroid(left) ?? a; b = centroid(right) ?? b
-                    if left == previous { break }
-                }
-                if !left.isEmpty, !right.isEmpty {
-                    children = [append(left, depth: depth + 1), append(right, depth: depth + 1)]
-                }
-            }
-            let id = nodes.count
-            var built = ArtifactSpatialGrouping.group(features: features, indices: indices, id: id,
+        guard let tree = hierarchySubtree(features: features, indices: Array(features.indices), depth: 0,
+            polarityMode: polarityMode, similarityMetric: similarityMetric,
+            localNeighborhoods: localNeighborhoods, storesCentroids: storesCentroids) else {
+            return ArtifactSpatialHierarchy(channels: channels, features: features,
+                unassignedIDs: unassignedIDs, nodes: [], root: nil,
                 polarityMode: polarityMode, similarityMetric: similarityMetric,
-                localNeighborhoods: localNeighborhoods)!
-            if !storesCentroids && polarityMode == .signed { built.meanFeature = [] }
-            nodes.append(.init(group: built, children: children))
-            return id
+                localNeighborhoods: localNeighborhoods)
         }
-        let root = features.isEmpty ? nil : append(Array(features.indices), depth: 0)
-        guard !Task.isCancelled else { return nil }
         return ArtifactSpatialHierarchy(channels: channels, features: features,
-            unassignedIDs: unassignedIDs, nodes: nodes, root: root,
+            unassignedIDs: unassignedIDs, nodes: tree.nodes, root: tree.root,
             polarityMode: polarityMode,
             similarityMetric: similarityMetric,
             localNeighborhoods: localNeighborhoods)
@@ -676,6 +891,7 @@ actor ArtifactSpatialGroupingCache {
     private var order: [String] = []
     func value(for key: String) -> ArtifactSpatialHierarchy? { entries[key] }
     func insert(_ value: ArtifactSpatialHierarchy, for key: String) {
+        guard value.isComplete else { return }
         entries[key] = value
         order.removeAll { $0 == key }; order.append(key)
         while order.count > 3 { entries.removeValue(forKey: order.removeFirst()) }

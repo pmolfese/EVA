@@ -1,5 +1,12 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
+
+nonisolated private struct ArtifactSpatialDragPayload: Codable, Sendable {
+    let sourceArtifactID: UUID
+    let eventIDs: [String]
+    let familyNumber: Int
+}
 
 private enum ArtifactSpatialGroupingControl: String, CaseIterable, Identifiable {
     case cohesion = "Cohesion"
@@ -11,6 +18,25 @@ private enum ArtifactSpatialCardMapMode: String, CaseIterable, Identifiable {
     case centroid = "Canonical centroids"
     case representative = "Representative events"
     var id: String { rawValue }
+}
+
+/// Bounded workspace storage makes completed results available during the same
+/// render pass as an artifact switch, without an asynchronous cache lookup.
+struct ArtifactReviewResultCache<Value> {
+    let capacity: Int
+    private var entries: [String: Value] = [:]
+    private var order: [String] = []
+
+    subscript(key: String) -> Value? { entries[key] }
+
+    mutating func insert(_ value: Value, for key: String) {
+        entries[key] = value
+        order.removeAll { $0 == key }
+        order.append(key)
+        while order.count > max(1, capacity) {
+            entries.removeValue(forKey: order.removeFirst())
+        }
+    }
 }
 
 /// A stable frame keeps workflow tabs in the same place throughout artifact work.
@@ -37,7 +63,7 @@ struct ArtifactWorkspace<Content: View>: View {
             content()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(width: 1060, height: 820)
+        .frame(width: 1280, height: 820)
         .background(Color(nsColor: .textBackgroundColor))
     }
 }
@@ -53,12 +79,18 @@ struct ArtifactReviewWorkspace: View {
     let onClose: () -> Void
     let onClean: () -> Void
 
+    @State private var analysisCache = ArtifactReviewResultCache<ArtifactReviewAnalysis>(capacity: 12)
+    @State private var spatialCache = ArtifactReviewResultCache<ArtifactSpatialHierarchy>(capacity: 24)
+    @State private var cutCache = ArtifactReviewResultCache<ArtifactSpatialCut>(capacity: 48)
+    @State private var waveformCache = ArtifactReviewResultCache<ArtifactWaveformGroupingResult>(capacity: 12)
     @State private var analysis: ArtifactReviewAnalysis?
     @State private var loadedKey = ""
     @State private var selectedEventID: String?
     @State private var usesSpatialGroups = false
     @State private var spatialHierarchy: ArtifactSpatialHierarchy?
     @State private var spatialLoadedKey = ""
+    @State private var spatialPreview: ArtifactSpatialHierarchy?
+    @State private var spatialPreviewLoadedKey = ""
     @State private var selectedSpatialGroupIDs: Set<Int> = []
     @State private var spatialSelectionAnchorID: Int?
     @State private var spatialThreshold = 0.85
@@ -72,6 +104,13 @@ struct ArtifactReviewWorkspace: View {
     @State private var spatialCutLoadedKey = ""
     @State private var spatialCardMapMode = ArtifactSpatialCardMapMode.centroid
     @State private var manuallyMergedSpatialGroups: [ArtifactSpatialGroup] = []
+    @State private var isSidebarDropTarget = false
+    @State private var selectedArtifactIDs: Set<UUID> = []
+    @State private var artifactSelectionAnchorID: UUID?
+    @State private var showsSpatialEssentials = true
+    @State private var showsSpatialQuality = false
+    @State private var showsAutoSelection = false
+    @State private var showsWaveformInspector = false
     @State private var waveformGrouping: ArtifactWaveformGroupingResult?
     @State private var waveformLoadedKey = ""
     @State private var waveformGroupID: Int?
@@ -95,6 +134,27 @@ struct ArtifactReviewWorkspace: View {
     private var selected: DefinedArtifact? {
         reviewable.first { $0.id == selectedArtifactID } ?? reviewable.first
     }
+    private var effectiveSelectedArtifactIDs: Set<UUID> {
+        let reviewableIDs = Set(reviewable.map(\.id))
+        let retained = selectedArtifactIDs.intersection(reviewableIDs)
+        if !retained.isEmpty { return retained }
+        return selected.map { [$0.id] } ?? []
+    }
+    private var treatmentTargets: [DefinedArtifact] {
+        let ids = effectiveSelectedArtifactIDs
+        return reviewable.filter { ids.contains($0.id) }
+    }
+    private var commonTreatment: ArtifactCleaningMethod? {
+        guard let first = treatmentTargets.first?.cleaningMethod,
+              treatmentTargets.dropFirst().allSatisfy({ $0.cleaningMethod == first }) else { return nil }
+        return first
+    }
+    private var batchCleaningMethods: [ArtifactCleaningMethod] {
+        guard let first = treatmentTargets.first else { return [] }
+        return cleaningMethods(first).filter { method in
+            treatmentTargets.dropFirst().allSatisfy { cleaningMethods($0).contains(method) }
+        }
+    }
     private var compatibleSplitDestinations: [DefinedArtifact] {
         guard let selected else { return [] }
         let sourceID = selected.reviewState?.sourceArtifactID ?? selected.id
@@ -117,10 +177,20 @@ struct ArtifactReviewWorkspace: View {
         hasher.combine(artifact.reviewState?.referenceEventIDs ?? ArtifactReviewEngine.candidates(for: artifact).map(\.id))
         hasher.combine(ArtifactReviewEngine.candidates(for: artifact))
         hasher.combine(excludedChannels.sorted())
-        hasher.combine(sensorLayout?.positions.map(\.channelIndex))
+        hasher.combine(sensorLayoutName)
+        hasher.combine(sensorLayout?.positions)
+        hasher.combine(artifact.thresholdOcularKind)
+        hasher.combine(artifact.reviewState?.sourceThresholdKind)
+        hasher.combine(artifact.thresholdOcularConfiguration?.channelOverride)
+        for candidate in artifact.thresholdOcularCandidates ?? [] {
+            hasher.combine(candidate.id)
+            hasher.combine(candidate.startTimeSeconds)
+            hasher.combine(candidate.endTimeSeconds)
+            hasher.combine(candidate.peakMicrovolts)
+        }
         return String(hasher.finalize())
     }
-    private var currentAnalysis: ArtifactReviewAnalysis? { loadedKey == analysisKey ? analysis : nil }
+    private var currentAnalysis: ArtifactReviewAnalysis? { loadedKey == analysisKey ? analysis : analysisCache[analysisKey] }
     private var defaultSpatialPolarityMode: ArtifactSpatialPolarityMode {
         switch selected?.type {
         case .ocular, .saccadicSpike, .corneoRetinal: return .ignoreGlobalPolarity
@@ -146,9 +216,11 @@ struct ArtifactReviewWorkspace: View {
     private func resetGroupingDefaults(for artifact: DefinedArtifact?) {
         usesSpatialGroups = prefersSpatialGroups(artifact)
         spatialPolarityOverride = nil
-        spatialSimilarityMetric = artifact?.type == .ocular ? .lpaPlus : .globalPearson
+        spatialSimilarityMetric = .globalPearson
         spatialGroupingControl = artifact?.type == .ocular ? .targetCount : .cohesion
-        spatialTargetCount = 2
+        // A dragged family is already an explicit spatial decision. Start its
+        // independent review as one family instead of immediately splitting it again.
+        spatialTargetCount = artifact?.reviewState?.displaysAsStandaloneArtifact == true ? 1 : 2
         spatialCohesionRule = .tenthPercentile
         spatialOutlierFloor = 0.60
     }
@@ -156,13 +228,20 @@ struct ArtifactReviewWorkspace: View {
         usesSpatialGroups && currentAnalysis != nil
             ? "\(analysisKey)/spatial/\(spatialPolarityMode.rawValue)/\(effectiveSpatialSimilarityMetric.rawValue)" : ""
     }
-    private var currentSpatial: ArtifactSpatialHierarchy? { spatialLoadedKey == spatialTaskKey ? spatialHierarchy : nil }
+    private var spatialCutParametersKey: String {
+        "\(spatialGroupingControl.rawValue)/\(spatialTargetCount)/\(spatialThreshold)/\(spatialCohesionRule.rawValue)/\(spatialOutlierFloor)"
+    }
+    private var spatialPreviewRequestKey: String { "\(spatialTaskKey)/cut/\(spatialCutParametersKey)" }
+    private var currentSpatial: ArtifactSpatialHierarchy? {
+        if spatialLoadedKey == spatialTaskKey, let spatialHierarchy { return spatialHierarchy }
+        if let cached = spatialCache[spatialTaskKey] { return cached }
+        return spatialPreviewLoadedKey == spatialPreviewRequestKey ? spatialPreview : nil
+    }
     private var spatialCutTaskKey: String {
-        guard currentSpatial != nil else { return "" }
-        return "\(spatialTaskKey)/cut/\(spatialGroupingControl.rawValue)/\(spatialTargetCount)/\(spatialThreshold)/\(spatialCohesionRule.rawValue)/\(spatialOutlierFloor)"
+        currentSpatial != nil ? spatialPreviewRequestKey : ""
     }
     private var currentSpatialCut: ArtifactSpatialCut? {
-        spatialCutLoadedKey == spatialCutTaskKey ? spatialCut : nil
+        spatialCutLoadedKey == spatialCutTaskKey ? spatialCut : cutCache[spatialCutTaskKey]
     }
     private var spatialGroups: [ArtifactSpatialGroup] {
         var groups = currentSpatialCut?.groups ?? []
@@ -211,7 +290,7 @@ struct ArtifactReviewWorkspace: View {
         return "\(spatialTaskKey)/waveform/\(family.id)/\(hasher.finalize())/\(waveformPolarityMode.rawValue)"
     }
     private var currentWaveform: ArtifactWaveformGroupingResult? {
-        !waveformTaskKey.isEmpty && waveformLoadedKey == waveformTaskKey ? waveformGrouping : nil
+        !waveformTaskKey.isEmpty && waveformLoadedKey == waveformTaskKey ? waveformGrouping : waveformCache[waveformTaskKey]
     }
     private var waveformEventIDs: Set<String>? {
         guard let id = waveformGroupID, let result = currentWaveform else { return nil }
@@ -265,33 +344,37 @@ struct ArtifactReviewWorkspace: View {
                 classList
                 Divider()
                 if let artifact = selected {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            reviewHeader(artifact)
-                            autoRules(artifact)
-                            if let result = currentAnalysis {
-                                if result.channelIndices.isEmpty {
-                                    Text("No usable definition channels. Check the definition’s channel selection and marked-bad channels.")
-                                        .font(.caption).foregroundStyle(.secondary)
+                    VStack(spacing: 0) {
+                        reviewHeader(artifact)
+                            .padding(.horizontal, 18).padding(.vertical, 12)
+                        Divider()
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 14) {
+                                if let result = currentAnalysis {
+                                    if result.channelIndices.isEmpty {
+                                        Text("No usable definition channels. Check the definition’s channel selection and marked-bad channels.")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Picker("Group by", selection: $usesSpatialGroups) {
+                                        Text("Waveforms").tag(false)
+                                        Text("Spatial").tag(true)
+                                    }.pickerStyle(.segmented).labelsHidden().frame(width: 220)
+                                    if usesSpatialGroups {
+                                        spatialGroupingCanvas(result)
+                                        waveformGroupingPreview()
+                                    }
+                                    else { similarityGroups(result) }
+                                    splitControls(artifact)
+                                    eventWorkspace(artifact, result)
+                                } else {
+                                    ProgressView("Comparing detected examples…")
+                                        .frame(maxWidth: .infinity, minHeight: 330)
                                 }
-                                Picker("Group by", selection: $usesSpatialGroups) {
-                                    Text("Waveform bands").tag(false)
-                                    Text("Spatial families").tag(true)
-                                }.pickerStyle(.segmented).frame(width: 310)
-                                if usesSpatialGroups {
-                                    spatialGroupingPreview(result)
-                                    waveformGroupingPreview()
-                                }
-                                else { similarityGroups(result) }
-                                splitControls(artifact)
-                                eventWorkspace(artifact, result)
-                            } else {
-                                ProgressView("Comparing detected examples…")
-                                    .frame(maxWidth: .infinity, minHeight: 330)
-                            }
+                            }.padding(18)
                         }
-                        .padding(18)
                     }
+                    Divider()
+                    reviewInspector(artifact)
                 } else {
                     ContentUnavailableView("No Detected Artifacts", systemImage: "waveform",
                         description: Text("Run an artifact detector or define an artifact, then review its matches here."))
@@ -313,7 +396,10 @@ struct ArtifactReviewWorkspace: View {
         .task(id: spatialTaskKey) { await loadSpatialGrouping() }
         .task(id: spatialCutTaskKey) { await loadSpatialCut() }
         .task(id: waveformTaskKey) { await loadWaveformGrouping() }
-        .onAppear { resetGroupingDefaults(for: selected) }
+        .onAppear {
+            resetGroupingDefaults(for: selected)
+            synchronizeArtifactSelection()
+        }
         .onChange(of: waveformTaskKey) { _, _ in
             waveformGroupID = nil
         }
@@ -332,6 +418,7 @@ struct ArtifactReviewWorkspace: View {
             ruleUndo = nil; clearSpatialSelection(); selectedEventID = nil; showsSplit = false
         }
         .onChange(of: selected?.id) { _, _ in
+            synchronizeArtifactSelection()
             band = nil
             clearSpatialSelection()
             resetGroupingDefaults(for: selected)
@@ -345,33 +432,60 @@ struct ArtifactReviewWorkspace: View {
 
     private var classList: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 5) {
-                    Text("ARTIFACTS & CLASSES").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                    ArtifactReviewHelp(title: "Artifacts and classes", text: "Select the detector or artifact class to review. Indented classes are shape groups split from an original definition. Each class can have its own average, correction window, and cleaning treatment.")
+                    Text("ARTIFACTS").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    ArtifactReviewHelp(title: "Artifacts", text: "Click to inspect one artifact. Shift-click selects a contiguous range; Command-click or Control-click toggles individual artifacts. Treatment changes apply to every highlighted artifact. Drag a spatial family anywhere over this sidebar to extract it as a new top-level artifact.")
                 }
-                    .padding(.bottom, 6)
-                ForEach(reviewable) { artifact in
+                .padding(.horizontal, 8).padding(.bottom, 6)
+                ForEach(Array(reviewable.enumerated()), id: \.element.id) { index, artifact in
                     Button {
-                        selectedArtifactID = artifact.id
+                        selectArtifact(artifact, at: index)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(artifact.name).font(.callout.weight(.medium)).lineLimit(2)
-                            Text("\(ArtifactReviewEngine.candidates(for: artifact).count) examples · \(artifact.cleaningMethod.rawValue)")
-                                .font(.caption2).foregroundStyle(.secondary)
-                            Text("\(artifact.events.count) included")
-                                .font(.caption2).foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            Image(systemName: artifactSymbol(artifact))
+                                .frame(width: 16).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(artifact.name).font(.callout.weight(.medium)).lineLimit(2)
+                                Text("\(ArtifactReviewEngine.candidates(for: artifact).count) examples")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 4)
+                            Text(artifact.cleaningMethod == .doNothing ? "—" : artifact.cleaningMethod.rawValue)
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .background(selected?.id == artifact.id ? Color.accentColor.opacity(0.14) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 6))
+                        .padding(.horizontal, 8).padding(.vertical, 7)
+                        .background(effectiveSelectedArtifactIDs.contains(artifact.id)
+                            ? Color.accentColor.opacity(selected?.id == artifact.id ? 0.22 : 0.12) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
-                    .padding(.leading, artifact.reviewState?.sourceArtifactID == nil ? 0 : 10)
+                    .padding(.leading, artifact.reviewState?.sourceArtifactID != nil
+                        && artifact.reviewState?.displaysAsStandaloneArtifact != true ? 10 : 0)
                 }
-            }.padding(12)
-        }.frame(width: 180)
+            }.padding(10)
+        }
+        .frame(width: 195)
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.45))
+        .overlay {
+            if isSidebarDropTarget {
+                ZStack {
+                    Color.accentColor.opacity(0.10)
+                    VStack(spacing: 8) {
+                        Image(systemName: "square.and.arrow.down.fill").font(.title2)
+                        Text("Release to create artifact").font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(14)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
+                .overlay { RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 2).padding(3) }
+                .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [UTType.utf8PlainText.identifier], isTargeted: $isSidebarDropTarget,
+                perform: acceptSpatialFamilyDrop)
     }
 
     private func reviewHeader(_ artifact: DefinedArtifact) -> some View {
@@ -386,14 +500,269 @@ struct ArtifactReviewWorkspace: View {
                 }
             }
             Spacer()
-            ArtifactReviewHelp(title: "Treatment", text: "Choose the cleaning method for this class. This sets the method only; use the Clean tab to configure it and Apply cleaning. OBS fits a basis of artifact shapes; SSP/PCA removes the artifact subspace; Regress subtracts a fitted template. Do Nothing leaves this class uncorrected.")
-            Picker("Treatment", selection: Binding(
-                get: { selected?.cleaningMethod ?? .doNothing },
-                set: { value in edit { $0.cleaningMethod = value; ArtifactReviewEngine.commitChoices(&$0) } }
-            )) {
-                ForEach(cleaningMethods(artifact)) { method in Text(method.rawValue).tag(method) }
-            }.frame(width: 205)
+            if effectiveSelectedArtifactIDs.count > 1 {
+                Text("\(effectiveSelectedArtifactIDs.count) artifacts selected")
+                    .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            }
         }
+    }
+
+    private func reviewInspector(_ artifact: DefinedArtifact) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Inspector").font(.title3.weight(.semibold))
+                    Spacer()
+                    ArtifactReviewHelp(title: "Inspector", text: "The canvas stays focused on the data while treatment, grouping, and automatic-selection settings live here. Disclosure sections remember their state for this review session.")
+                }
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(effectiveSelectedArtifactIDs.count == 1
+                        ? "TREATMENT" : "TREATMENT · \(effectiveSelectedArtifactIDs.count) SELECTED")
+                        .font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                    Menu {
+                        ForEach(batchCleaningMethods) { method in
+                            Button {
+                                applyTreatment(method)
+                            } label: {
+                                Label(method.rawValue,
+                                      systemImage: commonTreatment == method ? "checkmark" : "circle")
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text(commonTreatment?.rawValue ?? "Mixed")
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7))
+                    Text(effectiveSelectedArtifactIDs.count == 1
+                        ? "Applied when you clean artifacts."
+                        : "A change applies to every highlighted artifact.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+
+                if usesSpatialGroups {
+                    Divider()
+                    Text("Spatial Grouping").font(.headline)
+                    DisclosureGroup(isExpanded: $showsSpatialEssentials) {
+                        spatialEssentialsInspector
+                            .padding(.top, 9)
+                    } label: {
+                        Text("Essentials").font(.callout.weight(.semibold))
+                    }
+                    .padding(10)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+
+                    DisclosureGroup(isExpanded: $showsSpatialQuality) {
+                        spatialQualityInspector
+                            .padding(.top, 9)
+                    } label: {
+                        Text("Quality & Display").font(.callout.weight(.semibold))
+                    }
+                    .padding(10)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+
+                    if selectedSpatialFamily != nil {
+                        DisclosureGroup(isExpanded: $showsWaveformInspector) {
+                            waveformInspector
+                                .padding(.top, 9)
+                        } label: {
+                            Text("Waveform Subgroups").font(.callout.weight(.semibold))
+                        }
+                        .padding(10)
+                        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+
+                Divider()
+                DisclosureGroup(isExpanded: $showsAutoSelection) {
+                    autoRulesInspector(artifact)
+                        .padding(.top, 10)
+                } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Auto-Selection").font(.callout.weight(.semibold))
+                        if let result = currentAnalysis {
+                            let proposed = result.examples.map {
+                                ArtifactReviewEngine.proposedChoice(for: $0, artifact: artifact, rules: rules).decision
+                            }
+                            Text("\(proposed.filter { $0 == .include }.count) include · \(proposed.filter { $0 == .exclude }.count) exclude · \(proposed.filter { $0 == .hold }.count) hold")
+                                .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+            }
+            .padding(14)
+        }
+        .frame(width: 270)
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.32))
+    }
+
+    private var maximumSpatialFamilyCount: Int {
+        max(1, min(40, currentSpatial?.features.count ?? 1))
+    }
+
+    private var spatialEssentialsInspector: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Grouping", selection: $spatialGroupingControl) {
+                ForEach(ArtifactSpatialGroupingControl.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+
+            if spatialGroupingControl == .targetCount {
+                HStack(spacing: 4) {
+                    Text("Families")
+                    Spacer()
+                    ForEach(1...3, id: \.self) { count in
+                        Button("\(count)") { spatialTargetCount = count }
+                            .buttonStyle(.bordered)
+                            .tint(spatialTargetCount == count ? .accentColor : .secondary)
+                            .controlSize(.small)
+                            .disabled(count > maximumSpatialFamilyCount)
+                            .accessibilityLabel("Set \(count) spatial families")
+                    }
+                    Stepper("\(spatialTargetCount)", value: $spatialTargetCount,
+                        in: 1...maximumSpatialFamilyCount)
+                        .labelsHidden()
+                    Text("\(spatialTargetCount)").monospacedDigit().frame(width: 24, alignment: .trailing)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text("Cohesion")
+                        Spacer()
+                        Text("\(spatialScoreLabel) ≥ \(spatialThreshold, specifier: "%.2f")")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    Slider(value: $spatialThreshold, in: 0.50...0.98, step: 0.01)
+                }
+            }
+
+            Picker("Polarity", selection: Binding(
+                get: { spatialPolarityMode },
+                set: { value in
+                    spatialPolarityOverride = value
+                    waveformPolarityOverride = nil
+                    clearSpatialSelection(); selectedEventID = nil
+                }
+            )) {
+                ForEach(ArtifactSpatialPolarityMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+
+            Picker("Comparison", selection: $spatialSimilarityMetric) {
+                ForEach(ArtifactSpatialSimilarityMetric.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .onChange(of: spatialSimilarityMetric) { _, _ in
+                clearSpatialSelection(); selectedEventID = nil
+            }
+        }
+        .font(.caption)
+    }
+
+    private var spatialQualityInspector: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Cohesion rule", selection: $spatialCohesionRule) {
+                ForEach(ArtifactSpatialCohesionRule.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("Outlier floor")
+                    Spacer()
+                    Text("\(spatialOutlierFloor, specifier: "%.2f")")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Slider(value: $spatialOutlierFloor, in: 0.40...0.85, step: 0.01)
+            }
+
+            Picker("Card maps", selection: $spatialCardMapMode) {
+                ForEach(ArtifactSpatialCardMapMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+
+            if spatialGroupingControl == .targetCount, let hierarchy = currentSpatial, hierarchy.isComplete {
+                let suggested = hierarchy.suggestedTargetCount(
+                    maximum: min(40, hierarchy.features.count), cohesionRule: spatialCohesionRule)
+                Button("Use suggested count: \(suggested)") { spatialTargetCount = suggested }
+                    .buttonStyle(.link)
+            }
+        }
+        .font(.caption)
+    }
+
+    private var waveformInspector: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Polarity", selection: Binding(
+                get: { waveformPolarityMode },
+                set: { value in
+                    waveformPolarityOverride = value
+                    waveformGroupID = nil; selectedEventID = nil
+                }
+            )) {
+                ForEach(ArtifactWaveformPolarityMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .disabled(spatialPolarityMode == .signed)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("Cohesion")
+                    Spacer()
+                    Text("r ≥ \(waveformThreshold, specifier: "%.2f")")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                Slider(value: $waveformThreshold, in: 0.65...0.98, step: 0.01)
+            }
+        }
+        .font(.caption)
+    }
+
+    private func autoRulesInspector(_ artifact: DefinedArtifact) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Include when r ≥ \(rules.includeCorrelation, specifier: "%.2f")")
+                Slider(value: ruleBinding(\.includeCorrelation), in: 0.50...0.99, step: 0.01)
+                Text("Exclude when r < \(rules.excludeCorrelation, specifier: "%.2f")")
+                Slider(value: ruleBinding(\.excludeCorrelation), in: -1...0.95, step: 0.01)
+            }
+            HStack {
+                Toggle("Maximum peak", isOn: ruleBinding(\.limitsPeak)).toggleStyle(.checkbox)
+                Spacer()
+                TextField("µV", value: ruleBinding(\.maximumPeakMicrovolts), format: .number)
+                    .frame(width: 58).disabled(!rules.limitsPeak)
+            }
+            HStack {
+                Toggle("Maximum duration", isOn: ruleBinding(\.limitsDuration)).toggleStyle(.checkbox)
+                Spacer()
+                TextField("s", value: ruleBinding(\.maximumDurationSeconds), format: .number)
+                    .frame(width: 58).disabled(!rules.limitsDuration)
+            }
+            Toggle("Require complete padded window", isOn: ruleBinding(\.requiresCompleteWindow))
+                .toggleStyle(.checkbox)
+            Toggle("Measured span must fit core", isOn: ruleBinding(\.requiresSpanInsideCore))
+                .toggleStyle(.checkbox)
+            Toggle("Keep manual decisions", isOn: ruleBinding(\.preservesManualChoices))
+                .toggleStyle(.checkbox)
+            HStack {
+                Button("Undo", action: undoRules).disabled(ruleUndo == nil)
+                Spacer()
+                Button("Apply Rules") {
+                    guard let result = currentAnalysis else { return }
+                    ruleUndo = selected?.reviewState?.choices ?? [:]
+                    edit { ArtifactReviewEngine.applyRules(rules, analysis: result, artifact: &$0) }
+                }
+                .disabled(currentAnalysis == nil)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .font(.caption)
     }
 
     private func autoRules(_ artifact: DefinedArtifact) -> some View {
@@ -469,158 +838,116 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
-    private func spatialGroupingPreview(_ result: ArtifactReviewAnalysis) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Spatial families · preview").font(.callout.weight(.medium))
-                ArtifactReviewHelp(title: "Spatial families", text: "These are alternate views of the matched events, not separate artifact definitions or cleaning passes. Force count directly requests N families and then refines membership across early tree branches. Cohesion instead lets a score threshold determine the count. The outlier floor leaves genuinely incompatible maps unassigned rather than inventing another family. Canonical centroid cards use a shared scale and orient projective fields with the frontal average positive; representative-event cards retain their raw sign. Shift-click selects a contiguous range. Control-click or Command-click toggles discontiguous cards. Multi-selected families can be preview-merged or moved together into a separate correction class.")
+    private func spatialGroupingCanvas(_ result: ArtifactReviewAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Text("Topographic families").font(.headline)
+                        ArtifactReviewHelp(title: "Spatial families", text: "Families are a preview of spatially similar matched events. Shift-click selects a range; Command-click or Control-click toggles individual families. Drag any selected family anywhere over the artifact sidebar to extract the entire selection into a new top-level artifact.")
+                    }
+                    if let hierarchy = currentSpatial, currentSpatialCut != nil {
+                        Text("\(spatialGroups.count) families · \(hierarchy.features.count) mapped · \(spatialUnassignedIDs.count) unassigned · \(hierarchy.channels.count) shared sensors")
+                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        if !hierarchy.isComplete {
+                            Text("Families ready · completing hierarchy in the background…")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 Spacer()
-                Text("Preview only").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 8) {
-                Picker("Polarity", selection: Binding(
-                    get: { spatialPolarityMode },
-                    set: { value in
-                        spatialPolarityOverride = value
-                        waveformPolarityOverride = nil
-                        clearSpatialSelection(); selectedEventID = nil
+                if selectedSpatialGroupIDs.filter({ $0 != -1 }).count >= 2 {
+                    Button("Merge Selected") { mergeSpatialGroups(Array(selectedSpatialGroupIDs)) }
+                        .controlSize(.small)
+                }
+                if !manuallyMergedSpatialGroups.isEmpty {
+                    Button("Clear Merges") {
+                        manuallyMergedSpatialGroups = []; clearSpatialSelection()
                     }
-                )) {
-                    ForEach(ArtifactSpatialPolarityMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                }
-                .pickerStyle(.segmented).frame(width: 310)
-                ArtifactReviewHelp(title: "Spatial polarity", text: "Signed keeps globally inverted scalp fields in separate families. Ignore global polarity treats a field and its exact sign reversal as the same spatial axis using absolute correlation, while retaining every event’s + or − orientation relative to the family centroid. It does not take the absolute value of individual sensors. Ocular classes default to ignoring global polarity; other classes default to Signed.")
-            }
-            HStack(spacing: 8) {
-                Picker("Comparison", selection: $spatialSimilarityMetric) {
-                    ForEach(ArtifactSpatialSimilarityMetric.allCases) { metric in Text(metric.rawValue).tag(metric) }
-                }
-                .pickerStyle(.menu).frame(width: 260)
-                .onChange(of: spatialSimilarityMetric) { _, _ in
-                    clearSpatialSelection(); selectedEventID = nil
-                }
-                ArtifactReviewHelp(title: "Spatial comparison", text: "Global Pearson compares the whole map. Local Pearson averages overlapping physical sensor neighborhoods. LPA+ is the AFNI-inspired same-contrast composite and is the ocular default: nonlinear local correlation stabilized by Hellinger, correlation-ratio, and information agreement. LPC+ is its opposite-contrast counterpart. crM is the product of the two directional correlation ratios and tolerates nonlinear intensity relationships, but can ignore sensor identity more readily than Pearson. Spearman compares ranks. Robust and Information composites retain the earlier experimental blends. Ignore global polarity evaluates exactly two whole-map orientations; individual regions never flip independently.")
-            }
-            HStack(spacing: 8) {
-                Picker("Grouping", selection: $spatialGroupingControl) {
-                    ForEach(ArtifactSpatialGroupingControl.allCases) { value in Text(value.rawValue).tag(value) }
-                }.pickerStyle(.segmented).frame(width: 260)
-                Picker("Cohesion", selection: $spatialCohesionRule) {
-                    ForEach(ArtifactSpatialCohesionRule.allCases) { value in Text(value.rawValue).tag(value) }
-                }.pickerStyle(.segmented).frame(width: 260)
-                ArtifactReviewHelp(title: "Grouping and cohesion", text: "Force count is the direct control when you want one, two, or another fixed number of spatial families; it refines membership after the tree seed and may leave true outliers unassigned. Cohesion lets the score threshold determine the count. Minimum requires every member to meet the cut and can fragment a family because of one tail event. 10th percentile tolerates a small tail while reporting minimum, 10th-percentile, and median fit on every card.")
-            }
-            if spatialGroupingControl == .cohesion {
-                HStack {
-                    Text("Broader").font(.caption)
-                    Slider(value: $spatialThreshold, in: 0.50...0.98, step: 0.01)
-                        .accessibilityLabel("Spatial grouping detail")
-                    Text("Finer").font(.caption)
-                    Text("\(spatialScoreLabel) ≥ \(spatialThreshold, specifier: "%.2f")")
-                        .font(.caption.monospacedDigit()).frame(width: 85)
-                }
-            } else {
-                HStack(spacing: 10) {
-                    Stepper("Force spatial families: \(spatialTargetCount)", value: $spatialTargetCount,
-                        in: 1...max(1, min(40, currentSpatial?.features.count ?? 1)))
-                    ForEach(1...3, id: \.self) { count in
-                        Button("\(count)") { spatialTargetCount = count }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(count > (currentSpatial?.features.count ?? 0))
-                    }
-                    if let hierarchy = currentSpatial {
-                        let suggested = hierarchy.suggestedTargetCount(
-                            maximum: min(40, hierarchy.features.count), cohesionRule: spatialCohesionRule)
-                        Button("Use suggested \(suggested)") { spatialTargetCount = suggested }
-                            .font(.caption)
-                    }
-                    Text("Tree seeds + 8 refinement passes").font(.caption).foregroundStyle(.secondary)
+                    .controlSize(.small)
                 }
             }
-            HStack(spacing: 8) {
-                Text("Outlier floor").font(.caption)
-                Slider(value: $spatialOutlierFloor, in: 0.40...0.85, step: 0.01)
-                    .accessibilityLabel("Spatial outlier floor")
-                Text("\(spatialOutlierFloor, specifier: "%.2f")")
-                    .font(.caption.monospacedDigit()).frame(width: 38)
-                ArtifactReviewHelp(title: "Outlier floor", text: "Events scoring below this permissive floor against their assigned centroid stay spatially unassigned. Force count therefore requests K coherent families without forcing every mapped event into one. Tree-unusable events remain unassigned as before.")
-            }
-            HStack(spacing: 8) {
-                Picker("Card maps", selection: $spatialCardMapMode) {
-                    ForEach(ArtifactSpatialCardMapMode.allCases) { value in Text(value.rawValue).tag(value) }
-                }.pickerStyle(.segmented).frame(width: 350)
-                Text("Shared color scale").font(.caption).foregroundStyle(.secondary)
-            }
+
             if let hierarchy = currentSpatial, currentSpatialCut != nil {
-                HStack {
-                    Text("\(spatialGroups.count) groups · \(hierarchy.features.count) mapped · \(spatialUnassignedIDs.count) unassigned · \(hierarchy.channels.count) shared sensors")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    if selectedSpatialGroupIDs.filter({ $0 != -1 }).count >= 2 {
-                        Button("Merge selected") { mergeSpatialGroups(Array(selectedSpatialGroupIDs)) }
-                            .font(.caption)
-                    }
-                    if !manuallyMergedSpatialGroups.isEmpty {
-                        Button("Clear preview merges") {
-                            manuallyMergedSpatialGroups = []; clearSpatialSelection()
-                        }.font(.caption)
-                    }
-                }
                 if let duplicate = closestSpatialGroups {
                     HStack(spacing: 8) {
-                        Text("\(duplicate.score >= 0.90 ? "Likely duplicate" : "Closest pair"): Family \(duplicate.leftIndex + 1) + Family \(duplicate.rightIndex + 1) · \(spatialScoreLabel) \(duplicate.score, specifier: "%.2f")")
+                        Label("\(duplicate.score >= 0.90 ? "Likely duplicate" : "Closest pair"): Families \(duplicate.leftIndex + 1) + \(duplicate.rightIndex + 1) · \(spatialScoreLabel) \(duplicate.score, specifier: "%.2f")",
+                              systemImage: duplicate.score >= 0.90 ? "rectangle.on.rectangle" : "arrow.left.and.right")
                             .font(.caption).foregroundStyle(duplicate.score >= 0.90 ? .orange : .secondary)
-                        Button("Select pair") { selectSpatialPair(duplicate.leftID, duplicate.rightID) }
-                            .font(.caption)
-                        Button("Merge pair") { mergeSpatialGroups([duplicate.leftID, duplicate.rightID]) }
-                            .font(.caption)
+                        Spacer()
+                        Button("Select") { selectSpatialPair(duplicate.leftID, duplicate.rightID) }
+                            .controlSize(.small)
+                        Button("Merge") { mergeSpatialGroups([duplicate.leftID, duplicate.rightID]) }
+                            .controlSize(.small)
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 165, maximum: 230), spacing: 10)], spacing: 10) {
+                    ForEach(Array(spatialGroups.enumerated()), id: \.element.id) { index, group in
+                        let example = result.examples.first { $0.id == group.representativeID }
+                        Button {
+                            selectSpatialGroup(group, at: index)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Text("Family \(index + 1)").font(.callout.weight(.semibold))
+                                    Spacer()
+                                    Text("\(group.eventIDs.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                                ArtifactReviewTopomapPreview(
+                                    topography: spatialCardMapMode == .centroid ? canonicalTopography(for: group) : example?.topography,
+                                    layout: sensorLayout, scale: spatialCardScale)
+                                    .frame(height: 96)
+                                Text(spatialCardMapMode == .centroid ? "Canonical centroid" : "Representative event")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                                if group.polarityMode == .ignoreGlobalPolarity {
+                                    let counts = displayedOrientationCounts(group)
+                                    Text("+ \(counts.positive) · − \(counts.negative)")
+                                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                                        .help("Orientation relative to the displayed canonical centroid; raw event maps are unchanged.")
+                                }
+                                Text(group.eventIDs.count == 1 ? "Single example" : String(format: "min %.2f · p10 %.2f · med %.2f", group.minimumCorrelation, group.tenthPercentileCorrelation, group.medianCorrelation))
+                                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(selectedSpatialGroupIDs.contains(group.id)
+                                ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.028),
+                                in: RoundedRectangle(cornerRadius: 8))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(selectedSpatialGroupIDs.contains(group.id)
+                                        ? Color.accentColor : Color.primary.opacity(0.07), lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .onDrag { spatialFamilyDragProvider(group, familyNumber: index + 1) }
+                    }
+                    if !spatialUnassignedIDs.isEmpty {
+                        Button {
+                            clearSpatialSelection(); selectedSpatialGroupIDs = [-1]
+                            selectedEventID = spatialUnassignedIDs.first; eventFocus = true
+                        } label: {
+                            ContentUnavailableView("Unassigned", systemImage: "questionmark.circle",
+                                description: Text("\(spatialUnassignedIDs.count) examples"))
+                                .frame(maxWidth: .infinity, minHeight: 165)
+                                .background(selectedSpatialGroupIDs.contains(-1)
+                                    ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.025),
+                                    in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-                Text("Click one family for waveform subgroups. Shift-click selects a range; Control-click or Command-click toggles individual families. Multiple families can move together into a new class, a sibling, or the other threshold ocular category below.")
-                    .font(.caption).foregroundStyle(.secondary)
-                ScrollView(.horizontal) {
-                    LazyHStack(spacing: 8) {
-                        ForEach(Array(spatialGroups.enumerated()), id: \.element.id) { index, group in
-                            let example = result.examples.first { $0.id == group.representativeID }
-                            Button {
-                                selectSpatialGroup(group, at: index)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Family \(index + 1) · \(group.eventIDs.count)").font(.caption.weight(.medium))
-                                    ArtifactReviewTopomapPreview(
-                                        topography: spatialCardMapMode == .centroid ? canonicalTopography(for: group) : example?.topography,
-                                        layout: sensorLayout, scale: spatialCardScale)
-                                        .frame(height: 68)
-                                    Text(spatialCardMapMode == .centroid ? "Canonical centroid" : "Representative event")
-                                        .font(.caption2).foregroundStyle(.secondary)
-                                    if group.polarityMode == .ignoreGlobalPolarity {
-                                        let counts = displayedOrientationCounts(group)
-                                        Text("+ \(counts.positive) · − \(counts.negative)")
-                                            .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                                            .help("Orientation relative to the displayed canonical centroid; raw event maps are unchanged.")
-                                    }
-                                    Text(group.eventIDs.count == 1 ? "Single example" : String(format: "Fit min %.2f · p10 %.2f · med %.2f", group.minimumCorrelation, group.tenthPercentileCorrelation, group.medianCorrelation))
-                                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                                }.frame(width: 180).padding(8)
-                                    .background(selectedSpatialGroupIDs.contains(group.id) ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 6))
-                            }.buttonStyle(.plain)
-                        }
-                        if !spatialUnassignedIDs.isEmpty {
-                            Button("Unassigned · \(spatialUnassignedIDs.count)") {
-                                clearSpatialSelection(); selectedSpatialGroupIDs = [-1]
-                                selectedEventID = spatialUnassignedIDs.first; eventFocus = true
-                            }.tint(selectedSpatialGroupIDs.contains(-1) ? .accentColor : .secondary)
-                        }
-                    }
-                }.frame(height: spatialPolarityMode == .ignoreGlobalPolarity ? 168 : 151)
+
                 if hierarchy.features.isEmpty {
                     Text("No comparable spatial features. Check the sensor layout, complete windows, and common good channels.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else {
                 ProgressView(currentSpatial == nil ? "Building spatial hierarchy in the background…" : "Refining spatial groups in the background…")
-                    .font(.caption).frame(maxWidth: .infinity, minHeight: 90)
+                    .font(.caption).frame(maxWidth: .infinity, minHeight: 140)
             }
         }
     }
@@ -633,28 +960,7 @@ struct ArtifactReviewWorkspace: View {
                     Text("Waveform subgroups · selected spatial family").font(.callout.weight(.medium))
                     ArtifactReviewHelp(title: "Waveform subgroups", text: "These groups compare temporal shapes only within the spatial family you selected; they cannot combine events from different spatial families. Up to five definition channels are chosen by typical normalized energy across this family and remain fixed across its events. Profiles use up to 64 points per channel, centered separately, then normalized together so overall strength is ignored while relative channel amplitudes and polarity are preserved. Each event is aligned to the family's representative usable waveform using a small shared time shift, at most 20 ms and four profile points; the same interior support is used for every event. This tolerates small timing errors without stretching the waveform. The broader/finer control uses minimum signed correlation to each subgroup centroid. Previews show the normalized aligned mean in blue and a real representative in gray on the labeled channel. Cohesion is descriptive and includes group members themselves; it is not independent confidence or an artifact probability. Incomplete, nonfinite, or flat waveforms remain unassigned. The hierarchy is built off the main thread and cached. Selecting a subgroup filters the examples only; cleaning, decisions, and original waveform confidence scores remain unchanged.")
                     Spacer()
-                    Text("Preview only").font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    Picker("Waveform polarity", selection: Binding(
-                        get: { waveformPolarityMode },
-                        set: { value in
-                            waveformPolarityOverride = value
-                            waveformGroupID = nil; selectedEventID = nil
-                        }
-                    )) {
-                        ForEach(ArtifactWaveformPolarityMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                    }
-                    .pickerStyle(.segmented).frame(width: 360)
-                    .disabled(spatialPolarityMode == .signed)
-                    ArtifactReviewHelp(title: "Waveform polarity", text: "Preserve polarity clusters the recorded waveform signs as-is. Orient to spatial family multiplies an event’s complete multichannel profile by its retained spatial orientation before temporal clustering, so global sign reversals can share a shape subgroup. Within-waveform positive and negative lobes, relative channel strengths, raw data, decisions, and cleaning are unchanged. Spatially signed families have no orientation reversal to apply.")
-                }
-                HStack {
-                    Text("Broader").font(.caption)
-                    Slider(value: $waveformThreshold, in: 0.65...0.98, step: 0.01)
-                        .accessibilityLabel("Waveform subgroup detail")
-                    Text("Finer").font(.caption)
-                    Text("r ≥ \(waveformThreshold, specifier: "%.2f")").font(.caption.monospacedDigit()).frame(width: 65)
+                    Text("Adjust in Inspector").font(.caption).foregroundStyle(.secondary)
                 }
                 if let result = currentWaveform {
                     ArtifactWaveformSubgroupCards(result: result, threshold: waveformThreshold,
@@ -1035,6 +1341,70 @@ struct ArtifactReviewWorkspace: View {
         if invalidates { onChange() }
     }
 
+    private func synchronizeArtifactSelection() {
+        let validIDs = Set(reviewable.map(\.id))
+        selectedArtifactIDs.formIntersection(validIDs)
+        guard let id = selected?.id else {
+            selectedArtifactIDs = []
+            artifactSelectionAnchorID = nil
+            return
+        }
+        if !selectedArtifactIDs.contains(id) {
+            selectedArtifactIDs = [id]
+            artifactSelectionAnchorID = id
+        }
+    }
+
+    private func selectArtifact(_ artifact: DefinedArtifact, at index: Int) {
+        let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if modifiers.contains(.shift), let anchorID = artifactSelectionAnchorID,
+           let anchor = reviewable.firstIndex(where: { $0.id == anchorID }) {
+            let range = min(anchor, index)...max(anchor, index)
+            selectedArtifactIDs = Set(range.map { reviewable[$0].id })
+            selectedArtifactID = artifact.id
+        } else if modifiers.contains(.command) || modifiers.contains(.control) {
+            if selectedArtifactIDs.contains(artifact.id), selectedArtifactIDs.count > 1 {
+                selectedArtifactIDs.remove(artifact.id)
+                if selectedArtifactID == artifact.id {
+                    selectedArtifactID = reviewable.first { selectedArtifactIDs.contains($0.id) }?.id
+                }
+            } else {
+                selectedArtifactIDs.insert(artifact.id)
+                selectedArtifactID = artifact.id
+            }
+            artifactSelectionAnchorID = artifact.id
+        } else {
+            selectedArtifactIDs = [artifact.id]
+            artifactSelectionAnchorID = artifact.id
+            selectedArtifactID = artifact.id
+        }
+    }
+
+    private func applyTreatment(_ method: ArtifactCleaningMethod) {
+        let ids = effectiveSelectedArtifactIDs
+        var changed = false
+        for index in artifacts.indices where ids.contains(artifacts[index].id) {
+            guard cleaningMethods(artifacts[index]).contains(method),
+                  artifacts[index].cleaningMethod != method else { continue }
+            artifacts[index].cleaningMethod = method
+            ArtifactReviewEngine.commitChoices(&artifacts[index])
+            changed = true
+        }
+        if changed { onChange() }
+    }
+
+    private func artifactSymbol(_ artifact: DefinedArtifact) -> String {
+        switch artifact.type {
+        case .ocular: return "eye"
+        case .saccadicSpike: return "bolt"
+        case .corneoRetinal: return "arrow.left.and.right"
+        case .movement: return "arrow.up.and.down.and.arrow.left.and.right"
+        case .muscle: return "waveform.path.ecg"
+        case .ecg, .bcg: return "heart"
+        case .other: return "ellipsis.circle"
+        }
+    }
+
     private func choose(_ decision: ArtifactReviewDecision) {
         guard let example = selectedExample else { return }
         edit { ArtifactReviewEngine.setChoice(decision, eventID: example.id, artifact: &$0) }
@@ -1077,6 +1447,60 @@ struct ArtifactReviewWorkspace: View {
         ruleUndo = nil
     }
 
+    private func spatialFamilyDragProvider(_ group: ArtifactSpatialGroup,
+                                           familyNumber: Int) -> NSItemProvider {
+        guard let sourceID = selected?.id else { return NSItemProvider() }
+        let draggedGroups: [ArtifactSpatialGroup]
+        if selectedSpatialGroupIDs.contains(group.id) {
+            let selectedIDs = selectedSpatialGroupIDs.subtracting([-1])
+            draggedGroups = spatialGroups.filter { selectedIDs.contains($0.id) }
+        } else {
+            draggedGroups = [group]
+        }
+        let eventIDs = Array(Set(draggedGroups.flatMap(\.eventIDs))).sorted()
+        let payload = ArtifactSpatialDragPayload(sourceArtifactID: sourceID,
+            eventIDs: eventIDs, familyNumber: familyNumber)
+        guard let data = try? JSONEncoder().encode(payload),
+              let text = String(data: data, encoding: .utf8) else { return NSItemProvider() }
+        return NSItemProvider(object: text as NSString)
+    }
+
+    private func acceptSpatialFamilyDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
+            return false
+        }
+        provider.loadObject(ofClass: NSString.self) { object, _ in
+            guard let text = object as? NSString,
+                  let data = (text as String).data(using: .utf8),
+                  let payload = try? JSONDecoder().decode(ArtifactSpatialDragPayload.self, from: data) else {
+                return
+            }
+            Task { @MainActor in extractSpatialFamily(payload) }
+        }
+        return true
+    }
+
+    @MainActor
+    private func extractSpatialFamily(_ payload: ArtifactSpatialDragPayload) {
+        guard !payload.eventIDs.isEmpty,
+              let index = artifacts.firstIndex(where: { $0.id == payload.sourceArtifactID }) else { return }
+        let sourceName = artifacts[index].name
+        let name = "\(sourceName) – Family \(payload.familyNumber)"
+        guard let extracted = ArtifactReviewEngine.split(eventIDs: Set(payload.eventIDs), name: name,
+            method: .obs, displaysAsStandaloneArtifact: true, parent: &artifacts[index]) else { return }
+        artifacts.append(extracted)
+        // Keep the source visible so its remaining families rebuild and re-sort
+        // in place. The extracted artifact is immediately available in the sidebar.
+        selectedArtifactID = payload.sourceArtifactID
+        onChange()
+        band = nil
+        clearSpatialSelection()
+        manuallyMergedSpatialGroups = []
+        showsSplit = false
+        splitDestinationID = nil
+        ruleUndo = nil
+    }
+
     private func move(_ direction: Int, byPage: Bool? = nil) {
         guard let index = navigation.destination(direction, byPage: byPage) else { return }
         selectedEventID = examples[index].id
@@ -1088,9 +1512,10 @@ struct ArtifactReviewWorkspace: View {
         let key = waveformTaskKey
         guard !key.isEmpty, let analysis = currentAnalysis, let family = selectedSpatialFamily,
               let artifact = selected else { return }
-        if waveformLoadedKey == key { return }
+        if waveformLoadedKey == key || waveformCache[key] != nil { return }
         if let cached = await ArtifactWaveformGroupingCache.shared.value(for: key) {
             guard !Task.isCancelled, waveformTaskKey == key else { return }
+            waveformCache.insert(cached, for: key)
             waveformGrouping = cached; waveformLoadedKey = key
             return
         }
@@ -1104,6 +1529,7 @@ struct ArtifactReviewWorkspace: View {
         guard !Task.isCancelled, waveformTaskKey == key, let result else { return }
         await ArtifactWaveformGroupingCache.shared.insert(result, for: key)
         guard !Task.isCancelled, waveformTaskKey == key else { return }
+        waveformCache.insert(result, for: key)
         waveformGrouping = result; waveformLoadedKey = key
     }
 
@@ -1111,9 +1537,10 @@ struct ArtifactReviewWorkspace: View {
     private func loadSpatialGrouping() async {
         let key = spatialTaskKey
         guard !key.isEmpty, let result = currentAnalysis else { return }
-        if spatialLoadedKey == key { return }
+        if spatialLoadedKey == key || spatialCache[key] != nil { return }
         if let cached = await ArtifactSpatialGroupingCache.shared.value(for: key) {
             guard !Task.isCancelled, spatialTaskKey == key else { return }
+            spatialCache.insert(cached, for: key)
             spatialHierarchy = cached; spatialLoadedKey = key
             return
         }
@@ -1121,25 +1548,41 @@ struct ArtifactReviewWorkspace: View {
         let layout = sensorLayout
         let polarityMode = spatialPolarityMode
         let similarityMetric = effectiveSpatialSimilarityMetric
+        let previewKey = spatialPreviewRequestKey
+        let initialCut: ArtifactSpatialInitialCut = spatialGroupingControl == .targetCount
+            ? .targetCount(spatialTargetCount, spatialCohesionRule)
+            : .cohesion(spatialThreshold, spatialCohesionRule)
         let worker = Task.detached(priority: .userInitiated) {
             if !hasLayout {
                 return ArtifactSpatialHierarchy(channels: [], features: [], unassignedIDs: result.examples.map(\.id), nodes: [], root: nil) as ArtifactSpatialHierarchy?
             }
             return await ArtifactSpatialGrouping.build(examples: result.examples, layout: layout,
-                polarityMode: polarityMode, similarityMetric: similarityMetric)
+                polarityMode: polarityMode, similarityMetric: similarityMetric, initialCut: initialCut,
+                onInitialHierarchy: { preview in
+                    await publishSpatialPreview(preview, taskKey: key, requestKey: previewKey)
+                })
         }
         let hierarchy = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
         guard !Task.isCancelled, spatialTaskKey == key, let hierarchy else { return }
         await ArtifactSpatialGroupingCache.shared.insert(hierarchy, for: key)
         guard !Task.isCancelled, spatialTaskKey == key else { return }
+        spatialCache.insert(hierarchy, for: key)
         spatialHierarchy = hierarchy; spatialLoadedKey = key
+        spatialPreview = nil; spatialPreviewLoadedKey = ""
+    }
+
+    @MainActor
+    private func publishSpatialPreview(_ preview: ArtifactSpatialHierarchy, taskKey: String, requestKey: String) {
+        guard !Task.isCancelled, spatialTaskKey == taskKey, spatialPreviewRequestKey == requestKey else { return }
+        spatialPreview = preview
+        spatialPreviewLoadedKey = requestKey
     }
 
     @MainActor
     private func loadSpatialCut() async {
         let key = spatialCutTaskKey
         guard !key.isEmpty, let hierarchy = currentSpatial else { return }
-        if spatialCutLoadedKey == key { return }
+        if spatialCutLoadedKey == key || cutCache[key] != nil { return }
         let control = spatialGroupingControl
         let threshold = spatialThreshold
         let targetCount = spatialTargetCount
@@ -1157,6 +1600,7 @@ struct ArtifactReviewWorkspace: View {
         }
         let result = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
         guard !Task.isCancelled, spatialCutTaskKey == key else { return }
+        cutCache.insert(result, for: key)
         spatialCut = result; spatialCutLoadedKey = key
     }
 
@@ -1255,6 +1699,13 @@ struct ArtifactReviewWorkspace: View {
         ArtifactReviewEngine.prepare(&artifacts[index])
         let artifact = artifacts[index]
         let key = analysisKey
+        if loadedKey == key { return }
+        if let cached = analysisCache[key] {
+            analysis = cached
+            loadedKey = key
+            if !cached.channelIndices.contains(channel) { channel = cached.channelIndices.first ?? 0 }
+            return
+        }
         let source = signal
         let excluded = excludedChannels
         let layout = sensorLayoutName
@@ -1265,6 +1716,7 @@ struct ArtifactReviewWorkspace: View {
         }
         let result = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
         guard !Task.isCancelled, analysisKey == key else { return }
+        analysisCache.insert(result, for: key)
         analysis = result
         loadedKey = key
         if !result.channelIndices.contains(channel) { channel = result.channelIndices.first ?? 0 }

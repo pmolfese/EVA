@@ -58,6 +58,10 @@ nonisolated struct ArtifactReviewState: Codable, Sendable {
     var sourceArtifactID: UUID? = nil
     var sourceThresholdKind: EyeArtifactKind? = nil
     var partitionsSource: Bool? = nil
+    /// Keeps detector provenance while presenting an extracted family as an
+    /// independent top-level artifact in Review. Optional preserves decoding
+    /// of sidecars written before drag-to-extract existed.
+    var displaysAsStandaloneArtifact: Bool? = nil
     /// Cross-definition moves retain the detector/definition that originally
     /// produced each imported candidate. Optional for old sidecar compatibility.
     var importedCandidateSourceIDs: [String: UUID]? = nil
@@ -278,6 +282,7 @@ nonisolated enum ArtifactReviewEngine {
     /// Moves members, rather than copying them: one occurrence cannot train or
     /// receive correction from both its original definition and its split class.
     static func split(eventIDs: Set<String>, name: String, method: ArtifactCleaningMethod,
+                      displaysAsStandaloneArtifact: Bool = false,
                       parent: inout DefinedArtifact) -> DefinedArtifact? {
         prepare(&parent)
         guard var parentState = parent.reviewState else { return nil }
@@ -301,6 +306,7 @@ nonisolated enum ArtifactReviewEngine {
         childState.partitionsSource = true
         childState.sourceArtifactID = parentState.sourceArtifactID ?? parent.id
         childState.sourceThresholdKind = parent.thresholdOcularKind ?? parentState.sourceThresholdKind
+        childState.displaysAsStandaloneArtifact = displaysAsStandaloneArtifact ? true : nil
         childState.choices = childState.choices.filter { eventIDs.contains($0.key) }
         childState.referenceEventIDs = moved.map(\.id)
         child.reviewState = childState

@@ -24,6 +24,20 @@ final class ArtifactReviewWorkspaceTests: XCTestCase {
         var dark = false
     }
 
+    func testReviewCacheRetainsArtifactsAndSeparatesSourceKeys() {
+        var cache = ArtifactReviewResultCache<Int>(capacity: 2)
+        cache.insert(10, for: "artifact-a/revision-1")
+        cache.insert(20, for: "artifact-b/revision-1")
+        XCTAssertEqual(cache["artifact-a/revision-1"], 10)
+        XCTAssertEqual(cache["artifact-b/revision-1"], 20)
+        XCTAssertNil(cache["artifact-a/revision-2"])
+        cache.insert(11, for: "artifact-a/revision-1")
+        cache.insert(30, for: "artifact-c/revision-1")
+        XCTAssertEqual(cache["artifact-a/revision-1"], 11)
+        XCTAssertNil(cache["artifact-b/revision-1"])
+        XCTAssertEqual(cache["artifact-c/revision-1"], 30)
+    }
+
     func testDefineAndCleanFillWorkspace() throws {
         let planted = SyntheticSignal.plantedBumps(channelCount: 8, count: 1000,
             positions: [100, 300, 500, 700], width: 50, samplingRate: 100)
@@ -73,15 +87,15 @@ final class ArtifactReviewWorkspaceTests: XCTestCase {
             let host = NSHostingView(rootView: waveform.artifactTemplateSheet(
                 for: signal, reviewSignal: signal, broadbandSignal: signal
             ).background(Color(nsColor: .windowBackgroundColor)))
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1060, height: 820),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                                   styleMask: [.titled], backing: .buffered, defer: false)
             Self.retainedWindows.append(window)
             window.appearance = NSAppearance(named: layout.dark ? .darkAqua : .aqua)
             window.contentView = host
-            host.frame = NSRect(x: 0, y: 0, width: 1060, height: 820)
+            host.frame = NSRect(x: 0, y: 0, width: 1280, height: 820)
             RunLoop.main.run(until: Date().addingTimeInterval(0.2))
             host.layoutSubtreeIfNeeded()
-            XCTAssertEqual(host.fittingSize.width, 1060, accuracy: 1)
+            XCTAssertEqual(host.fittingSize.width, 1280, accuracy: 1)
             XCTAssertEqual(host.fittingSize.height, 820, accuracy: 1)
             if tab == .define {
                 func scrolls(in view: NSView) -> [NSScrollView] {
@@ -225,9 +239,12 @@ final class ArtifactReviewWorkspaceTests: XCTestCase {
         }
         let signal = SyntheticSignal.make([row, row.map { -$0 }, row.map { $0 * 0.7 },
             row.map { -$0 * 0.4 }, row.map { $0 * 0.2 }, row.map { $0 * 0.15 }], samplingRate: rate)
-        let artifact = DefinedArtifact(type: .ocular, name: "Eye blinks", eventCode: "Eye Blink",
+        var artifact = DefinedArtifact(type: .ocular, name: "Eye blinks", eventCode: "Eye Blink",
             events: events, selectedChannelIndices: [0, 1], windowSizeSeconds: 0.5,
             average: nil, topography: nil, cleaningMethod: .obs)
+        artifact.topography = ArtifactTemplateTopography(mode: .peak, referenceSample: 100,
+            referenceTimeSeconds: 1, channelValues: [1, -1, 0.7, -0.4, 0.2, 0.15],
+            channelIndices: Array(0..<6), matchThreshold: 0.8, matchCount: events.count)
         let model = Model([artifact])
         let layout = SensorLayout(name: "Spatial review layout", positions: (0..<6).map { index in
             let angle = Double(index) * .pi / 3
@@ -251,11 +268,11 @@ final class ArtifactReviewWorkspaceTests: XCTestCase {
             }
         }
         let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1060, height: 820),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
                               styleMask: [.titled], backing: .buffered, defer: false)
         Self.retainedWindows.append(window)
         window.contentView = host
-        host.frame = NSRect(x: 0, y: 0, width: 1060, height: 820)
+        host.frame = NSRect(x: 0, y: 0, width: 1280, height: 820)
         host.layoutSubtreeIfNeeded()
         let deadline = Date().addingTimeInterval(3)
         while model.artifacts[0].reviewState == nil && Date() < deadline {
@@ -292,7 +309,7 @@ final class ArtifactReviewWorkspaceTests: XCTestCase {
             add(detailAttachment)
         }
         XCTAssertEqual(model.artifacts[0].reviewState?.candidates.count, 24)
-        XCTAssertEqual(host.bounds.width, 1060, accuracy: 1)
+        XCTAssertEqual(host.bounds.width, 1280, accuracy: 1)
         // Tall Define options and a short Clean form must not change the shell's
         // preferred size or shift its top-level navigation.
         let reviewSize = host.fittingSize
