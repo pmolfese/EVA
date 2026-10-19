@@ -229,6 +229,39 @@ nonisolated struct PSADecisionMatrixPreparation: Sendable {
     var suggestedRejectedEpochReasons: [Int: [String]]
     var artifactEventsByEpoch: [Int: [PSAArtifactEventDetail]]
 
+    var amplitudeBounds: ClosedRange<Double> {
+        guard thresholds.minMicrovolts.isFinite, thresholds.maxMicrovolts.isFinite,
+              thresholds.minMicrovolts < thresholds.maxMicrovolts else { return -150...150 }
+        return thresholds.minMicrovolts...thresholds.maxMicrovolts
+    }
+
+    /// Review cutoffs classify the retained raw AND reviewed evidence. The
+    /// reference, baseline and health scores remain the evidence originally
+    /// presented to the operator; this does not change processing parameters.
+    func rethresholdedDetectorSuggestions(amplitudeRange: ClosedRange<Double>) -> Set<PSADecisionCellID> {
+        guard amplitudeRange != amplitudeBounds else { return detectorSuggestions }
+        var limits = thresholds
+        limits.minMicrovolts = amplitudeRange.lowerBound
+        limits.maxMicrovolts = amplitudeRange.upperBound
+        var suggestions = Set<PSADecisionCellID>()
+        for epoch in segments.indices {
+            for channel in 0..<signal.numberOfChannels {
+                let id = PSADecisionCellID(channelIndex: channel, epochIndex: epoch)
+                let raw = rawEvidence[epoch][channel]
+                let reviewed = evidence[epoch][channel]
+                // A detector-only suggestion that the stored extrema cannot
+                // explain must not be silently cleared by amplitude editing.
+                let independentSuggestion = detectorSuggestions.contains(id)
+                    && raw?.exceeds(thresholds) != true && reviewed?.exceeds(thresholds) != true
+                if globallyBadChannels.contains(channel) || independentSuggestion
+                    || raw?.exceeds(limits) == true || reviewed?.exceeds(limits) == true {
+                    suggestions.insert(id)
+                }
+            }
+        }
+        return suggestions
+    }
+
     static func make(
         signal: MFFSignalData,
         segments: [EpochSegment],
@@ -649,6 +682,12 @@ final class PSADecisionMatrixModel {
     /// A review decision, not an evidence-scan parameter. Changing this never
     /// reruns health calculations or changes either goodness threshold.
     var interpolationChannelLimit: Int { didSet { invalidateDecisionCache() } }
+    var amplitudeRange: ClosedRange<Double> {
+        didSet {
+            cachedDetectorSuggestions = nil
+            invalidateDecisionCache()
+        }
+    }
     var cellOverrides: [PSADecisionCellID: PSACellDecision] = [:] { didSet { invalidateDecisionCache() } }
     var epochOverrides: [Int: PSAEpochDecision] = [:] { didSet { invalidateDecisionCache() } }
     /// An inherited Good label suppresses the automatic health-threshold
@@ -668,6 +707,14 @@ final class PSADecisionMatrixModel {
     @ObservationIgnored private var cachedFeasibilityReasons: [Int: String] = [:]
     @ObservationIgnored private var cachedBadChannelCounts: [Int: Int] = [:]
     @ObservationIgnored private var cachedAllArtifactCorrectionSummary: PSAArtifactCorrectionSummary?
+    @ObservationIgnored private var cachedDetectorSuggestions: Set<PSADecisionCellID>?
+
+    var automaticDetectorSuggestions: Set<PSADecisionCellID> {
+        if let cachedDetectorSuggestions { return cachedDetectorSuggestions }
+        let suggestions = preparation.rethresholdedDetectorSuggestions(amplitudeRange: amplitudeRange)
+        cachedDetectorSuggestions = suggestions
+        return suggestions
+    }
 
     private func invalidateDecisionCache() {
         decisionRevision &+= 1
@@ -679,6 +726,7 @@ final class PSADecisionMatrixModel {
 
     init(preparation: PSADecisionMatrixPreparation) {
         self.preparation = preparation
+        amplitudeRange = preparation.amplitudeBounds
         suggestedRejectedEpochReasons = preparation.suggestedRejectedEpochReasons
         let threshold = preparation.thresholds
         interpolationChannelLimit = min(preparation.signal.numberOfChannels, max(0,
@@ -884,7 +932,7 @@ final class PSADecisionMatrixModel {
     func resolvedCellDecision(_ id: PSADecisionCellID) -> PSACellDecision {
         if let explicit = cellOverrides[id], explicit != .automatic { return explicit }
         if recordingInterpolatedChannels.contains(id.channelIndex) { return .keep }
-        if preparation.detectorSuggestions.contains(id)
+        if automaticDetectorSuggestions.contains(id)
             || Double(integratedGoodness(channel: id.channelIndex, epoch: id.epochIndex)) < interpolationHealthThreshold {
             return .interpolate
         }
@@ -1083,6 +1131,7 @@ final class PSADecisionMatrixModel {
             interpolationHealthThreshold: interpolationHealthThreshold,
             epochRejectionHealthThreshold: epochRejectionHealthThreshold,
             interpolationChannelLimit: interpolationChannelLimit,
+            detectorSuggestions: automaticDetectorSuggestions,
             suggestedRejectedEpochs: Set(preparation.segments.indices.filter { !fixedRejectionReasons(for: $0).isEmpty }),
             trustedEpochHealth: trustedEpochHealth,
             cellOverrides: cellOverrides,
@@ -1099,6 +1148,9 @@ final class PSADecisionMatrixModel {
         interpolationHealthThreshold = previous.interpolationHealthThreshold
         epochRejectionHealthThreshold = previous.epochRejectionHealthThreshold
         interpolationChannelLimit = min(preparation.signal.numberOfChannels, previous.interpolationChannelLimit)
+        if previous.amplitudeRange != previous.preparation.amplitudeBounds {
+            amplitudeRange = previous.amplitudeRange
+        }
         let current = Dictionary(uniqueKeysWithValues: preparation.segments.enumerated().map { ($0.element.id, $0.offset) })
         for (oldEpoch, decision) in previous.epochOverrides {
             guard previous.preparation.segments.indices.contains(oldEpoch),
@@ -1120,6 +1172,7 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
     var interpolationHealthThreshold: Double
     var epochRejectionHealthThreshold: Double
     var interpolationChannelLimit: Int
+    var detectorSuggestions: Set<PSADecisionCellID>
     var suggestedRejectedEpochs: Set<Int>
     var trustedEpochHealth: Set<Int>
     var cellOverrides: [PSADecisionCellID: PSACellDecision]
@@ -1141,7 +1194,7 @@ nonisolated struct PSADecisionMatrixSnapshot: Sendable {
         let id = PSADecisionCellID(channelIndex: channel, epochIndex: epoch)
         if let explicit = cellOverrides[id], explicit != .automatic { return explicit }
         if alreadyInterpolatedChannels.contains(channel) { return .keep }
-        return preparation.detectorSuggestions.contains(id)
+        return detectorSuggestions.contains(id)
             || Double(integratedGoodness(channel: channel, epoch: epoch)) < interpolationHealthThreshold
             ? .interpolate : .keep
     }
@@ -1481,7 +1534,7 @@ struct PSADecisionMatrixView: View {
                     .controlSize(.small)
                 }
             }
-            HStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Label("Interpolate channels below", systemImage: "point.3.connected.trianglepath.dotted")
                     HStack {
@@ -1509,9 +1562,54 @@ struct PSADecisionMatrixView: View {
                     }
                 }
                 .help("Maximum channels to interpolate within each epoch. Raising this does not bypass artifact rules, epoch health, electrode positions, or spatial safety checks.")
+                Divider().frame(height: 20)
+                amplitudeControls
             }
         }
         .font(.caption)
+    }
+
+    private var amplitudeControls: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label("Amplitude (µV)", systemImage: "waveform.path")
+            PSAAmplitudeRangeSlider(
+                range: $model.amplitudeRange,
+                bounds: amplitudeSliderBounds
+            )
+            HStack(spacing: 4) {
+                TextField("Min", value: Binding(
+                    get: { model.amplitudeRange.lowerBound },
+                    set: { value in
+                        if value.isFinite {
+                            model.amplitudeRange = min(value, model.amplitudeRange.upperBound)...model.amplitudeRange.upperBound
+                        }
+                    }
+                ), format: .number.precision(.fractionLength(0...1)))
+                .frame(width: 50)
+                .accessibilityLabel("Minimum amplitude in microvolts")
+                Text("to").foregroundStyle(.secondary)
+                TextField("Max", value: Binding(
+                    get: { model.amplitudeRange.upperBound },
+                    set: { value in
+                        if value.isFinite {
+                            model.amplitudeRange = model.amplitudeRange.lowerBound...max(value, model.amplitudeRange.lowerBound)
+                        }
+                    }
+                ), format: .number.precision(.fractionLength(0...1)))
+                .frame(width: 50)
+                .accessibilityLabel("Maximum amplitude in microvolts")
+            }
+            .textFieldStyle(.roundedBorder)
+            .monospacedDigit()
+        }
+        .frame(minWidth: 125, maxWidth: .infinity)
+        .help("Minimum and maximum amplitude allowed in raw and reviewed epoch evidence. Drag either thumb or type exact µV values. Automatic decisions and averaging update together; manual choices, health, slope/acceleration and artifact rules remain in force. These review cutoffs do not change the configuration sheet's processing settings.")
+    }
+
+    private var amplitudeSliderBounds: ClosedRange<Double> {
+        let lower = min(-500, model.preparation.amplitudeBounds.lowerBound, model.amplitudeRange.lowerBound)
+        let upper = max(500, model.preparation.amplitudeBounds.upperBound, model.amplitudeRange.upperBound)
+        return lower...upper
     }
 
     private var categorySummary: some View {

@@ -60,15 +60,16 @@ struct PSAEpochWindowPreview: View {
     }
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 8) {
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Color.accentColor.opacity(0.10))
+                        .frame(height: 28)
                     if baselineCorrected {
                         Rectangle()
                             .fill(Color.accentColor.opacity(0.25))
-                            .frame(width: geometry.size.width * preFraction)
+                            .frame(width: geometry.size.width * preFraction, height: 28)
                             .clipShape(UnevenRoundedRectangle(topLeadingRadius: 4, bottomLeadingRadius: 4))
                     }
                     Rectangle()
@@ -76,8 +77,9 @@ struct PSAEpochWindowPreview: View {
                         .frame(width: 1, height: 38)
                         .offset(x: geometry.size.width * preFraction)
                 }
+                .frame(height: 38)
             }
-            .frame(height: 28)
+            .frame(height: 38)
             HStack {
                 Text((-preStimulus).formatted(.number.precision(.fractionLength(3))) + " s")
                 Spacer()
@@ -88,6 +90,7 @@ struct PSAEpochWindowPreview: View {
             Text(baselineCorrected ? "Onset at 0 s · Pre-stimulus baseline" : "Onset at 0 s")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Epoch window")

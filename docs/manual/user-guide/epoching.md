@@ -89,6 +89,17 @@ the usual direct averaging. Checking both keeps the guided PSA review sheet
   cached evidence, and averaging uses the same limit. Raising it can rescue an
   epoch rejected by the original count limit, but does not bypass artifact rules,
   epoch-health thresholds, electrode-position requirements, or spatial safety checks.
+- **Amplitude (µV)** adds a fourth slider with independent minimum and maximum
+  thumbs. Drag either thumb, use arrow keys on a focused thumb, or type exact
+  bounds below it. Changes immediately reclassify the stored raw and reviewed
+  amplitude evidence and update cell decisions, trial counts, and averaging.
+  Widening the range can retain trials that exceeded the interpolation limit
+  solely because of amplitude violations. Slope/acceleration limits, other health
+  criteria, globally bad channels, artifact exclusions, spatial constraints, and
+  manual decisions still apply. These are review cutoffs: they preserve the
+  displayed reference/baseline and health evidence and do not change the PSA
+  configuration sheet's processing thresholds. Edited bounds survive hiding or
+  rebuilding the current review.
 - Click a channel or epoch header to navigate; drag headers to select ranges.
 - Drag a rectangle in Overview to zoom or act on an area. The details pane shows
   kept/excluded epoch counts and rejection reasons (which can overlap).
