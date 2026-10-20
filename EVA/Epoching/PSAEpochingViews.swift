@@ -286,7 +286,7 @@ extension WaveformView {
                 }
 
                 Divider()
-                PSAInspectorSection("Artifact Handling") {
+                PSAInspectorSection("Artifact Handling", initiallyExpanded: true) {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Skip epochs containing artifacts", isOn: $epoching.skipIfContainsArtifact)
                         HStack(spacing: 8) {
@@ -299,19 +299,10 @@ extension WaveformView {
                             .labelsHidden()
                             .frame(maxWidth: .infinity)
                             .disabled(!epoching.skipIfContainsArtifact)
-                            Button {
-                                epoching.showsArtifactRejectionOptions = true
-                            } label: {
-                                Image(systemName: "slider.horizontal.3")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(!epoching.skipIfContainsArtifact)
-                            .accessibilityLabel("Artifact rejection options")
-                            .help("Choose which artifact kinds cause an epoch to be rejected.")
-                            .popover(isPresented: $epoching.showsArtifactRejectionOptions) {
-                                psaArtifactRejectionOptionsPopover()
-                            }
                         }
+
+                        psaArtifactRejectionOptions()
+                            .disabled(!epoching.skipIfContainsArtifact)
 
                         Toggle("Skip if labeled \"Bad\"", isOn: $epoching.skipIfLabeledBad)
                             .help(
@@ -321,7 +312,7 @@ extension WaveformView {
                     }
                 }
                 Divider()
-                PSAInspectorSection("Channel Interpolation") {
+                PSAInspectorSection("Channel Interpolation", initiallyExpanded: true) {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Interpolate bad channels per epoch", isOn: $epoching.interpolatesBadChannelsPerEpoch)
                             .help(
@@ -668,7 +659,7 @@ extension WaveformView {
     /// main PSA panel so the panel stays compact; opened from the "Skip if
     /// contains artifact" row.
     @ViewBuilder
-    func psaArtifactRejectionOptionsPopover() -> some View {
+    func psaArtifactRejectionOptions() -> some View {
         // Only offer artifacts that have actually been detected as an operation:
         // the eye-blink/eye-movement threshold detectors when they're enabled,
         // and any user-defined artifacts. If a detector was never run there are
@@ -692,66 +683,61 @@ extension WaveformView {
         // carries spans from an earlier export.
         let hasMRI = gradient.isActive || mriUnreliableCount > 0
         let hasAny = hasBlink || hasMovement || hasMRI || !definedArtifacts.isEmpty
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Reject epochs containing")
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Reject epochs containing")
+                .font(.caption.weight(.semibold))
 
-                if hasAny {
-                    VStack(alignment: .leading, spacing: 7) {
-                        if hasBlink {
-                            psaArtifactRejectionRow(
-                                title: "Eye Blink",
-                                detail: "Threshold detector",
-                                isOn: $epoching.skipEyeBlinks,
-                                help: "Rejects epochs containing detected eye blink artifact events."
-                            )
+            if hasAny {
+                VStack(alignment: .leading, spacing: 7) {
+                    if hasBlink {
+                        psaArtifactRejectionRow(
+                            title: "Eye Blink",
+                            detail: "Threshold detector",
+                            isOn: $epoching.skipEyeBlinks,
+                            help: "Rejects epochs containing detected eye blink artifact events."
+                        )
+                    }
+                    if hasMovement {
+                        psaArtifactRejectionRow(
+                            title: "Eye Movement",
+                            detail: "Threshold detector",
+                            isOn: $epoching.skipEyeMovements,
+                            help: "Rejects epochs containing detected eye movement artifact events."
+                        )
+                    }
+                    if hasMRI {
+                        psaArtifactRejectionRow(
+                            title: GradientCoverage.unreliableEventLabel,
+                            detail: "\(mriUnreliableCount) span\(mriUnreliableCount == 1 ? "" : "s") · MRI gradient",
+                            isOn: $epoching.skipUnreliableMRI,
+                            help: "Rejects epochs that overlap a stretch the MRI gradient correction could not be trusted on (\(GradientCoverage.unreliableEventCode)): epochs left uncorrected with no usable donors or an empty template, or corrected from donors across a motion event."
+                        )
+                    }
+                    if !definedArtifacts.isEmpty {
+                        if hasBlink || hasMovement || hasMRI {
+                            Divider()
+                                .padding(.vertical, 2)
                         }
-                        if hasMovement {
+                        ForEach(definedArtifacts) { artifact in
                             psaArtifactRejectionRow(
-                                title: "Eye Movement",
-                                detail: "Threshold detector",
-                                isOn: $epoching.skipEyeMovements,
-                                help: "Rejects epochs containing detected eye movement artifact events."
+                                title: artifact.name,
+                                detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
+                                isOn: psaDefinedArtifactBinding(artifact.id),
+                                help: "Rejects epochs containing events from this defined artifact."
                             )
-                        }
-                        if hasMRI {
-                            psaArtifactRejectionRow(
-                                title: GradientCoverage.unreliableEventLabel,
-                                detail: "\(mriUnreliableCount) span\(mriUnreliableCount == 1 ? "" : "s") · MRI gradient",
-                                isOn: $epoching.skipUnreliableMRI,
-                                help: "Rejects epochs that overlap a stretch the MRI gradient correction could not be trusted on (\(GradientCoverage.unreliableEventCode)): epochs left uncorrected with no usable donors or an empty template, or corrected from donors across a motion event."
-                            )
-                        }
-                        if !definedArtifacts.isEmpty {
-                            if hasBlink || hasMovement || hasMRI {
-                                Divider()
-                                    .padding(.vertical, 2)
-                            }
-                            ForEach(definedArtifacts) { artifact in
-                                psaArtifactRejectionRow(
-                                    title: artifact.name,
-                                    detail: "\(artifact.events.count) events · \(artifact.type.rawValue)",
-                                    isOn: psaDefinedArtifactBinding(artifact.id),
-                                    help: "Rejects epochs containing events from this defined artifact."
-                                )
-                            }
                         }
                     }
-                } else {
-                    Text("No detected artifacts. Run eye-blink / eye-movement detection or define an artifact template first, then epochs containing those events can be rejected.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                Divider()
-                psaArtifactRejectionWindowSection()
+            } else {
+                Text("No detected artifacts. Run eye-blink / eye-movement detection or define an artifact template first, then epochs containing those events can be rejected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(16)
-            .frame(width: 300, alignment: .leading)
+
+            Divider()
+            psaArtifactRejectionWindowSection()
         }
-        .frame(maxHeight: 420)
     }
 
     /// Time-boxes rejection to part of the epoch, so an artifact late in a long
@@ -760,7 +746,7 @@ extension WaveformView {
     func psaArtifactRejectionWindowSection() -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Where the artifact must occur")
-                .font(.headline)
+                .font(.caption.weight(.semibold))
 
             Toggle("Only part of the epoch", isOn: Binding(
                 get: { epoching.limitsArtifactRejectionWindow },
@@ -839,14 +825,13 @@ extension WaveformView {
         help: String
     ) -> some View {
         Toggle(isOn: isOn) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .lineLimit(1)
                 Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
+            .fixedSize(horizontal: false, vertical: true)
         }
         .help(help)
     }

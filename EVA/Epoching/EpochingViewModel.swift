@@ -255,8 +255,6 @@ final class EpochingViewModel {
     /// gradient correction could not be trusted on (ROADMAP MRI-1). Under the
     /// same `skipIfContainsArtifact` switch and rejection window as the rest.
     var skipUnreliableMRI = true
-    /// Drives the popover listing which artifact kinds to reject on.
-    var showsArtifactRejectionOptions = false
     /// Restricts rejection to a sub-window of the epoch instead of the whole
     /// thing, so an artifact late in a long post-stimulus interval (a blink at
     /// 750 ms in a −100…800 ms epoch) doesn't have to cost the trial. Off by
