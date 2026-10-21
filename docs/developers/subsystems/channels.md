@@ -40,3 +40,44 @@ the callers. A new **topomap rendering** option lives in `TopomapView`
 (watch the raster cache keys). Because `ChannelModel`'s command keys wire menus
 app-wide, adding a menu action means adding a `FocusedValues` key here and reading
 it in `EVAApp`/`ContentView` ([app.md](app.md)).
+
+## Recording-local location overrides
+
+`ChannelLocationImportViews` previews a `.bvef`, MFF `coordinates.xml`, or MFF
+`sensorLayout.xml` file with explicit name/number matching.
+`EVACore/Channels/ElectrodeLocationFile` detects the XML root, handles native
+nested MFF layouts and namespace prefixes, preserves net names, excludes
+fiducials, and gives unnamed EEG electrodes their numbered identities.
+Coordinates are 3D; sensor layouts are explicitly 2D with EGI y inverted. `EVACore/Channels/BVEFMontage` parses BrainVision signed polar angles
+and azimuths into EVA's right/anterior/superior unit-sphere axes. Zero radii have
+no spatial position. Duplicate names/numbers, non-finite coordinates, malformed
+XML, and ambiguous name mappings fail explicitly.
+
+`ChannelsWindowModel` routes application to the captured recording ID; a preview
+cannot silently affect a newly focused recording. `MFFRecording` owns the
+replacement layout/geometry without changing its signal revision. Existing
+interpolation recipes are re-solved through `ChannelInterpolationSolver` and
+health is refreshed. Role edits remap the active override, and fork payloads
+carry it into the new document.
+
+`MFFExportSnapshot` carries an optional `EEGLocationOverride`. The core MFF writer
+uses it after normal metadata copying, so stale source XML cannot overwrite it.
+The override writes the appropriate 2D/3D metadata in signal order; zero-vector entries
+retain non-spatial channel names in `coordinates.xml`, while missing 2D positions
+stay off the scalp map. The export log records the source and matching method.
+Split exports and Resolve handoffs use the same metadata path.
+
+`BVEFMontageTests` covers orientation, mapping, reference handling, non-spatial
+channels, stale source XML, MFF round-trips, unchanged samples/source files,
+channel-role edits, and recording focus routing. An optional ignored local
+corpus checks the study's complete BC-MR-64-X52 file against MNE; the repository
+contains only synthetic electrode definitions, not the study's supplied file.
+
+An explicitly imported flat layout clears 3D geometry and removes stale
+`coordinates.xml` from its export. `eva_locations.json` records source, matching,
+and dimensionality. `MFFWriter` carries this record through later exports, and
+`SignalImportReader` respects the 2D choice instead of fabricating a standard-name
+3D montage on reopen. Flat layouts also follow channel-role edits and forks.
+`MFFLocationImportTests` compares native fixtures to the existing readers and
+covers names/numbers, axes, namespaces, reference identity, malformed files,
+center electrodes, and 2D → export → reopen → re-export → 3D transitions.

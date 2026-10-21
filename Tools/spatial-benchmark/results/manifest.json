@@ -1,0 +1,9 @@
+{
+  "date": "2026-10-19",
+  "build": "swiftc -O",
+  "architecture": "arm64",
+  "repeats": 3,
+  "before_source_sha256": "1b21586133582613e8362ca052c8651315f34562024e08f7a846cf5f7212c2a7",
+  "after_source_sha256": "c43e3fb15c0ef114a98421778ce454d678aa42a9c940b29f87f1f37dbf9cb2f0",
+  "validation": "44 focused macOS review tests passed; full-tree fingerprints match before/after for both sizes"
+}

@@ -88,6 +88,10 @@ struct PipelineInvalidationTests {
         store.selection.dragSelectionStartSample = 100
         store.selection.dragSelectionEndSample = 200
         store.selection.topomapSample = 150
+        epoching.decisionMatrixFastChannelPriorSignature = "old-signal"
+        epoching.decisionMatrixFastChannelGoodness = [0: 80]
+        epoching.showsDecisionMatrix = true
+        epoching.decisionMatrixNeedsRefresh = true
 
         PipelineInvalidation.epochsAndDerived(
             epoching: epoching,
@@ -99,6 +103,11 @@ struct PipelineInvalidationTests {
         #expect(store.selection.dragSelectionStartSample == nil)
         #expect(store.selection.dragSelectionEndSample == nil)
         #expect(store.selection.topomapSample == nil)
+        #expect(epoching.decisionMatrixFastChannelPriorSignature == nil)
+        #expect(epoching.decisionMatrixFastChannelGoodness.isEmpty)
+        #expect(!epoching.showsDecisionMatrix)
+        #expect(!epoching.decisionMatrixNeedsRefresh)
+        #expect(epoching.decisionMatrix == nil)
     }
 
     @Test func interpolationInvalidationClearsRecipesAndResolver() {

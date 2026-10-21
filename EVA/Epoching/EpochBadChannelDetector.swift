@@ -151,6 +151,60 @@ nonisolated final class SphericalSplineWeightCache: @unchecked Sendable {
 }
 
 nonisolated enum EpochBadChannelDetector {
+    /// Compact evidence retained for the channel × epoch decision matrix.
+    /// Keeping the four detector inputs (rather than only a Boolean) lets the
+    /// detail inspector explain *why* a cell was suggested for interpolation.
+    nonisolated struct Evidence: Sendable, Equatable {
+        var minimumMicrovolts: Double
+        var maximumMicrovolts: Double
+        var maximumSlopeMicrovoltsPerSample: Double
+        var maximumAccelerationMicrovoltsPerSample: Double
+
+        func exceeds(_ thresholds: EpochBadChannelThresholds) -> Bool {
+            minimumMicrovolts < thresholds.minMicrovolts
+                || maximumMicrovolts > thresholds.maxMicrovolts
+                || maximumSlopeMicrovoltsPerSample > thresholds.maxSlopeMicrovoltsPerSample
+                || maximumAccelerationMicrovoltsPerSample > thresholds.maxAccelerationMicrovoltsPerSample
+        }
+
+        /// 0 is comfortably inside every limit; 1 is at (or beyond) the most
+        /// extreme configured limit. This is a visualization score, not a new
+        /// rejection rule — the detector's literal comparisons remain the rule.
+        func severity(relativeTo thresholds: EpochBadChannelThresholds) -> Double {
+            let negative = minimumMicrovolts < 0 && thresholds.minMicrovolts < 0
+                ? abs(minimumMicrovolts) / max(abs(thresholds.minMicrovolts), 1e-9) : 0
+            let positive = maximumMicrovolts > 0 && thresholds.maxMicrovolts > 0
+                ? maximumMicrovolts / max(thresholds.maxMicrovolts, 1e-9) : 0
+            let slope = maximumSlopeMicrovoltsPerSample / max(thresholds.maxSlopeMicrovoltsPerSample, 1e-9)
+            let acceleration = maximumAccelerationMicrovoltsPerSample / max(thresholds.maxAccelerationMicrovoltsPerSample, 1e-9)
+            return min(max(max(negative, positive, slope, acceleration), 0), 1)
+        }
+    }
+
+    static func evidence(in channel: [Float], range: Range<Int>) -> Evidence? {
+        guard range.count > 1, range.lowerBound >= 0, range.upperBound <= channel.count else { return nil }
+        var minValue = channel[range.lowerBound]
+        var maxValue = minValue
+        var maxSlope: Float = 0
+        var maxAcceleration: Float = 0
+        var previousSlope: Float?
+        for sample in (range.lowerBound + 1)..<range.upperBound {
+            let value = channel[sample]
+            minValue = min(minValue, value)
+            maxValue = max(maxValue, value)
+            let slope = abs(value - channel[sample - 1])
+            maxSlope = max(maxSlope, slope)
+            if let previousSlope { maxAcceleration = max(maxAcceleration, abs(slope - previousSlope)) }
+            previousSlope = slope
+        }
+        return Evidence(
+            minimumMicrovolts: Double(minValue),
+            maximumMicrovolts: Double(maxValue),
+            maximumSlopeMicrovoltsPerSample: Double(maxSlope),
+            maximumAccelerationMicrovoltsPerSample: Double(maxAcceleration)
+        )
+    }
+
     /// Flags channels whose min/max, slope, or acceleration within `range`
     /// exceed `thresholds`. `data` is indexed by channel; `range` is the
     /// sample window (shared across channels) to evaluate.
@@ -166,30 +220,7 @@ nonisolated enum EpochBadChannelDetector {
             let channel = data[index]
             guard range.upperBound <= channel.count else { continue }
 
-            var minValue = channel[range.lowerBound]
-            var maxValue = minValue
-            var maxSlope: Float = 0
-            var maxAcceleration: Float = 0
-            var previousSlope: Float?
-
-            for sample in (range.lowerBound + 1)..<range.upperBound {
-                let value = channel[sample]
-                if value < minValue { minValue = value }
-                if value > maxValue { maxValue = value }
-
-                let slope = abs(value - channel[sample - 1])
-                if slope > maxSlope { maxSlope = slope }
-                if let previousSlope {
-                    let acceleration = abs(slope - previousSlope)
-                    if acceleration > maxAcceleration { maxAcceleration = acceleration }
-                }
-                previousSlope = slope
-            }
-
-            if Double(minValue) < thresholds.minMicrovolts
-                || Double(maxValue) > thresholds.maxMicrovolts
-                || Double(maxSlope) > thresholds.maxSlopeMicrovoltsPerSample
-                || Double(maxAcceleration) > thresholds.maxAccelerationMicrovoltsPerSample {
+            if let evidence = evidence(in: channel, range: range), evidence.exceeds(thresholds) {
                 bad.insert(index)
             }
         }

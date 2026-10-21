@@ -51,6 +51,7 @@ extension WaveformView {
             return
         }
         let segments = epoching.epochSegments
+        let locationOverride = recording.locationOverride
         let baseName = recording.packageURL.deletingPathExtension().lastPathComponent
         Task {
             do {
@@ -60,7 +61,7 @@ extension WaveformView {
                         .appendingPathComponent(UUID().uuidString, isDirectory: true)
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     let url = directory.appendingPathComponent("\(baseName)-averaged.mff")
-                    try MFFWriter.write(signal: signal, segments: segments, kind: .averaged, to: url)
+                    try MFFWriter.write(signal: signal, segments: segments, kind: .averaged, to: url, locationOverride: locationOverride)
                     let sidecar = try JSONEncoder().encode(ResolveFitSidecar(centerSample: relativeSample))
                     try sidecar.write(to: url.appendingPathComponent(Self.resolveSidecarName))
                     return url

@@ -51,6 +51,26 @@ struct ArtifactCleanRunGradeTests {
         #expect(m?.includesContinuousCorrection == false)
     }
 
+    @Test func compactEventEvidenceStoresIDsAndRMSWithoutSamples() throws {
+        let before = SyntheticSignal.make([[Float](repeating: 10, count: 300)], samplingRate: 100)
+        let after = SyntheticSignal.make([[Float](repeating: 5, count: 300)], samplingRate: 100)
+        let a = artifact(.obs, events: 1)
+        let summary = ArtifactCleaningSummary(
+            artifactID: a.id, name: a.name, method: .obs,
+            eventCount: 1, channelCount: 1
+        )
+
+        let enriched = ArtifactCleaningSummary.addingEventEvidence(
+            to: [summary], original: before, cleaned: after,
+            artifacts: [a], excludedChannels: []
+        )
+        let result = try #require(enriched.first)
+        #expect(result.correctedEventIDs == ["e0"])
+        #expect(abs((result.inputRMSMicrovolts ?? 0) - 10) < 0.001)
+        #expect(abs((result.outputRMSMicrovolts ?? 0) - 5) < 0.001)
+        #expect(abs((result.rmsChangeFraction ?? 0) - 0.5) < 0.001)
+    }
+
     @Test func touchedBandEdge() {
         func g(_ f: Double) -> RunGrade { ArtifactCleanRunGrade.grade(from: metrics(touched: f)).grade }
         #expect(g(ArtifactCleanRunGrade.touchedWatchFloor - 1e-6) == .good)

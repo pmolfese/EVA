@@ -90,7 +90,7 @@ Once averages are computed, EVA lets you inspect them as waveforms, topomaps, or
 
 ## Built For macOS
 
-EVA is a SwiftUI app and leans into Apple platform tools.
+EVA requires macOS 15 or later and an Apple silicon Mac. It is a SwiftUI app and leans into Apple platform tools.
 
 - **Core ML** runs the bundled ICLabel model for ICA component classification.
 - **Accelerate/vDSP** is used throughout signal processing paths where vector math matters.

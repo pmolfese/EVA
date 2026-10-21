@@ -1,0 +1,28 @@
+{
+  "mne_version": "1.13.2",
+  "status_reference_mask": 131071,
+  "channel_names": [
+    "Fz",
+    "Cz",
+    "Status"
+  ],
+  "duration": 2.0,
+  "events": [
+    [
+      0.0,
+      5
+    ],
+    [
+      0.125,
+      2
+    ],
+    [
+      0.9375,
+      513
+    ],
+    [
+      1.875,
+      65535
+    ]
+  ]
+}

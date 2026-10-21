@@ -44,12 +44,14 @@ final class ChannelsWindowModel {
         var signal: MFFSignalData?
         var acquisitionSignal: MFFSignalData?
         var layout: SensorLayout?
+        var geometry: ElectrodeGeometry?
         var channelNames: [String]?
         var healthResults: [Int: ChannelHealthResult]
         var isAnalyzingHealth: Bool
         var healthProgress: Double
         var refreshHealth: () -> Void
         var runHealthWavelets: () -> Void
+        var importLocations: ((EEGLocationOverride) throws -> Void)?
     }
 
     static let shared = ChannelsWindowModel()
@@ -63,6 +65,7 @@ final class ChannelsWindowModel {
     private(set) var activeSignal: MFFSignalData?
     private(set) var activeAcquisitionSignal: MFFSignalData?
     private(set) var activeLayout: SensorLayout?
+    private(set) var activeGeometry: ElectrodeGeometry?
     private(set) var activeChannelNames: [String]?
     private(set) var healthResults = [Int: ChannelHealthResult]()
     private(set) var isAnalyzingHealth = false
@@ -93,24 +96,28 @@ final class ChannelsWindowModel {
         signal: MFFSignalData?,
         acquisitionSignal: MFFSignalData?,
         layout: SensorLayout?,
+        geometry: ElectrodeGeometry? = nil,
         channelNames: [String]?,
         healthResults: [Int: ChannelHealthResult],
         isAnalyzingHealth: Bool,
         healthProgress: Double,
         refreshHealth: @escaping () -> Void,
-        runHealthWavelets: @escaping () -> Void
+        runHealthWavelets: @escaping () -> Void = {},
+        importLocations: ((EEGLocationOverride) throws -> Void)? = nil
     ) {
         let context = RecordingContext(
             name: name,
             signal: signal,
             acquisitionSignal: acquisitionSignal,
             layout: layout,
+            geometry: geometry,
             channelNames: channelNames,
             healthResults: healthResults,
             isAnalyzingHealth: isAnalyzingHealth,
             healthProgress: healthProgress,
             refreshHealth: refreshHealth,
-            runHealthWavelets: runHealthWavelets
+            runHealthWavelets: runHealthWavelets,
+            importLocations: importLocations
         )
         recordingContexts[id] = context
         if activeRecordingID == nil || activeRecordingID == id {
@@ -130,6 +137,7 @@ final class ChannelsWindowModel {
         activeSignal = context.signal
         activeAcquisitionSignal = context.acquisitionSignal
         activeLayout = context.layout?.includingReference(forChannelCount: context.signal?.data.count ?? 0)
+        activeGeometry = context.geometry
         activeChannelNames = context.channelNames
         ChannelSetStore.shared.activeSensorLayout = activeLayout
         ChannelSetStore.shared.activeChannelNames = activeChannelNames
@@ -189,6 +197,7 @@ final class ChannelsWindowModel {
         activeSignal = nil
         activeAcquisitionSignal = nil
         activeLayout = nil
+        activeGeometry = nil
         activeChannelNames = nil
         healthResults = [:]
         isAnalyzingHealth = false
@@ -214,6 +223,20 @@ final class ChannelsWindowModel {
 
     func requestHealthRefresh() {
         healthRefreshAction?()
+    }
+
+    var canImportLocations: Bool {
+        guard let id = activeRecordingID else { return false }
+        return activeAcquisitionSignal != nil && recordingContexts[id]?.importLocations != nil
+    }
+
+    func applyLocationOverride(_ value: EEGLocationOverride, toRecording id: UUID) throws {
+        guard activeRecordingID == id, let action = recordingContexts[id]?.importLocations else {
+            throw BVEFError.invalid("The selected recording changed. Import the locations again for the intended recording.")
+        }
+        try action(value)
+        clearDiagnostics()
+        if selectedTab == .relationships || selectedTab == .reference { refreshDiagnostics(force: true) }
     }
 
     func relationships(for channel: Int) -> [ChannelRelationshipFinding] {

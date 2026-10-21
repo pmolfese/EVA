@@ -536,7 +536,8 @@ extension WaveformView {
             liveSnapshot: liveSnapshot,
             channels: recordingStore.channels.copy(),
             comparisonGroupID: comparisonGroupID,
-            forkedFromNode: recordingStore.processingHistory.history.currentID.short
+            forkedFromNode: recordingStore.processingHistory.history.currentID.short,
+            locationOverride: recording.locationOverride
         ))
         openWindow(id: "main")
     }

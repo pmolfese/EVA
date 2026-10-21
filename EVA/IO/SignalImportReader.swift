@@ -71,7 +71,7 @@ nonisolated enum SignalImportReader {
     static let supportedRecordingExtensions: Set<String> = [
         "mff",
         "vhdr", "vmrk", "eeg",
-        "edf",
+        "edf", "bdf",
         "fif",
         "lay", "dat",
         "avr", "mul"
@@ -156,6 +156,8 @@ nonisolated enum SignalImportReader {
         case "edf":
             progress?(SignalImportProgress(fraction: 0.05, message: "Reading EDF recording", detail: nil))
             imported = try EDFSignalReader.load(from: url)
+        case "bdf":
+            imported = try BDFSignalReader.load(from: url, progress: progress)
         case "fif":
             progress?(SignalImportProgress(fraction: 0.05, message: "Reading FIF recording", detail: nil))
             imported = try FIFSignalReader.load(from: url)
@@ -201,14 +203,23 @@ nonisolated enum SignalImportReader {
     }
 
     private static func attachElectrodeLocations(to imported: ImportedRecording) -> ImportedRecording {
+        // An explicitly imported flat MFF layout must remain 2D on reopening;
+        // standard-name inference would silently fabricate a different 3D net.
+        let sourcePackage = imported.signal.signalURL.deletingLastPathComponent()
+        if sourcePackage.pathExtension.lowercased() == "mff",
+           EEGLocationOverride.hasExplicit2DLayout(inPackage: sourcePackage) { return imported }
         guard imported.layout == nil || imported.geometry == nil else {
             return imported
         }
 
+        // A1/A2 mean mastoids in standard nomenclature but electrode-bank
+        // indices in BioSemi. A sidecar can resolve them; a name alone cannot.
+        let ambiguousLabels: Set<String> = imported.signal.signalURL.pathExtension.lowercased() == "bdf"
+            ? ["A1", "A2"] : []
         let locations = ElectrodeLocationReader.loadSidecar(
             near: imported.signal.signalURL,
             channelNames: imported.signal.channelNames
-        ) ?? StandardElectrodeLocations.locations(for: imported.signal.channelNames)
+        ) ?? StandardElectrodeLocations.locations(for: imported.signal.channelNames, excluding: ambiguousLabels)
 
         guard let locations else {
             return imported
@@ -910,72 +921,6 @@ private nonisolated enum EDFSignalReader {
 
     private static func readIntArray(_ data: Data, cursor: inout Int, count: Int, width: Int) throws -> [Int] {
         try readStringArray(data, cursor: &cursor, count: count, width: width).map { Int($0) ?? 0 }
-    }
-}
-
-private nonisolated enum EDFAnnotationDecoder {
-    struct TAL {
-        let onsetSeconds: Double
-        let durationSeconds: Double?
-        let texts: [String]
-    }
-
-    static func decode(_ bytes: [UInt8]) throws -> [TAL] {
-        guard bytes.last == 0 else {
-            throw SignalImportError.malformedFile(
-                URL(fileURLWithPath: "EDF"),
-                "annotation record is not NUL-terminated"
-            )
-        }
-        var output: [TAL] = []
-        var start = 0
-        for end in 0...bytes.count where end == bytes.count || bytes[end] == 0 {
-            guard end > start else {
-                start = end + 1
-                continue
-            }
-            let chunk = Array(bytes[start..<end])
-            start = end + 1
-            guard let firstSeparator = chunk.firstIndex(of: 0x14) else {
-                throw SignalImportError.malformedFile(URL(fileURLWithPath: "EDF"), "annotation TAL is missing its text separator")
-            }
-            let timing = Array(chunk[..<firstSeparator])
-            let timingParts = split(timing, separator: 0x15)
-            guard let onsetText = ascii(timingParts.first ?? []),
-                  (onsetText.hasPrefix("+") || onsetText.hasPrefix("-")),
-                  let onset = Double(onsetText) else {
-                throw SignalImportError.malformedFile(URL(fileURLWithPath: "EDF"), "annotation TAL has an invalid onset")
-            }
-            var duration: Double?
-            if timingParts.count > 1 {
-                guard timingParts.count == 2,
-                      let durationText = ascii(timingParts[1]),
-                      let parsed = Double(durationText), parsed >= 0 else {
-                    throw SignalImportError.malformedFile(URL(fileURLWithPath: "EDF"), "annotation TAL has an invalid duration")
-                }
-                duration = parsed > 0 ? parsed : nil
-            }
-            let textBytes = Array(chunk[chunk.index(after: firstSeparator)...])
-            let texts = split(textBytes, separator: 0x14).compactMap { field -> String? in
-                guard !field.isEmpty, let value = String(bytes: field, encoding: .utf8), !value.isEmpty else { return nil }
-                return value
-            }
-            // Empty-text TALs are EDF+ record-timekeeping annotations.
-            if !texts.isEmpty { output.append(TAL(onsetSeconds: onset, durationSeconds: duration, texts: texts)) }
-        }
-        return output
-    }
-
-    private static func split(_ bytes: [UInt8], separator: UInt8) -> [[UInt8]] {
-        var fields: [[UInt8]] = [[]]
-        for byte in bytes {
-            if byte == separator { fields.append([]) } else { fields[fields.count - 1].append(byte) }
-        }
-        return fields
-    }
-
-    private static func ascii(_ bytes: [UInt8]) -> String? {
-        String(bytes: bytes, encoding: .ascii)
     }
 }
 
@@ -1703,12 +1648,13 @@ private nonisolated enum StandardElectrodeLocations {
         "T6": "P8"
     ]
 
-    static func locations(for channelNames: [String]?) -> ImportedElectrodeLocations? {
+    static func locations(for channelNames: [String]?, excluding excludedLabels: Set<String> = []) -> ImportedElectrodeLocations? {
         guard let channelNames, !channelNames.isEmpty else { return nil }
 
         var coordinates: [(label: String, vector: SIMD3<Double>)] = []
         var eligibleChannelCount = 0
         for name in channelNames {
+            guard !excludedLabels.contains(name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()) else { continue }
             guard !isNonScalpChannel(name) else { continue }
             eligibleChannelCount += 1
             guard let vector = vector(for: name) else { continue }

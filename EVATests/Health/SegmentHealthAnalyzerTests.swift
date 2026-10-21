@@ -117,6 +117,29 @@ struct SegmentHealthAnalyzerTests {
         #expect(badResult.goodPercentage < cleanResult.goodPercentage)
     }
 
+    @Test func uncorrectedOcularArtifactCapsHealthButCorrectedEventDoesNot() throws {
+        let signal = SyntheticSignal.make((1...4).map { cleanChannel(seed: UInt64($0)) }, samplingRate: samplingRate)
+        let segment = try #require(SegmentHealthAnalyzer.analysisSegments(for: signal, epochSegments: []).first)
+        func result(corrected: Bool) throws -> SegmentHealthResult {
+            let interval = SegmentHealthArtifactInterval(
+                artifactID: "blink", code: EyeArtifactKind.blink.eventCode,
+                startSample: segment.startSample, endSample: min(segment.startSample + 20, segment.endSample),
+                sourceFile: "threshold", isOcular: true, isCorrected: corrected
+            )
+            return try #require(SegmentHealthAnalyzer.analyze(
+                signal: signal, segments: [segment], excludedChannelIndices: [],
+                artifacts: .assessed([interval])
+            ).results.first)
+        }
+
+        let uncorrected = try result(corrected: false)
+        let corrected = try result(corrected: true)
+        #expect(uncorrected.goodPercentage <= 50)
+        #expect(corrected.goodPercentage > 50)
+        #expect(uncorrected.metrics.contains { $0.name == "Uncorrected Ocular Artifact" })
+        #expect(!corrected.metrics.contains { $0.name == "Uncorrected Ocular Artifact" })
+    }
+
     @Test func emptySegmentsYieldNoResults() {
         let signal = SyntheticSignal.make([cleanChannel(seed: 1)], samplingRate: samplingRate)
         let analysis = SegmentHealthAnalyzer.analyze(signal: signal, segments: [], excludedChannelIndices: [], artifacts: .assessed([]))

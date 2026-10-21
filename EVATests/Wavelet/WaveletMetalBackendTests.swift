@@ -173,6 +173,55 @@ struct WaveletMetalBackendTests {
         #expect(scoreDelta < 0.05, "top score differs by \(scoreDelta * 100)%: CPU \(cpuTop.score) vs GPU \(gpuTop.score)")
     }
 
+    @Test func gpuChannelGoodnessPreservesSignedPeakAndScores() throws {
+        _ = try #require(
+            WaveletMetalBackend.shared,
+            "no Metal device available on this machine"
+        )
+
+        let samplingRate = 500.0
+        let sampleCount = 8_000
+        let channels = (0..<4).map { channel in
+            noisyChannel(
+                seed: UInt64(channel + 31),
+                count: sampleCount,
+                withBurstAt: 2_000 + channel * 300
+            )
+        }
+        let signal = SyntheticSignal.make(channels, samplingRate: samplingRate)
+        func configuration(gpu: Bool) -> WaveletChannelGoodnessConfiguration {
+            WaveletChannelGoodnessConfiguration(
+                channelIndices: Array(channels.indices),
+                downsampleRate: 250,
+                levelCount: 6,
+                thresholdScale: 1,
+                cleaningMode: .conservativeLocal,
+                intensity: 1,
+                waveletFamily: .bior44,
+                thresholdRule: .hard,
+                thresholdModel: .bayesShrink,
+                usesGPU: gpu
+            )
+        }
+
+        let cpu = WaveletArtifactAnalyzer.channelGoodness(
+            in: signal,
+            configuration: configuration(gpu: false)
+        )
+        let gpu = WaveletArtifactAnalyzer.channelGoodness(
+            in: signal,
+            configuration: configuration(gpu: true)
+        )
+
+        #expect(Set(cpu.keys) == Set(gpu.keys))
+        for channel in channels.indices {
+            let cpuResult = try #require(cpu[channel])
+            let gpuResult = try #require(gpu[channel])
+            #expect(gpuResult.peakArtifactMagnitude > 0)
+            #expect(abs(cpuResult.goodnessScore - gpuResult.goodnessScore) < 0.15)
+        }
+    }
+
     // MARK: - Reducer GPU path
 
     /// Multi-channel signal for the reducer: oscillation + drift + sparse

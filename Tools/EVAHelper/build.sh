@@ -23,6 +23,8 @@ swiftc -O \
   "$ROOT/EVA/Core/Downsampler.swift" \
   "$ROOT/EVACore/Epoching/EpochModel.swift" \
   "$ROOT/EVACore/Channels/SensorLayout.swift" \
+  "$ROOT/EVACore/Channels/BVEFMontage.swift" \
+  "$ROOT/EVACore/Channels/ElectrodeGeometry.swift" \
   "$ROOT/EVACore/IO/EGISensorXMLParser.swift" \
   "$ROOT/EVACore/IO/MFFReader.swift" \
   "$ROOT/EVACore/IO/MFFFileType.swift" \

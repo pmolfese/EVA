@@ -18,6 +18,27 @@
 
 import SwiftUI
 
+nonisolated enum PSAArtifactRejectionPolicy: String, CaseIterable, Identifiable, Sendable {
+    case uncorrected = "Uncorrected artifact"
+    case any = "Any artifact"
+
+    var id: String { rawValue }
+}
+
+/// Cheap decision-rule identity, separate from the expensive waveform/health
+/// evidence inputs. Merely opening Configure does not change this value.
+nonisolated struct PSAReviewRejectionSettings: Equatable {
+    var segmentField: String
+    var skipsArtifacts: Bool
+    var policy: PSAArtifactRejectionPolicy
+    var skipsBlinks: Bool
+    var skipsMovements: Bool
+    var skipsUnreliableMRI: Bool
+    var window: ClosedRange<Double>?
+    var definedArtifactIDs: Set<UUID>
+    var skipsLabeledBad: Bool
+}
+
 /// How a joint marker box arranges more than one condition's topomap. See
 /// `EpochingViewModel.jointBoxOrientation`.
 enum JointBoxOrientation: String, CaseIterable, Identifiable, Sendable {
@@ -178,6 +199,33 @@ final class EpochingViewModel {
     var baselineCorrected = true
     var averageReference = true
     var averageOnApply = false
+    /// When averaging, pause after epoch creation so the operator can review
+    /// the channel × epoch evidence and see exactly what enters the average.
+    var usesDecisionMatrix = false
+    var presentsPSADecisionMatrixSheet: Bool { averageOnApply && usesDecisionMatrix }
+    var defersPSADecisionsForReview: Bool { !averageOnApply || usesDecisionMatrix }
+    var decisionMatrix: PSADecisionMatrixModel?
+    var showsDecisionMatrix = false
+    /// PSA's explicit averaging review stays modal; reviewing existing epochs
+    /// uses the independent floating panel instead.
+    var decisionMatrixIsInSheet = false
+    var decisionMatrixNeedsRefresh = false
+    var decisionMatrixRejectionSettings: PSAReviewRejectionSettings {
+        .init(segmentField: segmentField.rawValue, skipsArtifacts: skipIfContainsArtifact,
+              policy: artifactRejectionPolicy, skipsBlinks: skipEyeBlinks,
+              skipsMovements: skipEyeMovements, skipsUnreliableMRI: skipUnreliableMRI,
+              window: effectiveArtifactRejectionWindow, definedArtifactIDs: skippedDefinedArtifactIDs,
+              skipsLabeledBad: skipIfLabeledBad)
+    }
+    /// Structured detector evidence from the most recent epoch build, retained
+    /// so "Average Current Epochs" can reopen the same matrix without parsing
+    /// a display string.
+    var epochBadChannelSegments: [Int: [Int]] = [:]
+    /// Non-artifact automatic rejection reasons from the epoch build (for
+    /// example a missing timing marker). Artifact reasons are deliberately
+    /// recomputed from the current PSA selections and rejection window whenever
+    /// the matrix opens, so immediate and deferred averaging cannot drift.
+    var epochNonArtifactRejectionReasons: [Int: [String]] = [:]
 
     // MARK: Category naming / timing markers
     var categoryNames = [String: String]()
@@ -200,14 +248,13 @@ final class EpochingViewModel {
 
     // MARK: Artifact rejection
     var skipIfContainsArtifact = true
+    var artifactRejectionPolicy = PSAArtifactRejectionPolicy.uncorrected
     var skipEyeBlinks = true
     var skipEyeMovements = true
     /// Rejects epochs overlapping an `MRI_GRAD_UNRELIABLE` span — a stretch the
     /// gradient correction could not be trusted on (ROADMAP MRI-1). Under the
     /// same `skipIfContainsArtifact` switch and rejection window as the rest.
     var skipUnreliableMRI = true
-    /// Drives the popover listing which artifact kinds to reject on.
-    var showsArtifactRejectionOptions = false
     /// Restricts rejection to a sub-window of the epoch instead of the whole
     /// thing, so an artifact late in a long post-stimulus interval (a blink at
     /// 750 ms in a −100…800 ms epoch) doesn't have to cost the trial. Off by
@@ -271,9 +318,21 @@ final class EpochingViewModel {
     var statusMessage: String?
     var isApplying = false
     var phaseMessage: String?
-    /// Fraction complete (0...1) while segmenting; nil for indeterminate
-    /// phases (e.g. averaging), which fall back to a spinner.
+    /// Fraction complete (0...1) for the entire current PSA operation. Keeping
+    /// one monotonic value here avoids replacing the progress bar for every
+    /// internal phase.
     var segmentingProgress: Double?
+    /// A whole-recording prior requested specifically by the Decision Matrix.
+    /// Kept separate from ordinary Channel Health so the fast-suite option
+    /// cannot be mistaken for a completed full analysis elsewhere in EVA.
+    var isAnalyzingDecisionMatrixChannelPrior = false
+    var decisionMatrixChannelPriorProgress: Double?
+    var decisionMatrixChannelPriorMessage: String?
+    /// Session cache for the optional core-only whole-recording prior. Unlike
+    /// full Channel Health this must not populate the Channels health UI, but
+    /// it also should not be recomputed every time the matrix is reopened.
+    var decisionMatrixFastChannelPriorSignature: String?
+    var decisionMatrixFastChannelGoodness: [Int: Int] = [:]
 
     // MARK: Results
     /// Pre-average raw epochs, cached so PSA options can be re-toggled without
@@ -508,6 +567,7 @@ final class EpochingViewModel {
             "skipEyeMovements": "\(skipEyeMovements)",
             "skipUnreliableMRI": "\(skipUnreliableMRI)",
             "skipArtifacts": "\(skipIfContainsArtifact)",
+            "artifactRejectionPolicy": artifactRejectionPolicy.rawValue,
             "skipLabeledBad": "\(skipIfLabeledBad)",
             "interpolateBadChannelsPerEpoch": "\(interpolatesBadChannelsPerEpoch)"
         ]
@@ -589,6 +649,9 @@ final class EpochingViewModel {
         // unreliable spans.
         skipUnreliableMRI = p["skipUnreliableMRI"] == "true"
         if let v = p["skipArtifacts"] { skipIfContainsArtifact = (v == "true") }
+        if let v = p["artifactRejectionPolicy"].flatMap(PSAArtifactRejectionPolicy.init(rawValue:)) {
+            artifactRejectionPolicy = v
+        }
         // Absent keys mean "not limited", matching how `parameters` only writes
         // them when the limit is on.
         limitsArtifactRejectionWindow = p["artifactWindowLimited"] == "true"
@@ -895,15 +958,23 @@ final class EpochingViewModel {
         baselineCorrect: Bool,
         badChannels: Set<Int>,
         excludedSegmentIndices: ([EpochSegment]) -> Set<Int> = { _ in [] },
-        isCurrent: () -> Bool = { true }
+        isCurrent: () -> Bool = { true },
+        progressRange: ClosedRange<Double> = 0...1
     ) async -> PSAApplyOutcome? {
+        let progressLower = min(max(progressRange.lowerBound, 0), 1)
+        let progressUpper = min(max(progressRange.upperBound, progressLower), 1)
+        let progressSpan = progressUpper - progressLower
+        func setProgress(_ fraction: Double) {
+            segmentingProgress = progressLower + progressSpan * min(max(fraction, 0), 1)
+        }
         isApplying = true
         phaseMessage = "Segmenting…"
-        segmentingProgress = nil
+        setProgress(0)
 
         let (progressContinuation, progressTask) = ProgressBridge.make { [weak self] (update: EpochBuildProgress) in
             self?.phaseMessage = "Segmenting… (\(update.completed) of \(update.total))"
-            self?.segmentingProgress = update.fraction
+            let buildShare = shouldAverage ? 0.70 : 0.75
+            self?.segmentingProgress = progressLower + progressSpan * buildShare * update.fraction
         }
         let buildWorker = Task.detached(priority: .userInitiated) {
             await job.buildEpochs { completed, total in
@@ -916,7 +987,7 @@ final class EpochingViewModel {
         )
         progressContinuation.finish()
         progressTask.cancel()
-        segmentingProgress = nil
+        setProgress(shouldAverage ? 0.70 : 0.75)
 
         guard !Task.isCancelled, isCurrent() else {
             finishApplying()
@@ -957,6 +1028,7 @@ final class EpochingViewModel {
                 statusMessage = "No averages could be computed."
                 return nil
             }
+            setProgress(0.85)
             phaseMessage = "Post-processing…"
             let postWorker = Task.detached(priority: .userInitiated) {
                 averaged.postProcessed(
@@ -993,6 +1065,7 @@ final class EpochingViewModel {
         // Only meaningful when averaging: an exclusion removes a trial from an
         // average, and there is no average to remove it from otherwise.
         trialExclusionResolution = wasAveraged ? resolution : nil
+        setProgress(1)
         return PSAApplyOutcome(
             built: built,
             finalResult: finalResult,
@@ -1007,6 +1080,7 @@ final class EpochingViewModel {
     private func finishApplying() {
         isApplying = false
         phaseMessage = nil
+        segmentingProgress = nil
     }
 
     func applyBuildJob(
@@ -1123,11 +1197,18 @@ final class EpochingViewModel {
         statusMessage = statusText
         isApplying = false
         phaseMessage = nil
+        segmentingProgress = nil
         return resultSignal
     }
 
     func resetForClose() {
         showsSheet = false
+        showsDecisionMatrix = false
+        decisionMatrixIsInSheet = false
+        decisionMatrixNeedsRefresh = false
+        decisionMatrix = nil
+        epochBadChannelSegments.removeAll()
+        epochNonArtifactRejectionReasons.removeAll()
         eventSearchText = ""
         selectedEventCodes.removeAll()
         categoryNames.removeAll()
@@ -1147,6 +1228,12 @@ final class EpochingViewModel {
         statusMessage = nil
         isApplying = false
         phaseMessage = nil
+        segmentingProgress = nil
+        isAnalyzingDecisionMatrixChannelPrior = false
+        decisionMatrixChannelPriorProgress = nil
+        decisionMatrixChannelPriorMessage = nil
+        decisionMatrixFastChannelPriorSignature = nil
+        decisionMatrixFastChannelGoodness.removeAll()
         epochedSignal = nil
         epochSegments = []
         isAveraged = false

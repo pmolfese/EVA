@@ -223,7 +223,8 @@ extension WaveformView {
                             segments: [],
                             kind: .continuous,
                             to: output.url,
-                            preserveSourceFileInfo: false
+                            preserveSourceFileInfo: false,
+                            locationOverride: snapshot.locationOverride
                         )
 
                         var script = processingScript
@@ -242,6 +243,7 @@ extension WaveformView {
                         try? icaPayload?.write(toPackage: output.url)
 
                         let log = EVAProcessLog(header: "EVA split export — \(output.url.lastPathComponent)")
+                        if let locations = snapshot.locationOverride { log.append(locations.auditLine) }
                         for step in script.steps {
                             let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
                             log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
@@ -570,11 +572,12 @@ extension WaveformView {
             return MFFExportSnapshot(
                 signal: epochedSig,
                 segments: epoching.epochSegments,
-                kind: epoching.isAveraged ? .averaged : .epoched
+                kind: epoching.isAveraged ? .averaged : .epoched,
+                locationOverride: recording.locationOverride
             )
         }
 
-        return MFFExportSnapshot(signal: continuousSignal, segments: [], kind: .continuous)
+        return MFFExportSnapshot(signal: continuousSignal, segments: [], kind: .continuous, locationOverride: recording.locationOverride)
     }
 
     func defaultMFFExportName(for kind: MFFExportKind) -> String {

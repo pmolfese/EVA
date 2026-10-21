@@ -154,9 +154,16 @@ extension WaveformView {
                         artifacts: artifacts, summaries: outcome.summaries,
                         excludedChannels: excludedChannels
                     )
-                    return (outcome, metrics)
+                    let summaries = ArtifactCleaningSummary.addingEventEvidence(
+                        to: outcome.summaries,
+                        original: signal,
+                        cleaned: outcome.signal,
+                        artifacts: artifacts,
+                        excludedChannels: excludedChannels
+                    )
+                    return (outcome, metrics, summaries)
                 }
-                let (outcome, metrics) = await withTaskCancellationHandler(
+                let (outcome, metrics, summaries) = await withTaskCancellationHandler(
                     operation: {
                         await worker.value
                     },
@@ -189,7 +196,7 @@ extension WaveformView {
                 // only a caller with a view has them.
                 ArtifactCleaningCore.commit(
                     cleanedSignal: outcome.signal,
-                    summaries: outcome.summaries,
+                    summaries: summaries,
                     metrics: metrics,
                     statusMessage: artifactCleaningSummaryText(
                         outcome.summaries,
@@ -206,6 +213,7 @@ extension WaveformView {
                 artifactCleaningTask = nil
                 if replay.state.isAwaitingDecision {
                     artifactVM.showsCleaningSheet = false
+                    template.showsSheet = false
                     replay.resume(.proceed)
                 }
                 precomputeCleaningPreviews(beforeSignal: signal, afterSignal: outcome.signal)

@@ -79,6 +79,7 @@ struct PipelineSnapshot {
     var waveletIsEnabled: Bool = false
     var artifactCleanedSignal: MFFSignalData?
     var artifactRunMetrics: ArtifactCleanRunMetrics?
+    var artifactCleaningSummaries: [ArtifactCleaningSummary] = []
     var artifactCleaningIsEnabled: Bool = true
     /// The artifact definitions that produced `artifactCleanedSignal`.
     ///
@@ -161,6 +162,7 @@ enum PipelineSnapshotting {
             waveletIsEnabled: wavelet.isEnabled,
             artifactCleanedSignal: artifactVM.cleanedSignal,
             artifactRunMetrics: artifactVM.runMetrics,
+            artifactCleaningSummaries: artifactVM.cleaningSummaries,
             artifactCleaningIsEnabled: artifactVM.cleaningIsEnabled,
             definedArtifacts: template.definedArtifacts,
             epochedSignal: epoching.epochedSignal,
@@ -214,10 +216,17 @@ enum PipelineSnapshotting {
         wavelet.isEnabled = snapshot.waveletIsEnabled
         artifactVM.cleanedSignal = snapshot.artifactCleanedSignal
         artifactVM.runMetrics = snapshot.artifactRunMetrics
+        artifactVM.cleaningSummaries = snapshot.artifactCleaningSummaries
         artifactVM.cleaningIsEnabled = snapshot.artifactCleaningIsEnabled
         template.definedArtifacts = snapshot.definedArtifacts
 
         epoching.epochedSignal = snapshot.epochedSignal
+        // A floating review belongs to one source timeline. A history restore
+        // must never leave that window attached to another node's samples.
+        epoching.showsDecisionMatrix = false
+        epoching.decisionMatrixIsInSheet = false
+        epoching.decisionMatrix = nil
+        epoching.decisionMatrixNeedsRefresh = false
         epoching.epochSegments = snapshot.epochSegments
         epoching.isAveraged = snapshot.isAveraged
         epoching.segmentedEpochSignal = snapshot.segmentedEpochSignal
@@ -233,6 +242,7 @@ enum PipelineSnapshotting {
         store.selection.dragSelectionStartSample = nil
         store.selection.dragSelectionEndSample = nil
         store.selection.topomapSample = nil
+        store.selection.matrixReviewRequest = nil
         epoching.butterflyTopomapRelativeSample = nil
 
         // Artifact detection ran against whichever signal was showing, so its

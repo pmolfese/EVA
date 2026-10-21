@@ -9,11 +9,14 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ChannelsWindowView: View {
     @Environment(\.dismiss) private var dismiss
     private var model: ChannelsWindowModel { .shared }
     @State private var automaticallyRequestedHealthRevision: UUID?
+    @State private var locationImport: ChannelLocationImportRequest?
+    @State private var locationImportError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,10 +49,25 @@ struct ChannelsWindowView: View {
         .navigationTitle("Channels")
         .frame(minWidth: 900, idealWidth: 1080, minHeight: 620, idealHeight: 720)
         .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button("Import Locations…", systemImage: "square.and.arrow.down") {
+                    chooseElectrodeLocations()
+                }
+                .disabled(!model.canImportLocations)
+                .help("Replace EEG locations using a BrainVision .bvef or MFF location XML file")
+            }
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { dismiss() }
             }
         }
+        .sheet(item: $locationImport) { request in
+            ChannelLocationImportView(request: request)
+        }
+        .alert("Unable to Import Locations", isPresented: Binding(
+            get: { locationImportError != nil }, set: { if !$0 { locationImportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { locationImportError = nil }
+        } message: { Text(locationImportError ?? "") }
         .task(id: automaticHealthTaskID) {
             guard let revision = model.activeSignal?.dataRevision,
                   automaticallyRequestedHealthRevision != revision else { return }
@@ -74,6 +92,25 @@ struct ChannelsWindowView: View {
         let recording = model.activeRecordingID?.uuidString ?? "none"
         let revision = model.activeSignal?.dataRevision.uuidString ?? "none"
         return "\(recording)|\(revision)|empty=\(model.healthResults.isEmpty)"
+    }
+
+    private func chooseElectrodeLocations() {
+        guard let id = model.activeRecordingID, let signal = model.activeAcquisitionSignal else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.xml, .data]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = true
+        panel.message = "Choose a .bvef file, MFF coordinates.xml, or MFF sensorLayout.xml to replace this recording's EEG locations."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let montage = try ElectrodeLocationFile.read(from: url)
+            locationImport = ChannelLocationImportRequest(recordingID: id,
+                recordingName: model.activeRecordingName ?? "Recording", signal: signal, montage: montage,
+                reference: model.activeGeometry?.reference, layoutReference: model.activeLayout?.reference)
+        } catch { locationImportError = error.localizedDescription }
     }
 }
 

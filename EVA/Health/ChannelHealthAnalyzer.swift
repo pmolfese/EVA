@@ -290,8 +290,8 @@ nonisolated struct ChannelBaseMetricSettings: Codable, Sendable {
 }
 
 /// Thread-safe completed-count for reporting progress out of a
-/// `DispatchQueue.concurrentPerform` loop, where multiple worker threads
-/// finish iterations in an unpredictable order.
+/// parallel worker loop, where multiple threads finish iterations in an
+/// unpredictable order.
 private nonisolated final class ConcurrentProgressCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -311,6 +311,7 @@ nonisolated enum ChannelHealthAnalyzer {
         base: ChannelBaseMetricSettings = ChannelBaseMetricSettings(),
         spectral: ChannelSpectralConfiguration? = nil,
         ransac: ChannelRansacConfiguration? = nil,
+        includeAdvancedSpectral: Bool = true,
         impedance: ChannelImpedanceSettings = .defaults,
         // Impedance is a stable property of the *recording*, independent of the
         // processing pipeline (filtering, gradient correction, re-referencing),
@@ -403,23 +404,24 @@ nonisolated enum ChannelHealthAnalyzer {
         }
 
         // Spectral-shape metrics (aperiodic slope, muscle band, line harmonics)
-        // always run — they are cheap once the periodogram is computed and need
-        // no cross-channel baseline or layout.
-        let advanced = advancedSpectralMetrics(signal: signal) { fraction in
-            progress?(0.99 + 0.01 * fraction)
+        // are part of the full recording suite. The fast recording prior used
+        // by PSA explicitly omits this full-length Welch pass.
+        if includeAdvancedSpectral {
+            let advanced = advancedSpectralMetrics(signal: signal) { fraction in
+                progress?(0.99 + 0.01 * fraction)
+            }
+            analysis = adding(metricsByChannel: advanced, to: analysis)
         }
-        analysis = adding(metricsByChannel: advanced, to: analysis)
 
         progress?(1)
 
         return analysis
     }
 
-    /// Runs `body` for each index in `0..<count` on GCD's concurrent worker
-    /// threads (`DispatchQueue.concurrentPerform`) instead of a single
-    /// sequential loop, and gathers the per-index results back into an
-    /// index-ordered array — the "gather" side of a map/reduce split, so
-    /// callers never write into a shared `Dictionary` from multiple threads.
+    /// Runs `body` for each index in `0..<count` through EVA's capped GCD
+    /// worker pool and gathers the per-index results back into an index-ordered
+    /// array — the "gather" side of a map/reduce split, so callers never write
+    /// into a shared `Dictionary` from multiple threads.
     /// Safe for any per-index work with no cross-index dependency (each
     /// index reads only already-fully-built inputs and writes only its own
     /// output), which is the shape of every stage below.
@@ -433,7 +435,7 @@ nonisolated enum ChannelHealthAnalyzer {
             storage.deallocate()
         }
         let sendableStorage = HealthUnsafeSendableBuffer(base: storage)
-        DispatchQueue.concurrentPerform(iterations: count) { index in
+        evaConcurrentPerform(iterations: count) { index in
             sendableStorage.base[index] = body(index)
         }
         return (0..<count).map { storage[$0]! }

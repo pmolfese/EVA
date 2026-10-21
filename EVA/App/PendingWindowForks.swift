@@ -51,6 +51,7 @@ final class PendingWindowForks {
         var comparisonGroupID: UUID
         /// Short ID of the node the fork was taken at.
         var forkedFromNode: String
+        var locationOverride: EEGLocationOverride? = nil
     }
 
     private var queue: [Payload] = []

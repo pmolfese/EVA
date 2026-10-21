@@ -1,16 +1,53 @@
 # Importing Data
 
-EVA can open EGI/MagStim `.mff` recordings natively. Through MNE-Python-backed readers, EVA can also read several additional EEG formats.
+EVA opens EGI/MagStim `.mff` recordings and several additional EEG formats through native readers. BioSemi BDF import does not require Python or conversion to EDF.
 
 ## Supported Inputs
 
 - EGI/MagStim `.mff`
 - BrainVision `.vhdr`, `.vmrk`, `.eeg`
 - EDF and EDF+
+- BioSemi BDF and continuous BDF+ (`.bdf`)
 - Persyst `.lay` and `.dat`
 - BESA `.avr` and `.mul`
 
 Some non-MFF formats are not fully tested. See [Supported Formats](../reference/supported-formats.md) for details.
+
+## BioSemi BDF
+
+Open or drop a `.bdf` file directly. EVA reads signed 24-bit samples, applies the
+file's per-channel calibration, and converts voltage channels to microvolts.
+The recorded reference is preserved; rereferencing is an explicit processing step.
+
+- **Triggers:** event codes use the lower 16 bits of Status. Each change to a
+  nonzero code creates an event, including a code present at sample zero and
+  direct changes between nonzero codes. A sustained code creates one event,
+  with its duration retained across data-record boundaries. Upper equipment-status
+  bits do not create experimental events. No automatic inversion or byte shift
+  is applied.
+- **Status and physiological channels:** the full unsigned 24-bit Status values
+  remain available in the physiological pane. Recognizable ECG, EOG, EMG,
+  respiration, and other peripheral channels are kept separate from scalp EEG.
+  Ambiguous `EXG` channels remain in EEG; use the channel-role controls to assign
+  them according to the acquisition wiring. Non-voltage sensors retain their
+  native numeric values; EVA's generic physiological display does not currently
+  carry per-channel unit labels for these sensors or raw Status words.
+- **Mixed sample rates:** EEG and physiological groups each use their highest
+  native rate. Lower-rate analog channels are upsampled with a windowed-sinc
+  interpolator; Status uses sample-and-hold. Native-rate channels are unchanged,
+  and trigger timing is decoded at the Status channel's original rate.
+- **BDF+:** UTF-8 annotations, durations, record clocks, fractional first-sample
+  offsets, and four-digit start dates are supported. Files with actual gaps or
+  overlapping data records are refused rather than joined into a false
+  continuous timeline. A `BDF+D` file whose records are contiguous can open.
+- **Locations:** BDF does not provide electrode coordinates. Use a location
+  sidecar for BioSemi bank labels such as `A1`; EVA does not guess a cap montage
+  from the number of channels. Recognized standard electrode names can use the
+  existing standard-position fallback.
+
+Export the processed recording to MFF as usual. Events, physiological channels,
+`eva.xml`, and an audit note describing BDF trigger decoding are included.
+The original BDF remains unchanged. BDF export is not provided.
 
 ## Sensor Locations
 

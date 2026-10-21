@@ -26,6 +26,10 @@ enum MFFExportWriter {
         icaPayload: ICAReplayPayload? = nil,
         artifactPayload: ArtifactReplayPayload? = nil
     ) async -> Result<URL, Error> {
+        // MFFWriter adds .mff when needed. Use that same destination for every
+        // companion file and the returned URL; otherwise signal export succeeds
+        // but eva.xml is written to a nonexistent, unnormalized directory.
+        let url = normalizedMFFPackageURL(url)
         // Stamp what we are actually writing, so re-opening this package does not
         // have to infer it from the EGI structure. The writer is the one place
         // that knows for certain, and it serves the interactive and headless
@@ -48,23 +52,28 @@ enum MFFExportWriter {
                     pnsSignal: pnsSignal,
                     segments: snapshot.segments,
                     kind: snapshot.kind,
-                    to: url
+                    to: url,
+                    locationOverride: snapshot.locationOverride
                 )
-                try? EVAProcessingScriptXML.write(script, toPackage: url)
+                try EVAProcessingScriptXML.write(script, toPackage: url)
                 // The subject-specific half of the `icaClean` step. `eva.xml`
                 // records that ICA ran and with which portable settings; this
                 // carries the operator and the exclusion decision, which is what
                 // makes the step re-applicable without a refit. See
                 // `ICAReplayPayload`.
-                try? icaPayload?.write(toPackage: url)
+                try icaPayload?.write(toPackage: url)
                 // The drawn-artifact definitions. Same split as ICA: `eva.xml`
                 // records that cleaning happened and with which portable
                 // settings, this carries the subject-specific definitions that
                 // make it re-appliable.
-                try? artifactPayload?.write(toPackage: url)
+                try artifactPayload?.write(toPackage: url)
                 let log = EVAProcessLog(
                     header: "EVA \(EVAProcessingScriptXML.currentAppVersion) export — \(url.lastPathComponent)"
                 )
+                if let locations = snapshot.locationOverride { log.append(locations.auditLine) }
+                if snapshot.signal.signalURL.pathExtension.lowercased() == "bdf" {
+                    log.append("source: BioSemi BDF/BDF+; file=\(snapshot.signal.signalURL.lastPathComponent); triggerMask=0xffff; triggerEvents=each nonzero transition including sample zero; rawStatus=unsigned 24-bit; mixedAnalogRates=upsample to highest per signal group; mixedStatusRate=sample-and-hold")
+                }
                 for step in script.steps {
                     let params = step.parameters.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: ", ")
                     log.append("\(step.operation.rawValue)\(params.isEmpty ? "" : ": \(params)")")
@@ -83,7 +92,9 @@ enum MFFExportWriter {
                 ) {
                     log.append(line)
                 }
-                try? log.write(toPackage: url)
+                // Missing provenance must be an export failure, not a success
+                // with an undocumented processing history.
+                try log.write(toPackage: url)
                 try Task.checkCancellation()
                 return Result<URL, Error>.success(url)
             } catch {

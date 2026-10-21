@@ -131,7 +131,8 @@ kernel void waveletThresholdAccumulate(
     device const uint *levelDelays           [[buffer(3)]],
     device float *energySalience             [[buffer(4)]],
     device uchar *dominantLevels             [[buffer(5)]],
-    constant WaveletAccumulateParameters &p  [[buffer(6)]],
+    device float *signedSalience             [[buffer(6)]],
+    constant WaveletAccumulateParameters &p  [[buffer(7)]],
     uint2 gid                                [[thread_position_in_grid]]
 ) {
     const uint sample = gid.x;
@@ -144,6 +145,7 @@ kernel void waveletThresholdAccumulate(
     const bool inMargin = sample >= p.edgeMarginStart && sample < p.edgeMarginEnd;
 
     float energy = 0.0f;
+    float signedEnergy = 0.0f;
     float dominantMagnitude = 0.0f;
     uchar dominantLevel = 0;
 
@@ -166,6 +168,7 @@ kernel void waveletThresholdAccumulate(
         const float kept = shrink(value, threshold, p.softThreshold);
         const float magnitude = fabs(kept);
         energy += magnitude;
+        signedEnergy += kept;
         if (magnitude > dominantMagnitude) {
             dominantMagnitude = magnitude;
             dominantLevel = uchar(level + 1);
@@ -174,6 +177,7 @@ kernel void waveletThresholdAccumulate(
 
     energySalience[outIndex] = energy;
     dominantLevels[outIndex] = dominantLevel;
+    signedSalience[outIndex] = signedEnergy;
 }
 
 struct WaveletLevelEnergyParameters {

@@ -21,7 +21,12 @@ struct SegmentHealthBand: View {
     let showsMouseOverHealth: Bool
     let qualityLabel: SegmentQualityLabel?
     let onLabel: (SegmentQualityLabel?) -> Void
+    var isExcludedFromAverage = false
+    var hoveredChannelIndex: Int? = nil
+    var decisionControls: ((Int?) -> AnyView)? = nil
+    var reviewRequest: PSAWaveformReviewRequest? = nil
     @State private var showsDetails = false
+    @State private var inspectedChannelIndex: Int?
     /// Set when the popover was opened via right-click/tap rather than hover,
     /// so it stays open while the user reads it or picks a label instead of
     /// closing the instant the pointer drifts off the band.
@@ -36,7 +41,9 @@ struct SegmentHealthBand: View {
                     .frame(width: result.grade == .good ? 0 : 1)
             }
             .overlay(alignment: .bottom) {
-                if let qualityLabel {
+                if isExcludedFromAverage {
+                    Rectangle().fill(Color.red).frame(height: 3)
+                } else if decisionControls == nil, let qualityLabel {
                     Rectangle()
                         .fill(qualityLabel == .good ? Color.green : Color.red)
                         .frame(height: 3)
@@ -48,6 +55,7 @@ struct SegmentHealthBand: View {
                 // interaction modifier the waveform uses (see
                 // `WaveformView.installOptionKeyMonitor`).
                 guard NSEvent.modifierFlags.contains(.option) else { return }
+                inspectedChannelIndex = hoveredChannelIndex
                 pinsDetails = true
                 showsDetails = true
             }
@@ -60,6 +68,7 @@ struct SegmentHealthBand: View {
             }
             .contextMenu {
                 Button("Show Segment Health") {
+                    inspectedChannelIndex = hoveredChannelIndex
                     pinsDetails = true
                     showsDetails = true
                 }
@@ -72,7 +81,17 @@ struct SegmentHealthBand: View {
                 }
             }
             .popover(isPresented: $showsDetails, arrowEdge: .top) {
-                SegmentHealthPopover(result: result, qualityLabel: qualityLabel, onLabel: onLabel)
+                VStack(alignment: .leading, spacing: 0) {
+                    if let decisionControls {
+                        decisionControls(inspectedChannelIndex)
+                        Divider()
+                    }
+                    if isExcludedFromAverage {
+                        Label("Excluded from average in Decision Matrix", systemImage: "xmark.rectangle")
+                            .font(.caption).foregroundStyle(.red).padding(12)
+                    }
+                    SegmentHealthPopover(result: result, qualityLabel: qualityLabel, onLabel: onLabel)
+                }
             }
             .onChange(of: showsMouseOverHealth) { _, isEnabled in
                 if !isEnabled {
@@ -80,16 +99,23 @@ struct SegmentHealthBand: View {
                     pinsDetails = false
                 }
             }
+            .onChange(of: reviewRequest, initial: true) { _, request in
+                guard let request, request.segmentID == result.segmentID, decisionControls != nil else { return }
+                inspectedChannelIndex = request.channelIndex
+                pinsDetails = true
+                showsDetails = true
+            }
             .onChange(of: showsDetails) { _, isShowing in
                 if !isShowing {
                     pinsDetails = false
                 }
             }
             .accessibilityLabel("Segment health \(result.goodPercentage) percent good")
+            .accessibilityValue(isExcludedFromAverage ? "Excluded from average" : "")
     }
 
     private var segmentBackgroundColor: Color {
-        if qualityLabel == .bad {
+        if isExcludedFromAverage || (decisionControls == nil && qualityLabel == .bad) {
             return Color.red.opacity(0.22)
         }
         return result.grade.color.opacity(result.grade.segmentOverlayOpacity)
@@ -458,6 +484,9 @@ struct ChannelHealthBadge: View {
     var onActivate: (() -> Void)? = nil
     @State private var showsDetails = false
     @State private var pinsDetails = false
+    @State private var isBadgeHovered = false
+    @State private var isPopoverHovered = false
+    @State private var dismissalTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -490,14 +519,12 @@ struct ChannelHealthBadge: View {
         )
         .onHover { hovering in
             guard result != nil else { return }
-            if hovering {
-                showsDetails = true
-            } else if !pinsDetails {
-                showsDetails = false
-            }
+            isBadgeHovered = hovering
+            updateHoverVisibility()
         }
         .onTapGesture {
             if result != nil {
+                dismissalTask?.cancel()
                 pinsDetails.toggle()
                 showsDetails = pinsDetails
             } else if !isAnalyzing {
@@ -508,15 +535,43 @@ struct ChannelHealthBadge: View {
         .popover(isPresented: $showsDetails, arrowEdge: .trailing) {
             if let result {
                 ChannelHealthPopover(result: result)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        isPopoverHovered = hovering
+                        updateHoverVisibility()
+                    }
             }
         }
         .onChange(of: showsDetails) { _, isShowing in
             if !isShowing {
                 pinsDetails = false
+                isPopoverHovered = false
+                dismissalTask?.cancel()
             }
+        }
+        .onDisappear {
+            dismissalTask?.cancel()
         }
         .accessibilityLabel(result.map { "Channel health \($0.goodPercentage) percent good" } ?? "Channel health, not yet run, click to run")
     }
+
+    private func updateHoverVisibility() {
+        dismissalTask?.cancel()
+        guard !pinsDetails else { return }
+        if isBadgeHovered || isPopoverHovered {
+            showsDetails = true
+            return
+        }
+        // Allow the pointer to cross the gap between the badge and popover.
+        // Entering either surface cancels dismissal; clicking still pins it.
+        dismissalTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(220))
+            guard !Task.isCancelled, !pinsDetails,
+                  !isBadgeHovered, !isPopoverHovered else { return }
+            showsDetails = false
+        }
+    }
+
 }
 
 private enum ChannelHealthSort: String, CaseIterable, Identifiable {

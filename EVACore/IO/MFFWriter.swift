@@ -78,7 +78,8 @@ nonisolated enum MFFWriter {
         segments: [EpochSegment],
         kind: MFFExportKind,
         to outputURL: URL,
-        preserveSourceFileInfo: Bool = true
+        preserveSourceFileInfo: Bool = true,
+        locationOverride: EEGLocationOverride? = nil
     ) throws {
         let sampleRate = try integerSamplingRate(signal.samplingRate)
         let sampleCount = try validate(signal: signal)
@@ -117,6 +118,8 @@ nonisolated enum MFFWriter {
             try writeEventsXML(signal: signal, blocks: blocks, sampleRate: sampleRate, kind: kind, to: packageURL)
             try writeSensorLayoutXML(signal: signal, to: packageURL)
             copyOriginalFileIfPresent(named: "coordinates.xml", sourceSignalURL: signal.signalURL, to: packageURL)
+            copyOriginalFileIfPresent(named: EEGLocationOverride.importRecordName, sourceSignalURL: signal.signalURL, to: packageURL)
+            try locationOverride?.write(toPackage: packageURL, signal: signal)
             try writeSubjectXML(packageURL: packageURL)
 
             if let pns = pnsSignal,

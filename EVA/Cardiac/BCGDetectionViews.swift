@@ -1603,6 +1603,8 @@ extension WaveformView {
             topography: nil,
             cleaningMethod: .obs
         )
+        template.reviewArtifactID = bcg.definedArtifactID
+        ArtifactReviewEngine.removeSplitClasses(from: &template.definedArtifacts, sourceID: bcg.definedArtifactID)
         if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcg.definedArtifactID }) {
             let previous = template.definedArtifacts[index]
             template.definedArtifacts[index] = artifact

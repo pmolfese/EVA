@@ -69,6 +69,10 @@ final class WaveformSelectionModel {
     /// Set to scroll the channel list to that row (e.g. from a topomap/butterfly
     /// click); `.scrollPosition(id:)` on the vertical channel ScrollView consumes it.
     var scrollToChannelRequest: Int?
+    /// Row under the waveform pointer; used only on a click to synchronize the
+    /// floating Decision Matrix, without moving its sort or viewport.
+    var matrixHoverChannel: Int?
+    var matrixReviewRequest: PSAWaveformReviewRequest?
 }
 
 /// Events panel, event-track caches, and the category-group popover.

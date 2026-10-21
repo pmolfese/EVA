@@ -15,6 +15,246 @@ When defining an artifact, consider:
 - Whether waveform shape, topography, or both should guide matching
 - Whether similar-looking neural activity could be mistaken for artifact
 
+## Review Artifacts
+
+The artifact window has **Define**, **Review**, and **Clean** tabs in one shared
+window. All three use the same window size, keeping the tabs in place as you
+switch. Define retains its existing authoring options. Clean contains the existing
+treatment settings and Apply controls. Both waveform and topography definitions
+use a settings inspector beside a larger preview. The two columns scroll
+independently, keeping the template visible while you adjust settings. Run
+comparison and footer actions remain accessible at the bottom. The bright content
+surfaces adapt to Dark Mode. Clean fills the workspace with its artifact list.
+After detection, switch to Review, or choose
+**Artifacts → Review Artifacts…** between Define Artifact and Clean Artifacts.
+Threshold blinks/eye movements, BCG detections, and ordinary defined artifacts
+share this review workspace.
+
+Click the **?** buttons beside review headings and controls for explanations of
+similarity, rules, decisions, correction windows, class averages, and splitting.
+Examples appear in sets of eighteen, in three columns. With multiple sets, arrow buttons and left/right
+keys go to the previous or next set and select its first example. Click an
+individual tile to inspect it. With only one set, the detail arrows and keys move
+one example at a time. Click a tile or navigation arrow to focus keyboard
+navigation; Space toggles Include/Exclude for the selected example.
+
+Switch **Waveforms / Topomaps** above the exemplar grid to inspect the same
+events as traces or scalp maps. A topomap shows peak global field power within
+the core: the per-channel core mean is removed and the finite mapped good channels
+are average-referenced for display. The eighteen maps share a color scale per
+page. Selecting a map shows an enlarged view, peak time, and scale. Missing sensor
+layout, insufficient finite sensors, flat spatial fields, or incomplete cores show
+**Unavailable**. The switch changes the preview only: ordering, groups, rules,
+and match-confidence scores remain waveform-based (tiles label these **Wave**
+when viewing maps).
+
+The event detail view defaults to **Top 3** impacted channels. Choose **Single**,
+**Top 3**, or **Top 5**, and select **Context** from 0.25 to 2 seconds on each side
+of the padded correction window. Stacked traces share the same time and µV scales.
+Channels are ranked for the selected event by peak-to-peak amplitude inside the
+core, across good recording channels. Bad/interpolated, flat, nonfinite-core, and
+incomplete-core channels are omitted. Each row shows its channel name and core
+amplitude. Class averages overlay definition channels; other channels are marked
+**Event only**. **Overview** selects the channel for thumbnails, similarity cards,
+the class-average preview, and Single mode. Changing display channels or context
+does not change scoring, decisions, or cleaning. Context outside the recording is
+left blank; scroll down to see all traces.
+
+Each example also shows **Waveform similarity**, a **shape-match score**
+from 0–100: positive signed correlation × 100, rounded (r = 0.92 gives 92/100;
+opposite polarity gives 0). It is not a probability that an event is an artifact.
+The detail panel explains the score and how many other reference examples were
+used. One or two reference examples are marked **Limited reference**. Incomplete
+correction windows, unusable waveforms, missing comparison examples, and undefined
+correlations show **Unavailable**. Scores update with the class analysis and do
+not apply decisions or cleaning.
+
+Select an artifact class on the left. **Spatial groups** previews families of
+similar peak-field topographies. **Polarity** chooses whether globally inverted
+fields remain separate (**Signed**) or share one spatial-axis family (**Ignore
+global polarity**). Ocular, saccadic-spike, and corneo-retinal classes default to
+ignoring global polarity; other classes default to signed grouping. Every
+polarity-invariant comparison uses global Pearson correlation to sign-align
+members before forming a centroid, so inverse maps do not cancel. It never takes
+the absolute value of individual sensors. Cards retain and report the number of
+events in each +/− orientation relative to the family's canonical centroid; raw
+maps are unchanged.
+
+Use **Grouping** to choose how the spatial families are formed:
+
+- **Cohesion** lets the score threshold determine the number of groups. **Minimum**
+  requires every member to meet the threshold. **10th percentile** is less likely
+  to split a stable family because of one unusual event; cards still report the
+  minimum, 10th-percentile, and median fit so the tail remains visible.
+- **Target count** requests a fixed number of spatial families. EVA takes a cut
+  from the cached tree, then performs up to eight sign-consistent spherical
+  refinement passes so events can move between the initial branches. **Use
+  suggested K** selects a simple cohesion-gain elbow as a starting point, not a
+  claim that K is biologically correct.
+
+The **Outlier floor** applies in either mode. An event below that permissive fit
+to its assigned centroid remains **Unassigned** instead of being forced into one
+of the requested groups. Amplitude and spatial offset are normalized away. The
+grouping controls describe within-group fit, not artifact confidence; fine
+settings can produce single examples, which do not establish a new artifact type.
+
+Cards default to **Canonical centroids**. Every card uses the same color scale,
+which makes maps with the same shape but different event amplitude directly
+comparable. Projective maps are given a stable display sign—frontal-positive when
+the layout supports it—without changing the raw events. Switch to
+**Representative events** to inspect a real member and its original amplitude and
+sign. The closest pair is reported above the cards, with a **Likely duplicate**
+label at high similarity.
+
+Review uses a macOS-style three-column layout. The artifact source list is on the
+left, maps and waveforms occupy the center canvas, and the right Inspector holds
+the controls. **Essentials** contains the family count, polarity, and comparison
+metric. **Quality & Display**, **Waveform Subgroups**, and **Auto-Selection**
+expand only when needed; collapsing them never resets their values. The collapsed
+Auto-Selection row continues to show its proposed Include/Exclude/Hold counts.
+
+The artifact source list also supports batch treatment changes. Click one item,
+Shift-click a contiguous range, or Command-click/Control-click discontiguous
+items. The Inspector reports the number selected and shows **Mixed** when their
+treatments differ. Choosing a treatment applies it to every highlighted artifact;
+the center canvas continues to inspect the most recently clicked item.
+
+Click one card to browse it. Shift-click selects a contiguous range;
+Control-click or Command-click toggles discontiguous cards. **Merge selected** or
+**Merge pair** combines those families for this preview and enables one waveform
+subgroup analysis across the combined members. **Clear preview merges** restores
+the computed groups. Multi-selection can also move the union into a new class,
+an existing sibling, or between the threshold **Eye Blinks** and **Eye Movements**
+categories. A move is persistent: events leave the source class, carry their
+Include/Hold/Exclude choices and detector origin, and are rebuilt into the
+destination's independent reference and treatment.
+
+You can also drag a spatial card anywhere over the left artifact sidebar. EVA
+creates a new top-level artifact named from the source and family, moves the
+family out of the source, and keeps the source selected while its remaining
+families rebuild and re-sort.
+If the dragged card is part of a multi-selection, all selected families move
+together. The new artifact starts with Standard OBS, but its Treatment menu is
+independent. Its spatial review starts at **Force count: 1** so the family is not
+immediately split again; raise the count if you want to inspect substructure.
+Detector provenance is retained internally even though the entry is not indented,
+preventing the same events from being duplicated during refresh.
+
+Missing layouts, flat maps, incomplete windows, and insufficient shared sensor
+coverage leave events **Unassigned**. Click **All** to clear the preview filter.
+Grouping, selection, and preview merges do not by themselves change decisions or
+cleaning. Building runs in the background; feature extraction uses bounded
+batches and up to eight independent hierarchy branches can build concurrently.
+EVA builds the branches needed for your requested family count or cohesion first,
+so those families can appear before the rest of the hierarchy finishes. The
+remaining branches complete in the background. Changing the requested cut during
+that interval may wait for the full tree. The suggested count becomes available
+when the tree is complete. Cohesion cuts reuse the cached tree without rescanning
+the recording. The session cache is
+refreshed when the signal, definition, or eligible sensor mask changes.
+Completed analyses, spatial trees, family cuts, and waveform subgroup results are
+also retained in a bounded workspace cache, so returning to a recently reviewed
+artifact reuses the results immediately. A first visit or changed input still
+requires background processing. Beside the family-count arrows, **1**, **2**, and
+**3** buttons quickly set the requested count; counts above the usable event count
+are disabled.
+
+When global polarity is ignored, **Comparison** offers five preview costs:
+
+- **Global Pearson** is the default whole-map `|r|` comparison.
+- **Local Pearson** averages signed correlations over overlapping physical
+  electrode neighborhoods after resolving one whole-map orientation. A region
+  cannot reverse independently to improve its score.
+- **Spearman** compares electrode ranks, reducing the influence of isolated
+  extreme amplitudes while giving up some relative-magnitude information.
+- **Robust composite** blends global Pearson, local Pearson, Spearman, and a
+  correlation trimmed by the largest sensor residuals.
+- **Information composite** blends electrode-wise Pearson with normalized mutual
+  information, Hellinger histogram affinity, and symmetric correlation ratio.
+  It is experimental because histogram estimates can be unstable for small
+  montages; the Pearson component prevents a matching value distribution at the
+  wrong scalp locations from receiving a perfect score.
+
+These scores share the same 0.50–0.98 **Broader / Finer** control, but their
+numeric values are not interchangeable. Compare the resulting maps visually
+rather than treating one threshold as equivalent across costs. Signed polarity
+always uses ordinary Pearson correlation.
+
+Select one spatial group—or preview-merge several—to reveal **Waveform subgroups**
+beneath it. These compare aligned temporal shapes only inside that spatial family.
+An unmerged multi-selection intentionally pauses waveform grouping because it does
+not yet define one centroid family. Use the second
+**Broader / Finer** slider, then click a **Shape** card to filter the examples
+further. **Whole spatial family** clears just the waveform filter; **All** clears
+both filters. Blue shows the normalized aligned subgroup mean and gray shows a
+representative event on the labeled preview channel. The channel list and maximum
+alignment shift are shown below the cards.
+
+**Waveform polarity** controls what happens to the retained spatial orientation.
+**Preserve polarity** clusters the recorded waveform signs as-is. **Orient to
+spatial family** multiplies an event's complete multichannel profile by its one
+global +/− orientation before temporal clustering. This lets globally inverted
+events share a shape subgroup without changing internal waveform lobes, relative
+channel polarity, raw data, decisions, or cleaning. Polarity-invariant spatial
+families default to this orientation step; signed spatial families preserve
+waveform polarity.
+
+The analysis uses up to five consistently selected definition channels with the
+strongest typical energy in that family. Amplitude is normalized, relative
+channel strengths and polarity are retained, and shifts are limited to 20 ms
+without time stretching. Duration/shape differences can therefore form separate
+subgroups. Missing, flat, incomplete, or nonfinite waveforms stay **Waveform
+unassigned** within the spatial family. Subgroup cohesion includes the same
+members used to form the group; it is not independent confidence. All subgroup
+browsing is preview-only and leaves the original match scores, review decisions,
+and cleaning unchanged. Subgroup features/trees are cached per family, and
+building or switching families supports cancellation in the background.
+
+Choose **Waveform bands** to return to the existing similarity bands. They show close matches,
+shape variations, and low-similarity examples relative to its average. Select an
+example to compare its waveform and average, inspect its measured span/core/taper
+window, and include, exclude, or hold it. Left/right arrows navigate examples
+when the event area has keyboard focus; Space toggles include/exclude. Examples
+without explicit review choices retain their existing inclusion and are counted
+as unreviewed.
+
+**Auto-selection** previews decisions from correlation thresholds and optional
+peak, duration, and window limits. Apply rules to commit the preview. Middle
+scores remain on hold; hold and excluded events are omitted from cleaning.
+**Keep manual decisions** is enabled by default, and **Undo rules** preserves
+manual edits made after the automatic pass. These thresholds are adjustable
+review criteria, not a guarantee that an event is artifact or brain activity.
+
+Spatial cards are **families inside the currently selected artifact**, not new
+artifact definitions and not additional cleaning passes. Waveform-only hand
+definitions therefore open on Waveform bands first. Topography-defined and
+threshold ocular artifacts open on Spatial groups. For ocular review, **Force
+count** starts at two families; set it to one when all matches should be treated
+as one blink family, or raise it when blinks and lateral movements need separate
+inspection. The outlier floor may still leave genuinely incompatible maps
+unassigned. **Global Pearson** with **Ignore global polarity** is the default
+ocular comparison, so matching whole-scalp patterns can share a family even when
+their signs are reversed. **LPA+** offers an alternative local comparison;
+**LPC+** explores inverse-contrast structure, and **crM** tolerates nonlinear
+amplitude relationships.
+These AFNI-inspired scores compare fixed EEG sensor maps rather than registering
+or resampling images.
+
+Choose a similarity band, waveform subgroup, or one or more spatial cards and
+select **Move selection to class…**. Create a separately named artifact with its
+own average, window, and treatment, or choose an existing sibling class or the
+other threshold ocular category—for example, move lateral eye-movement families
+out of Eye Blinks into Eye Movements. The source no longer contains those events.
+The last event cannot be moved out of a class. **Rebuild from included** updates a
+class's reference explicitly; changing inclusion alone keeps the reference
+stable. Each class is then available in Clean Artifacts for its own treatment
+and options. Reviewed BCG PCA-S uses the included artifact events as beat
+anchors.
+
+Rerunning a detector with changed inputs resets its review and split classes;
+identical threshold refreshes preserve them. Existing continuous MAAC tools
+retain their dedicated review workflows.
+
 ## Preview Cleaning
 
 EVA includes several cleaning approaches, including regression, OBS, SSP/PCA, and averaging-based methods. Preview the result before applying a cleaning step.

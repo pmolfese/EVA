@@ -72,9 +72,17 @@ enum PipelineInvalidation {
         selection: WaveformSelectionModel
     ) {
         epoching.epochedSignal = nil
+        epoching.showsDecisionMatrix = false
+        epoching.decisionMatrixIsInSheet = false
+        epoching.decisionMatrix = nil
+        epoching.decisionMatrixNeedsRefresh = false
         epoching.epochSegments = []
         epoching.segmentedEpochSignal = nil
         epoching.segmentedEpochSegments = []
+        epoching.epochBadChannelSegments.removeAll()
+        epoching.epochNonArtifactRejectionReasons.removeAll()
+        epoching.decisionMatrixFastChannelPriorSignature = nil
+        epoching.decisionMatrixFastChannelGoodness.removeAll()
         epoching.isAveraged = false
         epoching.butterflyTopomapRelativeSample = nil
         epoching.psaExclusionSummary = PSAExclusionSummary()
@@ -90,6 +98,8 @@ enum PipelineInvalidation {
         selection.dragSelectionStartSample = nil
         selection.dragSelectionEndSample = nil
         selection.topomapSample = nil
+        selection.matrixHoverChannel = nil
+        selection.matrixReviewRequest = nil
 
         segHealth.clearAnalysis(hide: true, clearLabels: true)
     }

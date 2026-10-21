@@ -814,7 +814,7 @@ struct ArtifactPCASOptionsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private var settings: BCGSurrogateSettings {
-        artifact.pcaSSettings ?? .default
+        artifact.effectivePCASSettings
     }
 
     private var selectedBeatCount: Int {
@@ -845,7 +845,7 @@ struct ArtifactPCASOptionsSheet: View {
         Binding {
             settings.beatSource
         } set: { source in
-            guard source != .rWaves || rWaveCount > 0 else { return }
+            guard source != .rWaves || (rWaveCount > 0 && !artifact.hasReviewedEventSelection) else { return }
             var updated = settings
             updated.beatSource = source
             if source == .rWaves, updated.patternSearch == .reviewedExemplar {
@@ -927,7 +927,11 @@ struct ArtifactPCASOptionsSheet: View {
                                      ? "Detected R-waves (\(rWaveCount))"
                                      : "Detected R-waves (run ECG detection first)")
                                     .tag(BCGSurrogateBeatSource.rWaves)
-                                    .disabled(rWaveCount == 0)
+                                    .disabled(rWaveCount == 0 || artifact.hasReviewedEventSelection)
+                            }
+                            if artifact.hasReviewedEventSelection {
+                                Text("Reviewed classes use their included artifact events as beat anchors.")
+                                    .font(.caption2).foregroundStyle(.secondary)
                             }
 
                             if settings.beatSource == .rWaves {
@@ -1568,6 +1572,13 @@ struct ArtifactOBSOptionsSheet: View {
 
                 obsStrategyControls
             } else {
+                Stepper(value: Binding(
+                    get: { artifact.sspPCAComponentCount ?? 2 },
+                    set: { artifact.sspPCAComponentCount = $0; onSettingsChange() }
+                ), in: 1...max(2, min(DefinedArtifact.maximumOBSComponentCount, signal.numberOfChannels - 1))) {
+                    Text("Spatial components: \(artifact.sspPCAComponentCount ?? 2)")
+                        .font(.callout.weight(.medium))
+                }
                 Text("SSP/PCA uses the edge settings below to fade the spatial projection in and out around each event.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

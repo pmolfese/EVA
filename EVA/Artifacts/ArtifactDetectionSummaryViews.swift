@@ -41,6 +41,80 @@ nonisolated enum ArtifactDetectorEventMerger {
     }
 }
 
+/// Converts threshold candidates to ordinary event-windowed cleaning definitions.
+/// Updates in place so re-detection preserves treatment choices and replay IDs.
+nonisolated enum ThresholdOcularArtifactBridge {
+    @discardableResult
+    static func synchronize(
+        artifacts: inout [DefinedArtifact],
+        events: [MFFEvent],
+        blinkConfiguration: EyeArtifactThresholdConfiguration,
+        movementConfiguration: EyeArtifactThresholdConfiguration,
+        candidates detailedCandidates: [ThresholdOcularCandidate]? = nil,
+        sourceRevision: UUID? = nil
+    ) -> Set<UUID> {
+        var changed = Set<UUID>()
+        for kind in [EyeArtifactKind.blink, .movement] {
+            let candidates = events.filter {
+                $0.sourceFile == EyeArtifactThresholdDetector.sourceFile && $0.code == kind.eventCode
+            }.sorted {
+                $0.beginTimeSeconds == $1.beginTimeSeconds
+                    ? $0.id < $1.id : $0.beginTimeSeconds < $1.beginTimeSeconds
+            }
+            let configuration = kind == .blink ? blinkConfiguration : movementConfiguration
+            let details = detailedCandidates?.filter { $0.event.code == kind.eventCode }
+                .sorted { $0.event.beginTimeSeconds < $1.event.beginTimeSeconds }
+            if let existingIndex = artifacts.firstIndex(where: { $0.thresholdOcularKind == kind }) {
+                let previous = artifacts[existingIndex]
+                let sameDetection = (previous.thresholdOcularCandidates?.map(\.event) ?? previous.events) == candidates
+                    && previous.thresholdOcularConfiguration == configuration
+                    && (sourceRevision == nil || previous.thresholdOcularSourceRevision == sourceRevision)
+                let excluded = sameDetection ? (previous.thresholdOcularExcludedEventIDs ?? []) : []
+                let accepted = sameDetection && previous.reviewState != nil
+                    ? previous.reviewState!.candidates.filter {
+                        ArtifactReviewEngine.choice(for: $0.id, artifact: previous).decision == .include
+                    }
+                    : candidates.filter { !excluded.contains($0.id) }
+                if !sameDetection {
+                    ArtifactReviewEngine.removeSplitClasses(from: &artifacts, sourceID: previous.id)
+                }
+                guard let index = artifacts.firstIndex(where: { $0.id == previous.id }) else { continue }
+                guard previous.events != accepted || !sameDetection
+                    || previous.thresholdOcularCandidates != details else { continue }
+                artifacts[index].events = accepted
+                if !sameDetection { artifacts[index].reviewState = nil }
+                artifacts[index].thresholdOcularCandidates = details
+                artifacts[index].thresholdOcularExcludedEventIDs = excluded
+                artifacts[index].thresholdOcularSourceRevision = sourceRevision
+                artifacts[index].thresholdOcularConfiguration = configuration
+                artifacts[index].average = nil
+                artifacts[index].topography = nil
+                changed.insert(artifacts[index].id)
+            } else if !candidates.isEmpty {
+                let artifact = DefinedArtifact(
+                    type: .ocular,
+                    name: kind == .blink ? "Eye Blinks" : "Eye Movements",
+                    eventCode: kind.eventCode,
+                    events: candidates,
+                    selectedChannelIndices: [],
+                    windowSizeSeconds: 0.50,
+                    average: nil,
+                    topography: nil,
+                    cleaningMethod: .doNothing,
+                    thresholdOcularKind: kind,
+                    thresholdOcularConfiguration: configuration,
+                    thresholdOcularCandidates: details,
+                    thresholdOcularExcludedEventIDs: [],
+                    thresholdOcularSourceRevision: sourceRevision
+                )
+                artifacts.append(artifact)
+                changed.insert(artifact.id)
+            }
+        }
+        return changed
+    }
+}
+
 extension WaveformView {
     // MARK: - Artifact detection
 
@@ -142,7 +216,7 @@ extension WaveformView {
         var sources: [EEGArtifactRejectionSource] = []
         var definedEvents = Set<MFFEvent>()
 
-        for artifact in template.definedArtifacts where !artifact.events.isEmpty {
+        for artifact in template.definedArtifacts where !artifact.events.isEmpty && !ArtifactReviewEngine.isThresholdFamily(artifact) {
             for event in artifact.events {
                 definedEvents.insert(event)
             }
@@ -196,12 +270,13 @@ extension WaveformView {
     }
 
     @MainActor
-    func updateArtifactEvents(for signal: MFFSignalData) async {
+    func updateArtifactEvents(for signal: MFFSignalData, cleaningSignal: MFFSignalData) async {
         guard detectsEyeBlinkArtifacts || detectsEyeMovementArtifacts || ecg.isEnabled else {
             artifactVM.events = ArtifactDetectorEventMerger.replacingAutomaticEvents(
                 in: artifactVM.events,
                 with: []
             )
+            synchronizeThresholdOcularArtifacts(candidates: [], sourceRevision: cleaningSignal.dataRevision)
             artifactVM.statusMessage = nil
             artifactVM.isDetecting = false
             return
@@ -213,6 +288,7 @@ extension WaveformView {
                 in: artifactVM.events,
                 with: []
             )
+            synchronizeThresholdOcularArtifacts(candidates: [], sourceRevision: cleaningSignal.dataRevision)
             artifactVM.statusMessage = "Choose a PNS channel or EEG proxy channel for ECG detection."
             artifactVM.isDetecting = false
             return
@@ -221,6 +297,10 @@ extension WaveformView {
         artifactVM.isDetecting = true
         artifactVM.statusMessage = nil
 
+        let cleaningRevision = cleaningSignal.dataRevision
+        let cleaningData = cleaningSignal.data
+        let cleaningRate = cleaningSignal.samplingRate
+        let cleaningDuration = cleaningSignal.duration
         let sourceData = signal.data
         let samplingRate = signal.samplingRate
         let duration = signal.duration
@@ -242,48 +322,47 @@ extension WaveformView {
         // path cannot silently skip clearing the spinner. See that type for the
         // bug this replaced.
         let outcome = await artifactVM.detectionRunner.run("artifactDetection") {
-            await withTaskGroup(of: [MFFEvent].self) { group in
-            if detectBlinks {
-                group.addTask(priority: .userInitiated) {
-                    guard !Task.isCancelled else { return [] }
-                    return EyeArtifactThresholdDetector.detect(
-                        kind: .blink,
-                        channels: sourceData,
-                        samplingRate: samplingRate,
-                        duration: duration,
-                        sensorLayoutName: sensorLayoutName,
-                        configuration: blinkConfig
-                    )
+            await withTaskGroup(of: ([MFFEvent], [ThresholdOcularCandidate]).self) { group in
+                // Display markers describe the current signal. Cleaning anchors
+                // describe the pre-cleaning input so Apply cannot erase its own events.
+                for kind in [EyeArtifactKind.blink, .movement] {
+                    guard kind == .blink ? detectBlinks : detectMovements else { continue }
+                    let config = kind == .blink ? blinkConfig : movementConfig
+                    group.addTask(priority: .userInitiated) {
+                        guard !Task.isCancelled else { return ([], []) }
+                        return (EyeArtifactThresholdDetector.detect(
+                            kind: kind, channels: sourceData, samplingRate: samplingRate,
+                            duration: duration, sensorLayoutName: sensorLayoutName,
+                            configuration: config), [])
+                    }
+                    group.addTask(priority: .userInitiated) {
+                        guard !Task.isCancelled else { return ([], []) }
+                        return ([], EyeArtifactThresholdDetector.detectCandidates(
+                            kind: kind, channels: cleaningData, samplingRate: cleaningRate,
+                            duration: cleaningDuration, sensorLayoutName: sensorLayoutName,
+                            configuration: config))
+                    }
                 }
-            }
-            if detectMovements {
-                group.addTask(priority: .userInitiated) {
-                    guard !Task.isCancelled else { return [] }
-                    return EyeArtifactThresholdDetector.detect(
-                        kind: .movement,
-                        channels: sourceData,
-                        samplingRate: samplingRate,
-                        duration: duration,
-                        sensorLayoutName: sensorLayoutName,
-                        configuration: movementConfig
-                    )
+                if detectECG, !ecgSources.isEmpty {
+                    group.addTask(priority: .userInitiated) {
+                        guard !Task.isCancelled else { return ([], []) }
+                        return (RWaveDetector.detect(sources: ecgSources, configuration: ecgConfiguration), [])
+                    }
                 }
-            }
-            if detectECG, !ecgSources.isEmpty {
-                group.addTask(priority: .userInitiated) {
-                    guard !Task.isCancelled else { return [] }
-                    return RWaveDetector.detect(sources: ecgSources, configuration: ecgConfiguration)
-                }
-            }
                 var events: [MFFEvent] = []
-                for await batch in group { events += batch }
-                return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+                var cleaningCandidates: [ThresholdOcularCandidate] = []
+                for await (markers, candidates) in group {
+                    events += markers
+                    cleaningCandidates += candidates
+                }
+                return (events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }, cleaningCandidates)
             }
         }
 
         switch outcome {
-        case .completed(let detectedEvents):
+        case .completed(let (detectedEvents, cleaningCandidates)):
             artifactVM.isDetecting = false
+            synchronizeThresholdOcularArtifacts(candidates: cleaningCandidates, sourceRevision: cleaningRevision)
             artifactVM.events = ArtifactDetectorEventMerger.replacingAutomaticEvents(
                 in: artifactVM.events,
                 with: detectedEvents
@@ -304,6 +383,30 @@ extension WaveformView {
             // A newer run owns `events` and `isDetecting` now. Touching either
             // here is what the original bug did.
             break
+        }
+    }
+
+    func synchronizeThresholdOcularArtifacts(candidates: [ThresholdOcularCandidate], sourceRevision: UUID) {
+        let previousIDs = Set(template.definedArtifacts.map(\.id))
+        let changed = ThresholdOcularArtifactBridge.synchronize(
+            artifacts: &template.definedArtifacts,
+            events: candidates.map(\.event),
+            blinkConfiguration: artifactVM.blinkThresholdConfig,
+            movementConfiguration: artifactVM.movementThresholdConfig,
+            candidates: candidates,
+            sourceRevision: sourceRevision
+        )
+        guard !changed.isEmpty else { return }
+        for id in changed { invalidateOBSVarianceCache(for: id) }
+        template.cleaningPreviewCache.removeAll()
+        // Merely discovering a mark-only artifact does not invalidate another
+        // cleaner. Changing a definition that participated in correction does.
+        let removedClasses = previousIDs.subtracting(template.definedArtifacts.map(\.id))
+        if !removedClasses.isEmpty || template.definedArtifacts.contains(where: {
+            changed.contains($0.id) && ($0.cleaningMethod.removesArtifact || $0.appliedMethod != nil)
+        }) {
+            artifactCleaningTask?.cancel()
+            clearAppliedArtifactCleaning()
         }
     }
 

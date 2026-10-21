@@ -64,6 +64,8 @@ numeric data.
 - EVA files:
   - `EVA/ICA/ICAArtifactDetector.swift`
   - `EVA/IO/SignalImportReader.swift`
+  - `EVACore/IO/EDFAnnotationDecoder.swift`
+  - `EVACore/Channels/BVEFMontage.swift`
 - Upstream project: https://github.com/mne-tools/mne-python
 - Upstream license: BSD 3-Clause
 - Notice: retain the BSD 3-Clause attribution and disclaimer when redistributing

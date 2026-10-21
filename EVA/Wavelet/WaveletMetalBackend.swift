@@ -59,6 +59,7 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
     struct AccumulateResult {
         /// `[channel][sample]`
         var energySalience: [[Float]]
+        var signedSalience: [[Float]]
         var dominantLevels: [[UInt8]]
         /// `[channel][level]`
         var totalEnergyByLevel: [[Double]]
@@ -334,6 +335,10 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
                 length: planeCount * MemoryLayout<UInt8>.stride,
                 options: .storageModeShared
             ),
+            let signedSalienceBuffer = device.makeBuffer(
+                length: planeCount * MemoryLayout<Float>.stride,
+                options: .storageModeShared
+            ),
             let totalEnergyBuffer = device.makeBuffer(
                 length: levelCount * channelCount * MemoryLayout<Float>.stride,
                 options: .storageModeShared
@@ -366,7 +371,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         accumulateEncoder.setBuffer(delayBuffer, offset: 0, index: 3)
         accumulateEncoder.setBuffer(salienceBuffer, offset: 0, index: 4)
         accumulateEncoder.setBuffer(dominantBuffer, offset: 0, index: 5)
-        accumulateEncoder.setBytes(&accumulateParameters, length: MemoryLayout<AccumulateParameters>.stride, index: 6)
+        accumulateEncoder.setBuffer(signedSalienceBuffer, offset: 0, index: 6)
+        accumulateEncoder.setBytes(&accumulateParameters, length: MemoryLayout<AccumulateParameters>.stride, index: 7)
         dispatch2D(accumulateEncoder, pipeline: accumulatePipeline, width: sampleCount, height: channelCount)
         accumulateEncoder.endEncoding()
 
@@ -387,15 +393,18 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         guard commandBuffer.error == nil else { return nil }
 
         let saliencePointer = salienceBuffer.contents().bindMemory(to: Float.self, capacity: planeCount)
+        let signedSaliencePointer = signedSalienceBuffer.contents().bindMemory(to: Float.self, capacity: planeCount)
         let dominantPointer = dominantBuffer.contents().bindMemory(to: UInt8.self, capacity: planeCount)
         let totalPointer = totalEnergyBuffer.contents().bindMemory(to: Float.self, capacity: levelCount * channelCount)
         let artifactPointer = artifactEnergyBuffer.contents().bindMemory(to: Float.self, capacity: levelCount * channelCount)
 
         var salience: [[Float]] = []
+        var signedSalience: [[Float]] = []
         var dominant: [[UInt8]] = []
         var totals: [[Double]] = []
         var artifacts: [[Double]] = []
         salience.reserveCapacity(channelCount)
+        signedSalience.reserveCapacity(channelCount)
         dominant.reserveCapacity(channelCount)
         totals.reserveCapacity(channelCount)
         artifacts.reserveCapacity(channelCount)
@@ -403,6 +412,7 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         for channel in 0..<channelCount {
             let start = channel * sampleCount
             salience.append(Array(UnsafeBufferPointer(start: saliencePointer + start, count: sampleCount)))
+            signedSalience.append(Array(UnsafeBufferPointer(start: signedSaliencePointer + start, count: sampleCount)))
             dominant.append(Array(UnsafeBufferPointer(start: dominantPointer + start, count: sampleCount)))
             totals.append((0..<levelCount).map { Double(totalPointer[$0 * channelCount + channel]) })
             artifacts.append((0..<levelCount).map { Double(artifactPointer[$0 * channelCount + channel]) })
@@ -410,6 +420,7 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
 
         return AccumulateResult(
             energySalience: salience,
+            signedSalience: signedSalience,
             dominantLevels: dominant,
             totalEnergyByLevel: totals,
             artifactEnergyByLevel: artifacts

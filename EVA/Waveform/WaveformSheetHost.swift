@@ -192,10 +192,11 @@ extension WaveformView {
             psaSheet(for: continuousSignal)
 
         case .artifactTemplate:
-            artifactTemplateSheet(for: continuousSignal)
+            artifactTemplateSheet(for: continuousSignal, reviewSignal: cleaningBase, broadbandSignal: base)
 
         case .artifactCleaning:
-            artifactCleaningSheet(for: cleaningBase, broadbandSignal: base)
+            artifactTemplateSheet(for: continuousSignal, reviewSignal: cleaningBase, broadbandSignal: base)
+                .onAppear { template.workspaceTab = .clean }
 
         case .saccadicSpike:
             saccadicSpikeSheet(for: continuousSignal)
