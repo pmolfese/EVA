@@ -909,6 +909,7 @@ nonisolated struct PSABuildJob: Sendable {
                 perCategory[category, default: .init()].reasons[reason, default: 0] += 1
             }
         }
+        let acquisitionGaps = signal.acquisitionSkipRanges
         let artifactRejectionGroups = artifactEventsForRejectionByLabel.isEmpty
             ? (artifactEventsForRejection.isEmpty ? [:] : [artifactRejectionLabel: artifactEventsForRejection])
             : artifactEventsForRejectionByLabel
@@ -969,6 +970,15 @@ nonisolated struct PSABuildJob: Sendable {
             guard startSample >= 0, endSample <= sampleCount else {
                 skippedOutOfBounds += 1
                 debit(categories, "Out of bounds")
+                continue
+            }
+            // Missing acquisition samples cannot be recovered by interpolation
+            // or a manual keep. Never build a trial across them, even when
+            // artifact rejection is off or decisions are deferred to review.
+            if acquisitionGaps.contains(where: { $0.overlaps(startSample..<endSample) }) {
+                skippedArtifacts += 1
+                skippedArtifactBreakdown["Acquisition gap", default: 0] += 1
+                debit(categories, "Acquisition gap")
                 continue
             }
             if skipIfContainsArtifact, !artifactRejectionGroups.isEmpty {

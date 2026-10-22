@@ -109,7 +109,7 @@ nonisolated enum MFFWriter {
                 sampleRate: sampleRate,
                 to: packageURL
             )
-            try writeEpochsXML(blocks: blocks, sampleRate: sampleRate, to: packageURL)
+            try writeEpochsXML(blocks: blocks, sampleRate: sampleRate, preserveTimeline: kind == .continuous, to: packageURL)
             // Segmented / averaged exports need categories.xml so EVA (and other
             // MFF readers) recognize the epoch/category structure on reopen.
             if kind != .continuous, !segments.isEmpty {
@@ -126,7 +126,9 @@ nonisolated enum MFFWriter {
                pns.numberOfChannels > 0,
                let firstChannel = pns.data.first, !firstChannel.isEmpty {
                 let pnsSampleRate = try integerSamplingRate(pns.samplingRate)
-                try writePNSBinary(pns: pns, sampleRate: pnsSampleRate, to: packageURL)
+                let gapEvents = signal.events.filter { $0.code == "BAD_ACQ_SKIP" }
+                try writePNSBinary(pns: gapEvents.isEmpty ? pns : pns.replacingEvents(gapEvents),
+                                   sampleRate: pnsSampleRate, to: packageURL)
                 try writePNSInfoXML(pns: pns, to: packageURL)
                 try writePNSSetXML(pns: pns, to: packageURL)
             }
@@ -152,32 +154,9 @@ nonisolated enum MFFWriter {
             throw MFFWriterError.inconsistentChannelLengths
         }
 
-        var data = Data()
-        let blockSize = channelCount * sampleCount * MemoryLayout<Float>.size
-        let headerSize = 20 + channelCount * 8
-        appendInt32(1, to: &data)
-        appendInt32(headerSize, to: &data)
-        appendInt32(blockSize, to: &data)
-        appendInt32(channelCount, to: &data)
-
-        for channel in 0..<channelCount {
-            appendInt32(channel * sampleCount * MemoryLayout<Float>.size, to: &data)
-        }
-
-        let rateDepth = (sampleRate << 8) + 32
-        for _ in 0..<channelCount {
-            appendInt32(rateDepth, to: &data)
-        }
-
-        appendInt32(0, to: &data)
-
-        for channel in 0..<channelCount {
-            for sample in 0..<sampleCount {
-                appendFloat32(pns.data[channel][sample], to: &data)
-            }
-        }
-
-        try data.write(to: packageURL.appendingPathComponent("signal2.bin"), options: .atomic)
+        let blocks = try exportBlocks(for: pns, sampleCount: sampleCount, segments: [], kind: .continuous)
+        try writeSignalBinary(blocks: blocks.map { $0.withSignalData(pns.data) }, channelCount: channelCount, sampleRate: sampleRate,
+                              fileName: "signal2.bin", to: packageURL)
     }
 
     private static func writePNSInfoXML(pns: MFFSignalData, to packageURL: URL) throws {
@@ -303,17 +282,19 @@ nonisolated enum MFFWriter {
         kind: MFFExportKind
     ) throws -> [ExportBlock] {
         guard kind != .continuous, !segments.isEmpty else {
-            return [
+            let ranges = MFFSignalData.recordedRanges(sampleCount: sampleCount, excluding: signal.acquisitionSkipRanges)
+            guard !ranges.isEmpty else { throw MFFWriterError.emptySignal }
+            return ranges.map { range in
                 ExportBlock(
-                    startSample: 0,
-                    endSample: sampleCount - 1,
+                    startSample: range.lowerBound,
+                    endSample: range.upperBound - 1,
                     stimulusOffsetSamples: nil,
                     category: "Continuous",
                     sourceCode: "Continuous",
-                    sourceTimeSeconds: 0,
+                    sourceTimeSeconds: Double(range.lowerBound) / signal.samplingRate,
                     contributingEpochCount: 1
                 )
-            ]
+            }
         }
 
         return try segments.sorted { $0.startSample < $1.startSample }.map { segment in
@@ -424,6 +405,7 @@ nonisolated enum MFFWriter {
         blocks: [ExportBlock],
         channelCount: Int,
         sampleRate: Int,
+        fileName: String = "signal1.bin",
         to packageURL: URL
     ) throws {
         var data = Data()
@@ -454,15 +436,17 @@ nonisolated enum MFFWriter {
             }
         }
 
-        try data.write(to: packageURL.appendingPathComponent("signal1.bin"), options: .atomic)
+        try data.write(to: packageURL.appendingPathComponent(fileName), options: .atomic)
     }
 
-    private static func writeEpochsXML(blocks: [ExportBlock], sampleRate: Int, to packageURL: URL) throws {
+    private static func writeEpochsXML(blocks: [ExportBlock], sampleRate: Int, preserveTimeline: Bool, to packageURL: URL) throws {
         var body = ""
         var cursorMicroseconds = 0
         for (index, block) in blocks.enumerated() {
             let duration = Int((Double(block.sampleCount) / Double(sampleRate) * 1_000_000).rounded())
-            let begin = cursorMicroseconds
+            let begin = preserveTimeline
+                ? Int((Double(block.startSample) / Double(sampleRate) * 1_000_000).rounded())
+                : cursorMicroseconds
             let end = begin + duration
             body += """
   <epoch>

@@ -134,6 +134,9 @@ nonisolated struct EventAnchorRuleSet: Sendable, Equatable {
     /// fact, and only EVA's reading of which part of the event it names is the
     /// user's to set.
     func applied(to event: MFFEvent) -> MFFEvent {
+        // An acquisition boundary is measured file structure, not a stimulus
+        // whose onset/peak convention can be reinterpreted by a wildcard rule.
+        guard event.code != "BAD_ACQ_SKIP" else { return event }
         guard let rule = rule(for: event) else { return event }
         // A file-recorded duration is evidence and outranks the rule's guess.
         let duration = event.durationSeconds ?? rule.assumedDurationSeconds

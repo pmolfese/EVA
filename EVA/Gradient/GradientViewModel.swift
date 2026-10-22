@@ -171,6 +171,43 @@ final class GradientViewModel {
     /// rail's pill by `GradientRunGrade`. `nil` before a run, or when the
     /// triggers left fewer than two measurable TR epochs.
     var runMetrics: GradientRunMetrics?
+    var timingProbe: GradientTimingProbe?
+    private var timingProbeSource: String?
+
+    func timingProbeKey(for signal: MFFSignalData?) -> String {
+        "\(signal?.dataRevision.uuidString ?? "none")/\(trMarkerCode)/\(skipStart)/\(skipEnd)"
+    }
+
+    func updateTimingProbe(for signal: MFFSignalData?) async {
+        let key = timingProbeKey(for: signal)
+        guard key != timingProbeSource else { return }
+        timingProbe = nil
+        timingProbeSource = nil
+        guard let signal else { return }
+        let triggers = trimmedTRMarkers(in: signal)
+        let worker = Task.detached(priority: .utility) {
+            GradientTimingCheck.measure(channels: signal.data, triggers: triggers, samplingRate: signal.samplingRate)
+        }
+        let probe = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
+        guard !Task.isCancelled, timingProbeKey(for: signal) == key else { return }
+        timingProbe = probe
+        timingProbeSource = key
+    }
+
+    var timingAssessment: GradientTimingAssessment? {
+        guard method.supportsSliceEpochs, let timingProbe else { return nil }
+        let schedule: GradientAcquisitionSchedule?
+        let fractional: Bool
+        if method.isFASTR {
+            schedule = effectiveAcquisitionSchedule
+            fractional = upsampleFactor > 1 || synchronizationProfile == .independentClocks
+                || (synchronizationProfile == .custom && alignmentEnabled && subSampleAlignment)
+        } else {
+            schedule = .uniform(groupsPerVolume: max(1, slicesPerVolume))
+            fractional = false
+        }
+        return timingProbe.assess(schedule: schedule, fractionalTiming: fractional)
+    }
 
     /// Per-epoch/per-volume coverage of the last run: what was corrected, what
     /// sat at the recording's edge, and what could not be trusted. `nil` before
@@ -559,6 +596,8 @@ final class GradientViewModel {
     }
 
     func resetForClose() {
+        timingProbe = nil
+        timingProbeSource = nil
         correctedSignal = nil
         correctedPNSSignal = nil
         auditLogLines = []
@@ -1068,6 +1107,16 @@ final class GradientViewModel {
             return
         }
         let trSamples = trimmedTRMarkers(in: signal)
+        if let first = trSamples.first, let last = trSamples.last {
+            let spacings = zip(trSamples.dropFirst(), trSamples).map { $0 - $1 }.sorted()
+            let period = spacings.isEmpty ? 0 : spacings[spacings.count / 2]
+            let support = max(0, first - period)..<min(signal.data[0].count, last + period)
+            if signal.acquisitionSkipRanges.contains(where: { $0.overlaps(support) }) {
+                statusMessage = "MRI correction spans an acquisition gap. Process uninterrupted recording intervals separately."
+                statusIsError = true
+                return
+            }
+        }
         let allTRCount = signal.events.filter { $0.code == trMarkerCode }.count
         let pnsInput = appliesToPNS ? pnsSignal : nil
         let pnsTRSamples = pnsInput.map {
@@ -1100,6 +1149,12 @@ final class GradientViewModel {
 
         let run = correctionClosure(samplingRate: signal.samplingRate)
         let pnsRun = pnsInput.map { correctionClosure(samplingRate: $0.samplingRate) }
+        // Capture parameters before the await; reopening/editing the popover
+        // during a run must not relabel that run's timing assessment.
+        let timingSchedule: GradientAcquisitionSchedule? = method.supportsSliceEpochs
+            ? (method.isFASTR ? effectiveAcquisitionSchedule : .uniform(groupsPerVolume: max(1, slicesPerVolume))) : nil
+        let fractionalTiming = method.isFASTR && (upsampleFactor > 1 || synchronizationProfile == .independentClocks
+            || (synchronizationProfile == .custom && alignmentEnabled && subSampleAlignment))
 
         do {
             let sourceData = signal.data
@@ -1122,7 +1177,7 @@ final class GradientViewModel {
                     correctedPNSData = nil
                 }
                 try Task.checkCancellation()
-                let metrics = GradientRunMetricsCalculator.measure(
+                var metrics = GradientRunMetricsCalculator.measure(
                     input: sourceData,
                     output: corrected.channels,
                     triggers: trSamples,
@@ -1130,6 +1185,10 @@ final class GradientViewModel {
                     correctedEpochs: corrected.correctedEpochs,
                     totalEpochs: corrected.totalEpochs
                 )
+                if let timingSchedule, timingSchedule.groupsPerVolume > 1 {
+                    metrics?.timingAssessment = GradientTimingCheck.measure(channels: sourceData,
+                        triggers: trSamples, samplingRate: sourceRate)?.assess(schedule: timingSchedule, fractionalTiming: fractionalTiming)
+                }
                 return (corrected.channels, correctedPNSData, corrected.report, metrics, corrected.coverage)
             }
             let result = try await withTaskCancellationHandler(
@@ -1162,6 +1221,9 @@ final class GradientViewModel {
             metrics?.unreliableEpochs = coverage.epochs.filter(\.status.isUnreliable).count
             metrics?.coverageNotes = coverage.runNotes.isEmpty ? nil : coverage.runNotes
             runMetrics = metrics
+            if let timing = metrics?.timingAssessment {
+                auditLogLines.append("\(Self.operation) timing: \(timing.detail)")
+            }
             auditLogLines.append(contentsOf: coverage.auditLogLines(
                 operation: Self.operation, samplingRate: signal.samplingRate))
             if let metrics = result.3 {
@@ -1341,11 +1403,11 @@ final class GradientViewModel {
                 parts.append("\(slicesPerVolume) slices, MB\(multibandFactor)")
             }
         } else if method.supportsSliceEpochs, slicesPerVolume > 1 {
-            parts.append("\(slicesPerVolume) slices/volume")
+            parts.append("\(slicesPerVolume) groups/volume")
         }
         switch method.engine {
         case .sliceTemplate:
-            parts.append("\(donorVolumes) donor volumes")
+            parts.append("\(donorVolumes) donor epochs")
             parts.append("\(templateScaling.label.lowercased()) scaling")
             if donorRanking == .squaredCorrelation { parts.append("squared-r donors") }
             if obsSelection != .off { parts.append("OBS \(obsSelection.label.lowercased())") }

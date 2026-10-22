@@ -167,19 +167,21 @@ extension WaveformView {
 
             if gradient.method.usesDonorWindow {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Donor Volumes")
+                    Text(gradient.method.isFASTR ? "Donor Epochs" : "Donor Volumes")
                         .font(.caption.weight(.semibold))
                     HStack {
-                        TextField("Volumes", value: $gradient.donorVolumes, format: .number)
+                        TextField(gradient.method.isFASTR ? "Epochs" : "Volumes", value: $gradient.donorVolumes, format: .number)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 70)
                         Stepper("", value: $gradient.donorVolumes, in: 1...128)
                             .labelsHidden()
-                        Text("neighbouring volumes")
+                        Text(gradient.method.isFASTR ? "artifact epochs" : "neighbouring volumes")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    .help("How many neighbouring volumes contribute to each artifact template, in total. The methods take them from both sides of the target and keep reaching outward at the ends of the recording, so an early or late volume still gets a full set rather than half of one.")
+                    .help(gradient.method.isFASTR
+                        ? "Donor artifact epochs per target. In slice correction each epoch is one acquisition group, not a whole volume. FASTR chooses adjacent group epochs; other strategies determine which epochs qualify."
+                        : "How many neighbouring volumes contribute to each artifact template, in total. The methods take them from both sides of the target and keep reaching outward at the ends of the recording, so an early or late volume still gets a full set rather than half of one.")
                 }
             }
 
@@ -188,16 +190,31 @@ extension WaveformView {
                     mriFASTRAcquisitionTiming()
                 } else {
                     HStack {
-                        Text("Slices / volume")
+                        Text("Groups / volume")
                             .font(.caption)
                             .frame(width: 96, alignment: .leading)
-                        TextField("Slices", value: $gradient.slicesPerVolume, format: .number)
+                        TextField("Groups", value: $gradient.slicesPerVolume, format: .number)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 70)
                         Stepper("", value: $gradient.slicesPerVolume, in: 1...128)
                             .labelsHidden()
                     }
-                    .help("Number of fMRI slices per volume. Each TR interval is split into this many equal slice epochs.")
+                    .help("Distinct sequential acquisition groups per volume, after accounting for simultaneous multiband slices. 1 uses whole-volume epochs. Allen AAS splits each TR uniformly; imported JSON timing applies to the FASTR family.")
+                }
+                if let assessment = gradient.timingAssessment, assessment.expectedMilliseconds != nil {
+                    Label {
+                        Text(assessment.summary)
+                            .font(.caption2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: assessment.warrantsReview ? "exclamationmark.triangle.fill" : "waveform.path")
+                    }
+                    .foregroundStyle(assessment.warrantsReview ? Color.orange : Color.secondary)
+                    .help(assessment.detail
+                        + (gradient.method.isFASTR && assessment.needsFractionalAlignment
+                           ? " Open Advanced → Upsample factor to enable internal interpolation, or choose Custom clock synchronization and enable Epoch alignment and Sub-sample alignment. Keep Scanner-Slaved if using internal upsampling with synchronized clocks."
+                           : "")
+                        + " Advisory check of several short windows across the marked scan. Apply remains available.")
                 }
             }
 
@@ -313,6 +330,9 @@ extension WaveformView {
         }
         .padding(16)
         .frame(width: 420)
+        .task(id: gradient.timingProbeKey(for: signal)) {
+            await gradient.updateTimingProbe(for: signal)
+        }
         .fileImporter(
             isPresented: $gradient.showsAcquisitionTimingImporter,
             allowedContentTypes: [.json]

@@ -637,6 +637,8 @@ final class FilterViewModel {
                         averageReference: averageReference,
                         precision: precision,
                         excludedChannels: excludedChannels,
+                        recordedRanges: signal.acquisitionSkipRanges.isEmpty ? nil
+                            : MFFSignalData.recordedRanges(sampleCount: sourceData[0].count, excluding: signal.acquisitionSkipRanges),
                         progress: { fraction in
                             progressContinuation.yield(pnsEnabled ? 0.70 * fraction : fraction)
                         }
@@ -671,6 +673,8 @@ final class FilterViewModel {
                             averageReference: false,
                             precision: precision,
                             excludedChannels: [],
+                            recordedRanges: pnsInput.acquisitionSkipRanges.isEmpty ? nil
+                                : MFFSignalData.recordedRanges(sampleCount: pnsInput.data[0].count, excluding: pnsInput.acquisitionSkipRanges),
                             progress: { fraction in
                                 progressContinuation.yield(0.70 + 0.30 * fraction)
                             }
@@ -880,8 +884,49 @@ final class FilterViewModel {
         averageReference: Bool,
         precision: FilterPrecision = .auto,
         excludedChannels: Set<Int>,
+        recordedRanges: [Range<Int>]? = nil,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> [[Float]] {
+        if let recordedRanges {
+            let count = sourceData.first?.count ?? 0
+            var output = sourceData.map { _ in [Float](repeating: 0, count: count) }
+            for (index, range) in recordedRanges.enumerated() {
+                try Task.checkCancellation()
+                let part = try await filteredChannels(
+                    sourceData.map { Array($0[range]) },
+                    samplingRate: samplingRate,
+                    lowCutoff: lowCutoff,
+                    highCutoff: highCutoff,
+                    highPassSlope: highPassSlope,
+                    lowPassSlope: lowPassSlope,
+                    filterFamily: filterFamily,
+                    iirDesign: iirDesign,
+                    ellipticPassbandRippleDB: ellipticPassbandRippleDB,
+                    ellipticStopbandAttenuationDB: ellipticStopbandAttenuationDB,
+                    firWindow: firWindow,
+                    firKaiserAttenuationDB: firKaiserAttenuationDB,
+                    firApplication: firApplication,
+                    firCrossoverHz: firCrossoverHz,
+                    firCrossoverRule: firCrossoverRule,
+                    firTransitionHz: firTransitionHz,
+                    firDesignRule: firDesignRule,
+                    lineNoiseMode: lineNoiseMode,
+                    notchUsesFIR: notchUsesFIR,
+                    notchFrequency: notchFrequency,
+                    lineNoiseHarmonics: lineNoiseHarmonics,
+                    lineNoiseWindowSeconds: lineNoiseWindowSeconds,
+                    lineNoiseStrength: lineNoiseStrength,
+                    averageReference: averageReference,
+                    precision: precision,
+                    excludedChannels: excludedChannels,
+                    progress: { fraction in
+                        progress((Double(index) + fraction) / Double(max(recordedRanges.count, 1)))
+                    }
+                )
+                for channel in output.indices { output[channel].replaceSubrange(range, with: part[channel]) }
+            }
+            return output
+        }
         let notchEnabled = lineNoiseMode == .notch
         // Notch design is intentionally independent of the passband family.
         let notchIsFIR = notchEnabled && notchUsesFIR

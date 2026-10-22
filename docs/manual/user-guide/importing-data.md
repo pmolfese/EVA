@@ -49,6 +49,31 @@ Export the processed recording to MFF as usual. Events, physiological channels,
 `eva.xml`, and an audit note describing BDF trigger decoding are included.
 The original BDF remains unchanged. BDF export is not provided.
 
+## MFF Acquisition Pauses
+
+For continuous MFF recordings, EVA preserves the elapsed acquisition timeline
+declared in `epochs.xml`. A pause in saving EEG is represented by zero
+placeholders and a duration-bearing **Acquisition gap** (`BAD_ACQ_SKIP`) event.
+Those zeros are missing data, not measured EEG. Event timestamps remain on the
+original clock, so events after a pause stay aligned with their recorded samples.
+PNS channels use the same acquisition intervals.
+
+The main filter processes the recorded intervals independently, including
+adaptive line-noise reduction. PSA excludes any epoch overlapping a gap even
+when artifact rejection is disabled or decisions are deferred to the Decision
+Matrix. Continuous MFF export retains the discontinuous acquisition intervals.
+Intentionally segmented and averaged files retain their existing epoch layout.
+
+MRI correction is allowed when the gap is outside its trigger-window support.
+If a pause falls inside that support, EVA stops and asks for the uninterrupted
+intervals to be processed separately rather than fitting templates across missing
+data. Other analysis tools should likewise use recorded intervals only; a zero
+placeholder must not be interpreted as a physiological observation.
+
+Reopen the original recording to use the corrected reader. Previously generated
+epochs and averages need rebuilding; an older export that already discarded the
+acquisition timing cannot recover it automatically.
+
 ## Sensor Locations
 
 When a file format does not include electrode geometry, EVA can use optional electrode-location sidecars such as:
