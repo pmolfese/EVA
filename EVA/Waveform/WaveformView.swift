@@ -2581,6 +2581,7 @@ struct WaveformView: View {
         parts.append("\(signal.numberOfChannels) ch")
         parts.append("\(Int(signal.samplingRate)) Hz")
         parts.append("\(String(format: "%.1f", signal.duration)) s")
+        parts.append("positive up")
         return parts.joined(separator: " · ")
     }
 
