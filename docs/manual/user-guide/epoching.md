@@ -101,6 +101,12 @@ the usual direct averaging. Checking both keeps the guided PSA review sheet
   configuration sheet's processing thresholds. Edited bounds survive hiding or
   rebuilding the current review.
 - Click a channel or epoch header to navigate; drag headers to select ranges.
+- Choose **Epochs → Rejected first** to place all excluded epochs together,
+  including artifact, interpolation, health, and manual rejections. Each group
+  is sorted by Segment Health from lowest to highest, with acquisition order
+  breaking ties. **Epoch goodness** sorts only by that health score, so rejected
+  epochs can be interspersed with kept epochs. The red epoch strip indicates
+  exclusion for any reason, rather than a low health score alone.
 - Drag a rectangle in Overview to zoom or act on an area. The details pane shows
   kept/excluded epoch counts and rejection reasons (which can overlap).
   Keep or interpolate just the selected cells, or keep/reject the selected whole

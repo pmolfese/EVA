@@ -110,6 +110,43 @@ nonisolated struct MFFSignalData: Sendable {
     /// Reference convention of this exact sample-data version.
     let referenceState: EEGReferenceState
 
+    /// Missing acquisition samples, represented by zero placeholders, never EEG.
+    /// Kept in events so the mask survives processing copies and MFF export.
+    var acquisitionSkipRanges: [Range<Int>] {
+        let count = data.first?.count ?? 0
+        return Self.acquisitionSkipRanges(events: events, samplingRate: samplingRate, sampleCount: count)
+    }
+
+    static func acquisitionSkipRanges(events: [MFFEvent], samplingRate: Double, sampleCount: Int) -> [Range<Int>] {
+        guard samplingRate > 0, sampleCount > 0 else { return [] }
+        let ranges = events.filter { $0.code == "BAD_ACQ_SKIP" }.compactMap { event -> Range<Int>? in
+            let start = event.onsetTimeSeconds * samplingRate
+            let end = event.endTimeSeconds * samplingRate
+            guard start.isFinite, end.isFinite, end > start else { return nil }
+            let lo = Int(max(0, min(Double(sampleCount), start.rounded())))
+            let hi = Int(max(0, min(Double(sampleCount), end.rounded())))
+            return lo < hi ? lo..<hi : nil
+        }.sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [Range<Int>] = []
+        for range in ranges {
+            if let last = merged.last, range.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, range.upperBound)
+            } else { merged.append(range) }
+        }
+        return merged
+    }
+
+    static func recordedRanges(sampleCount: Int, excluding gaps: [Range<Int>]) -> [Range<Int>] {
+        var cursor = 0
+        var result: [Range<Int>] = []
+        for gap in gaps {
+            if cursor < gap.lowerBound { result.append(cursor..<gap.lowerBound) }
+            cursor = max(cursor, gap.upperBound)
+        }
+        if cursor < sampleCount { result.append(cursor..<sampleCount) }
+        return result
+    }
+
     init(
         dataRevision: UUID = UUID(),
         signalURL: URL,
@@ -677,14 +714,21 @@ nonisolated final class MFFReader {
         )) ?? nil
         progress?(1)
 
-        let resolvedEvents = epochInfo.map(\.events) ?? events
+        var resolvedEvents = epochInfo.map(\.events) ?? events
+        if epochInfo == nil {
+            let restored = try restoreAcquisitionTimeline(
+                samples: samples, signalData: signalData, packageURL: packageURL
+            )
+            samples = restored.samples
+            resolvedEvents = mergingAcquisitionSkips(events, restored.gaps)
+        }
 
         return MFFSignalData(
             signalURL: signalDescriptor.signalURL,
             signalType: signalDescriptor.signalType,
             numberOfChannels: signalData.numberOfChannels,
             samplingRate: signalData.samplingRate,
-            duration: Double(signalData.totalSamples) / signalData.samplingRate,
+            duration: Double(samples[0].count) / signalData.samplingRate,
             recordingStartTime: recordingStartTime,
             events: resolvedEvents,
             data: samples,
@@ -1213,6 +1257,16 @@ nonisolated final class MFFReader {
             applyCalibrationFactors(gcal, to: &samples)
         }
 
+        // PNS shares the EEG acquisition epochs, including recording pauses.
+        // Category/averaged files retain their intentional concatenated layout.
+        var gapEvents: [MFFEvent] = []
+        if try parseOnDiskEpochs(in: packageURL, blockSampleCounts: signalData.blockSampleCounts,
+                                samplingRate: signalData.samplingRate) == nil {
+            let restored = try restoreAcquisitionTimeline(samples: samples, signalData: signalData, packageURL: packageURL)
+            samples = restored.samples
+            gapEvents = mergingAcquisitionSkips(
+                try parseEvents(in: packageURL).filter { $0.code == "BAD_ACQ_SKIP" }, restored.gaps)
+        }
         progress?(0.94)
         let recordingStartTime = try parseRecordingStartTime(in: packageURL)
         let channelNames = parsePNSChannelNames(in: packageURL, expectedCount: signalData.numberOfChannels)
@@ -1224,9 +1278,9 @@ nonisolated final class MFFReader {
             signalType: descriptor.signalType,
             numberOfChannels: signalData.numberOfChannels,
             samplingRate: signalData.samplingRate,
-            duration: Double(signalData.totalSamples) / signalData.samplingRate,
+            duration: Double(samples[0].count) / signalData.samplingRate,
             recordingStartTime: recordingStartTime,
-            events: [],   // events belong to the primary (EEG) signal
+            events: gapEvents,   // task events belong to the primary EEG signal
             data: samples,
             channelNames: channelNames,
             positiveUpFlags: positiveUpFlags,
@@ -1607,6 +1661,69 @@ nonisolated final class MFFReader {
         return min(max(sample, epoch.startSample), epoch.endSampleExclusive)
     }
 
+    /// Signal blocks omit pauses, while event clocks include them. Restore the
+    /// acquisition clock before handing samples to any processing stage. This
+    /// deliberately does not run on segmented/category-averaged recordings.
+    private func restoreAcquisitionTimeline(
+        samples: [[Float]], signalData: ParsedSignal, packageURL: URL
+    ) throws -> (samples: [[Float]], gaps: [MFFEvent]) {
+        let epochs = try parseEpochRanges(in: packageURL, blockSampleCounts: signalData.blockSampleCounts)
+        guard !epochs.isEmpty else { return (samples, []) }
+        let rate = signalData.samplingRate
+        var diskCursor = 0
+        var clockCursor = 0
+        var placements: [(source: Range<Int>, target: Range<Int>)] = []
+        var gaps: [MFFEvent] = []
+        // Refuse pathological expansion rather than allocating an unbounded
+        // zero array for a corrupt timestamp or a very long recording pause.
+        let expansionLimit = max(Double(signalData.totalSamples) * 4,
+                                 Double(signalData.totalSamples) + rate * 60)
+        for (index, epoch) in epochs.enumerated() {
+            let startValue = (epoch.beginTimeMicroseconds * rate / 1_000_000).rounded()
+            let endValue = (epoch.endTimeMicroseconds * rate / 1_000_000).rounded()
+            let length = epoch.endSampleExclusive - epoch.startSample
+            guard startValue >= 0, endValue <= expansionLimit,
+                  epoch.startSample == diskCursor,
+                  startValue >= Double(clockCursor),
+                  abs(endValue - startValue - Double(length)) <= 1 else {
+                throw MFFReaderError.invalidXML(packageURL.appendingPathComponent("epochs.xml"),
+                    "acquisition epochs overlap, disagree with stored samples, or require excessive gap padding")
+            }
+            let start = Int(startValue)
+            if start > clockCursor {
+                gaps.append(MFFEvent(id: "acquisition-skip-\(index)", code: "BAD_ACQ_SKIP",
+                    label: "Acquisition gap", eventDescription: "EEG was not recorded during this interval.",
+                    beginTimeSeconds: Double(clockCursor) / rate, rawBeginTime: "",
+                    sourceFile: "epochs.xml", durationSeconds: Double(start - clockCursor) / rate))
+            }
+            placements.append((epoch.startSample..<epoch.endSampleExclusive, start..<(start + length)))
+            diskCursor = epoch.endSampleExclusive
+            clockCursor = start + length
+        }
+        guard diskCursor == signalData.totalSamples else {
+            throw MFFReaderError.invalidXML(packageURL.appendingPathComponent("epochs.xml"),
+                "acquisition epochs do not account for all stored signal blocks")
+        }
+        guard !gaps.isEmpty else { return (samples, []) }
+        let restored = samples.map { channel in
+            var result = [Float](repeating: 0, count: clockCursor)
+            for placement in placements {
+                result.replaceSubrange(placement.target, with: channel[placement.source])
+            }
+            return result
+        }
+        return (restored, gaps)
+    }
+
+    private func mergingAcquisitionSkips(_ events: [MFFEvent], _ gaps: [MFFEvent]) -> [MFFEvent] {
+        let additions = gaps.filter { gap in
+            !events.contains { $0.code == "BAD_ACQ_SKIP"
+                && abs($0.onsetTimeSeconds - gap.onsetTimeSeconds) < 1e-6
+                && abs($0.endTimeSeconds - gap.endTimeSeconds) < 1e-6 }
+        }
+        return (events + additions).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
+    }
+
     private func parseEpochRanges(
         in packageURL: URL,
         blockSampleCounts: [Int]
@@ -1631,14 +1748,14 @@ nonisolated final class MFFReader {
                     .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
                 return Double(raw)
             }
-            guard let beginTime = value("beginTime"),
-                  let endTime = value("endTime"),
-                  let firstBlock = value("firstBlock").map({ Int($0) }) ?? nil,
-                  let lastBlock = value("lastBlock").map({ Int($0) }) ?? nil,
-                  firstBlock >= 1, lastBlock >= firstBlock,
-                  lastBlock <= blockSampleCounts.count else {
-                continue
+            guard let beginTime = value("beginTime"), beginTime.isFinite, beginTime >= 0,
+                  let endTime = value("endTime"), endTime.isFinite, endTime > beginTime,
+                  let first = value("firstBlock"), first.isFinite, first.rounded() == first,
+                  let last = value("lastBlock"), last.isFinite, last.rounded() == last,
+                  first >= 1, last >= first, last <= Double(blockSampleCounts.count) else {
+                throw MFFReaderError.invalidXML(epochsURL, "invalid acquisition epoch times or block bounds")
             }
+            let firstBlock = Int(first), lastBlock = Int(last)
             ranges.append(
                 EpochBlockRange(
                     beginTimeMicroseconds: beginTime,

@@ -398,6 +398,13 @@ FASTR-family methods use EVA's shared slice-template correction engine. They can
 
 Shared FASTR-family controls include slices per volume, trigger position, donor-window size, alignment and sub-sample alignment, template scaling, OBS mode, ANC, and optional high-motion donor exclusion. OBS and ANC can improve residual suppression, but they can also remove plausible EEG when the residual or adaptive reference is not artifact-dominated. Preview the correction and inspect representative channels before applying it broadly.
 
+**Donor Epochs** counts artifact epochs, not anatomical slices or whole TRs. At
+slice level, FASTR's temporal-neighbor strategy takes nearby group epochs. With
+23 groups per 2 s TR, eight donor epochs span roughly 0.7 s; that is a much
+shorter averaging window than eight volume epochs. Other strategies can select
+epochs from different volumes. The control was previously labeled Donor Volumes;
+the label correction does not change saved parameter values or donor selection.
+
 ### Motion And Timing Checks
 
 All fMRI gradient-removal methods assume regularly spaced scanner markers and a known relationship between TR markers, slice timing, and EEG samples. Before applying correction:
@@ -408,12 +415,28 @@ All fMRI gradient-removal methods assume regularly spaced scanner markers and a 
 - Load motion parameters before using Moosmann or high-motion donor exclusion.
 - Record method settings in your analysis notes, especially donor windows, motion threshold, OBS, ANC, and template scaling.
 
+For slice-based methods, an advisory beside the settings compares the configured
+group interval with a strong repeating waveform measured in several short windows
+across the marked scan and across sampled channels. FASTR uses the effective
+group count after multiband conversion (for example, 46 slices with MB2 means 23
+groups), or the imported JSON offsets. The Allen AAS path uses its uniform epoch
+count. The check warns about inconsistent timing and about fractional EEG-sample
+intervals when neither interpolation nor sub-sample alignment is enabled. Even
+scanner-synchronized clocks can have fractional slice intervals: a 2 s TR split
+into 23 groups is 86.96 samples per group at 1,000 Hz.
+
+This is a heuristic comparison, not a measurement of anatomical slice count.
+Alternating gradient waveforms can produce a different repeat, and weak artifact,
+short recordings or arbitrary nonuniform schedules can leave the comparison
+inconclusive. A longer wrap interval at the end of an imported schedule is not
+treated as another group. The warning does not block Apply or change parameters.
+
 ### Understanding The MR Correction Rating
 
 After an MRI gradient-correction step, the history rail shows a **Good**,
 **Watch**, or **Poor** pill. This is a rating of that correction run, not a
-general rating of the participant or the EEG. Open the pill to see the three
-measurements that produced it. The overall rating is the worst of the three:
+general rating of the participant or the EEG. Open the pill to see the
+measurements that produced it. The overall rating is the worst of the measurements:
 one Poor measurement makes the run Poor, and otherwise one Watch measurement
 makes it Watch.
 
@@ -422,6 +445,12 @@ makes it Watch.
 | Scanner-locked residue | Below 10% | 10% to below 30% | 30% or more | The share of the corrected signal's remaining broadband energy that still repeats at the scanner TR. EVA calculates this per channel and grades the 90th percentile, so residue in a minority of channels is not hidden by a clean median. |
 | Removed variance | 0.90 to below 1.05 | No Watch band | Below 0.90 or at least 1.05 | `var(input − output) / var(input)` over the scan. Too little means much of the scanner artifact was left behind; a value at or above 1.05 means the subtraction removed more variance than the input carried, consistent with a template being applied at the wrong times. |
 | Epoch coverage | 98% or more | 90% to below 98% | Below 90% | The fraction of correctable TR epochs the selected method actually corrected. A partial final epoch at the recording edge is excluded. Unreliable spans or run-level warnings can change an otherwise Good coverage result to Watch. |
+| Acquisition timing (slice runs) | Repeat consistent with interval | Timing disagreement or missing fractional-timing support | Not graded Poor on its own | Captures the input timing check and settings used for that run. Inconclusive evidence is shown as unavailable, not as verified timing. |
+
+The timing assessment is preserved in history and the exported processing log.
+Changing settings afterward does not change an earlier run's assessment. This
+input check complements the output residue measurements; agreement cannot establish
+that artifact removal succeeded or that physiological signal was preserved.
 
 The residue breakdown also reports **Below 40 Hz**. That is the same
 scanner-lock check after a 40 Hz low-pass and estimates how much repeating

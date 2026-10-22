@@ -156,6 +156,7 @@ nonisolated enum PSAEpochMatrixOrder: String, CaseIterable, Identifiable {
     case acquisition = "Acquisition"
     case category = "Category"
     case goodness = "Epoch goodness"
+    case rejectedFirst = "Rejected first"
     var id: String { rawValue }
 }
 
@@ -772,6 +773,18 @@ final class PSADecisionMatrixModel {
                 let rhs = epochGoodness($1)
                 return lhs == rhs ? $0 < $1 : lhs < rhs
             }
+        case .rejectedFirst:
+            // Resolve the final outcome once per epoch, including artifact,
+            // interpolation, health, and manual decisions. Health alone does
+            // not capture every reason an epoch can be excluded.
+            return preparation.segments.indices.map { epoch in
+                (epoch: epoch, rejected: resolvedEpochDecision(epoch) == .reject,
+                 goodness: epochGoodness(epoch))
+            }.sorted { lhs, rhs in
+                if lhs.rejected != rhs.rejected { return lhs.rejected }
+                if lhs.goodness != rhs.goodness { return lhs.goodness < rhs.goodness }
+                return lhs.epoch < rhs.epoch
+            }.map(\.epoch)
         }
     }
 
@@ -1518,6 +1531,7 @@ struct PSADecisionMatrixView: View {
                 Picker("Epochs", selection: $model.epochOrder) {
                     ForEach(PSAEpochMatrixOrder.allCases) { Text($0.rawValue).tag($0) }
                 }.frame(width: 185)
+                .help("Epoch goodness sorts by Segment Health. Rejected first groups all excluded epochs first, then sorts each group by goodness, lowest first.")
                 Spacer()
                 Picker("View", selection: $matrixViewMode) {
                     ForEach(PSAMatrixViewMode.allCases) { Text($0.rawValue).tag($0) }

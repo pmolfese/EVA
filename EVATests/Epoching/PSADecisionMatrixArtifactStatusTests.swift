@@ -13,7 +13,8 @@ struct PSADecisionMatrixArtifactStatusTests {
     }
 
     private func model(events: [Int: [PSAArtifactEventDetail]],
-                       reasons: [Int: [String]] = [:]) -> PSADecisionMatrixModel {
+                       reasons: [Int: [String]] = [:],
+                       scores: [Int] = Array(repeating: 100, count: 8)) -> PSADecisionMatrixModel {
         let signal = SyntheticSignal.make(Array(repeating: Array(repeating: Float(1), count: 400), count: 4),
                                           samplingRate: 100)
         let segments = (0..<8).map { epoch in
@@ -24,12 +25,36 @@ struct PSADecisionMatrixArtifactStatusTests {
         let preparation = PSADecisionMatrixPreparation.make(
             signal: signal, segments: segments, thresholds: .init(), detectorSegments: [:],
             recordingChannelGoodness: [:], electrodePositions: [:], globallyBadChannels: [],
-            segmentHealthGoodnessScores: Array(repeating: 100, count: 8),
+            segmentHealthGoodnessScores: scores,
             suggestedRejectedEpochReasons: reasons, artifactEventsByEpoch: events
         )
         let model = PSADecisionMatrixModel(preparation: preparation)
         model.setChannelDecision(.keep, channels: [0, 1, 2, 3])
         return model
+    }
+
+    @Test func rejectedFirstSortUsesFinalDecisionsThenHealthAndAcquisitionOrder() {
+        let model = model(events: [:],
+                          reasons: [1: ["Uncorrected artifact"], 3: ["Missing timing marker"]],
+                          scores: [80, 95, 40, 100, 60, 100, 20, 95])
+        model.epochRejectionHealthThreshold = 0
+        model.setEpochDecision(.reject, epoch: 5)
+        model.epochOrder = .rejectedFirst
+        #expect(model.orderedEpochs == [1, 3, 5, 6, 2, 4, 0, 7])
+
+        // A manual keep moves an otherwise rejected epoch into the kept group.
+        model.setEpochDecision(.keep, epoch: 1)
+        #expect(model.orderedEpochs == [3, 5, 6, 2, 4, 0, 1, 7])
+
+        // Health-threshold changes must also regroup without changing sort mode.
+        model.epochRejectionHealthThreshold = 90
+        #expect(model.orderedEpochs == [6, 2, 4, 0, 3, 5, 1, 7])
+
+        // A high-health epoch still belongs with rejects if its repair is infeasible.
+        model.setCellDecision(.interpolate, for: .init(channelIndex: 0, epochIndex: 7))
+        #expect(model.resolvedEpochDecision(7) == .reject)
+        #expect(model.orderedEpochs == [6, 2, 4, 0, 7, 3, 5, 1])
+        #expect(model.preparation.segments.count == 8)
     }
 
     @Test func everyRenderedEpochIconHasALegendMeaningAndHoverExplanation() throws {

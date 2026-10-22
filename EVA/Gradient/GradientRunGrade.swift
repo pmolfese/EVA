@@ -90,6 +90,8 @@ nonisolated struct GradientRunMetrics: Codable, Sendable, Equatable, Hashable {
     /// Run-level conditions worth a look (a motion file that did not line up
     /// with the volumes, a Moosmann run that found no motion to act on).
     var coverageNotes: [String]?
+    /// Input timing and parameters captured for this run, never current UI settings.
+    var timingAssessment: GradientTimingAssessment? = nil
 
     /// Share of the epochs a correction could reach that it did. Edge epochs
     /// are not in the denominator: counting them made a recording that simply
@@ -329,7 +331,11 @@ nonisolated enum GradientRunGrade {
     static let coveragePoorCeiling = 0.90
 
     static func grade(from metrics: GradientRunMetrics) -> StepQuality {
-        let graded = [residualMetric(metrics), removedMetric(metrics), coverageMetric(metrics)]
+        var graded = [residualMetric(metrics), removedMetric(metrics), coverageMetric(metrics)]
+        if let timing = metrics.timingAssessment {
+            graded.append(QualityMetric(name: "Acquisition timing", grade: timing.warrantsReview ? .watch : .good,
+                detail: timing.detail, reached: timing.agreement != .inconclusive || timing.needsFractionalAlignment))
+        }
         let overall = graded.map(\.grade).max() ?? .good
         return StepQuality(grade: overall, summary: summary(overall, graded), metrics: graded)
     }
