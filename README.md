@@ -12,7 +12,7 @@ EVA stands for **Electrophysiology Viewer and Analysis**.
 
 ## What EVA Does
 
-EVA opens EGI/MagStim `.mff`.  Thanks to MNE-Python also can read BrainVision, EDF, Persyst, and BESA `.avr` / `.mul` recordings. The main waveform view is intentionally direct: channels on the left, events above the trace, and analysis tools close by without hiding the data.
+EVA uses native readers to open EGI/MagStim `.mff`, BrainVision, EDF, Persyst, and BESA `.avr` / `.mul` recordings. The main waveform view is intentionally direct: channels on the left, events above the trace, and analysis tools close by without hiding the data.
 
 EVA supports:
 
