@@ -83,6 +83,14 @@ nonisolated enum GradientTemplateCorrector {
             throw GradientCorrectionError.invalidConfiguration("relativeTriggerPosition must be between 0 and 1")
         }
 
+        if let policy = config.donorPolicy {
+            guard policy.minimumDonors > 0,
+                  policy.maximumDistanceSeconds.isFinite, policy.maximumDistanceSeconds > 0,
+                  policy.protectedIntervals.allSatisfy({ $0.lowerBound.isFinite && $0.upperBound.isFinite }) else {
+                throw GradientCorrectionError.invalidConfiguration("invalid donor policy")
+            }
+        }
+
         let factor = config.upsampleFactor
         let acquisitionSchedule = config.acquisitionSchedule
             ?? .uniform(groupsPerVolume: config.numberOfSlices)
@@ -102,7 +110,28 @@ nonisolated enum GradientTemplateCorrector {
         // fit), the missing sample repeats the recording's last one. It is
         // cropped from the output again, so nothing outside the recording is
         // ever returned.
-        let closingPadding = layout.lacksOnlyClosingSample ? 1 : 0
+        let sortedVolumes = Array(Set(volumeTriggers.filter { $0 >= 0 && $0 < sampleCount })).sorted()
+        let intervals = zip(sortedVolumes, sortedVolumes.dropFirst()).map { $1 - $0 }.sorted()
+        let typicalTR = intervals[intervals.count / 2] * factor
+        let partitions: [Range<Int>]? = layout.slicesPerVolume > 1 ? (0..<layout.count).map { epoch in
+            let volume = layout.volumeIndex[epoch]
+            let volumeStart = sortedVolumes[volume] * factor
+            let actualInterval = volume + 1 < sortedVolumes.count
+                ? (sortedVolumes[volume + 1] - sortedVolumes[volume]) * factor : typicalTR
+            let duration = Double(actualInterval) > Double(typicalTR) * GradientEpochLayout.missingTriggerGapFactor
+                ? typicalTR : actualInterval
+            let volumeEnd = min(sampleCount * factor, volumeStart + duration)
+            let next = epoch + 1 < layout.count ? layout.triggers[epoch + 1] : volumeEnd
+            let lower = max(0, layout.triggers[epoch] - layout.samplesBefore)
+            let upper = max(lower, min(next, volumeEnd) - layout.samplesBefore)
+            return lower..<upper
+        } : nil
+        let alignmentPadding = partitions != nil && config.alignmentEnabled
+            ? max(0, config.alignmentSearchRadius ?? GradientEpochAligner.defaultSearchRadius(period: layout.period)) : 0
+        let longestPartition = partitions?.map(\.count).max() ?? layout.length
+        let extraSupport = max(0, longestPartition - layout.length) + 2 * alignmentPadding
+        let closingPadding = (layout.lacksOnlyClosingSample ? 1 : 0)
+            + (extraSupport + factor - 1) / factor
         if closingPadding > 0 {
             layout = layout.extended(bySamples: closingPadding, upsampleFactor: factor)
         }
@@ -196,11 +225,21 @@ nonisolated enum GradientTemplateCorrector {
             windowStarts[epoch] = start ?? -1
             let volume = layout.volumeIndex[epoch]
             let censored = config.censoredVolumes.contains(volume) || highMotionVolumes.contains(volume)
-            donorEligible[epoch] = start != nil && !censored
+            var protected = false
+            if let start, let policy = config.donorPolicy {
+                // Include the source support of both interpolation stages.
+                let padding = (factor > 1 ? GradientSincResampler.upsampleLobes * factor : 0)
+                    + (config.subSampleAlignment ? GradientSincResampler.delayLobes + 1 : 0)
+                let rate = samplingRate * Double(factor)
+                protected = !policy.permitsWindow(
+                    start: Double(start - padding) / rate,
+                    end: Double(start + length + padding) / rate)
+            }
+            donorEligible[epoch] = start != nil && !censored && !protected
         }
         func isEligible(_ epoch: Int) -> Bool { donorEligible[epoch] }
 
-        let plan = GradientBatchPlan(
+        var plan = GradientBatchPlan(
             sampleCount: workingCount,
             upsampleFactor: factor,
             epochCount: epochCount,
@@ -210,6 +249,37 @@ nonisolated enum GradientTemplateCorrector {
                 ? alignment.fractionalShifts
                 : [Double](repeating: 0, count: epochCount)
         )
+
+        plan.correlationFeature = config.correlationFeature
+        let scoringPlan = plan
+        if let partitions {
+            plan.outputRanges = partitions
+            // Preserve the original short windows for scoring. Templates need
+            // enough source samples to reach the next acquisition boundary.
+            plan.windowLength = max(length, longestPartition) + 2 * alignmentPadding
+            for epoch in 0..<epochCount where plan.windowStarts[epoch] >= 0 {
+                plan.windowStarts[epoch] -= alignmentPadding
+                if plan.windowStarts[epoch] < 0 { donorEligible[epoch] = false }
+            }
+            for epoch in 0..<epochCount where plan.windowStarts[epoch] >= 0 {
+                let required = partitions[epoch].upperBound - plan.windowStarts[epoch]
+                plan.windowLength = max(plan.windowLength, required)
+            }
+            for epoch in 0..<epochCount where plan.windowStarts[epoch] >= 0 {
+                if plan.windowStarts[epoch] + plan.windowLength > plan.upsampledCount {
+                    plan.windowStarts[epoch] = -1
+                    donorEligible[epoch] = false
+                }
+                if let policy = config.donorPolicy, plan.windowStarts[epoch] >= 0 {
+                    let padding = (factor > 1 ? GradientSincResampler.upsampleLobes * factor : 0)
+                        + (config.subSampleAlignment ? GradientSincResampler.delayLobes + 1 : 0)
+                    let rate = samplingRate * Double(factor)
+                    donorEligible[epoch] = donorEligible[epoch] && policy.permitsWindow(
+                        start: Double(plan.windowStarts[epoch] - padding) / rate,
+                        end: Double(plan.windowStarts[epoch] + plan.windowLength + padding) / rate)
+                }
+            }
+        }
 
         // MARK: Backend and tiling
 
@@ -250,7 +320,7 @@ nonisolated enum GradientTemplateCorrector {
         var correlationRanges = [Range<Int>](repeating: 0..<0, count: epochCount)
         if usesCorrelation {
             for target in 0..<epochCount {
-                guard windowStarts[target] >= 0 else { continue }
+                guard plan.windowStarts[target] >= 0 else { continue }
                 let first = correlationPairs.count
                 for (candidate, distance) in GradientDonorSelection.correlationCandidates(
                     target: target,
@@ -305,9 +375,9 @@ nonisolated enum GradientTemplateCorrector {
                 correlationScores = try scoreCorrelations(
                     backend: backend,
                     pairs: correlationPairs,
-                    windows: windows,
+                    windows: try backend.extractEpochWindows(channels: tileInputs, plan: scoringPlan),
                     channelCount: width,
-                    plan: plan
+                    plan: scoringPlan
                 )
             }
 
@@ -336,15 +406,29 @@ nonisolated enum GradientTemplateCorrector {
                     continue
                 }
 
+                func targetEligible(_ candidate: Int) -> Bool {
+                    guard isEligible(candidate) else { return false }
+                    guard let policy = config.donorPolicy else { return true }
+                    return (!policy.matchAcquisitionGroup || layout.slicePosition[candidate] == layout.slicePosition[target])
+                        && Double(abs(layout.triggers[candidate] - layout.triggers[target]))
+                            <= policy.maximumDistanceSeconds * samplingRate * Double(factor)
+                }
+                func enforceMinimum(_ selection: (donors: [Int], fellBack: Bool)) -> (donors: [Int], fellBack: Bool) {
+                    guard selection.donors.count >= (config.donorPolicy?.minimumDonors ?? 1) else {
+                        return ([], selection.fellBack)
+                    }
+                    return selection
+                }
+
                 guard usesCorrelation else {
                     // Temporal and motion-informed donors depend only on the
                     // epoch grid, so one selection serves every channel.
-                    let selection = selectDonors(
+                    let selection = enforceMinimum(selectDonors(
                         target: target, scheme: effectiveScheme, layout: layout,
                         config: config, desired: desiredDonors,
                         motionDonorVolumes: motionDonorVolumes,
-                        isEligible: isEligible, scored: nil
-                    )
+                        isEligible: targetEligible, scored: nil
+                    ))
                     let list = selection.donors.map(Int32.init)
                     for slot in 0..<width { donorLists[slot * epochCount + target] = list }
                     if emitsDiagnostics, diagnosticSlot != nil { record(selection, target: target) }
@@ -352,11 +436,11 @@ nonisolated enum GradientTemplateCorrector {
                 }
 
                 for slot in 0..<width {
-                    let selection = selectDonors(
+                    let selection = enforceMinimum(selectDonors(
                         target: target, scheme: effectiveScheme, layout: layout,
                         config: config, desired: desiredDonors,
                         motionDonorVolumes: motionDonorVolumes,
-                        isEligible: isEligible,
+                        isEligible: targetEligible,
                         scored: scoredCandidates(
                             target: target,
                             channelSlot: slot,
@@ -367,9 +451,9 @@ nonisolated enum GradientTemplateCorrector {
                             scores: correlationScores,
                             squared: effectiveScheme == .squaredCorrelationRanked,
                             allowsSelfDonation: config.allowsSelfDonation,
-                            isEligible: isEligible
+                            isEligible: targetEligible
                         )
-                    )
+                    ))
                     donorLists[slot * epochCount + target] = selection.donors.map(Int32.init)
                     if emitsDiagnostics, slot == diagnosticSlot { record(selection, target: target) }
                 }
@@ -549,7 +633,8 @@ nonisolated enum GradientTemplateCorrector {
                 obsComponentCounts: obsComponentCounts,
                 ancAppliedChannels: ancAppliedChannels,
                 warnings: warnings,
-                upsampleFactor: factor
+                upsampleFactor: factor,
+                outputRanges: partitions
             )
         )
     }
@@ -634,6 +719,7 @@ nonisolated enum GradientTemplateCorrector {
         }
         let base = channelSlot * pairCount
         for index in range {
+            guard isEligible(Int(pairs[index].candidate)) else { continue }
             let r = scores[base + index]
             scored.append(.init(
                 epoch: Int(pairs[index].candidate),
@@ -663,7 +749,14 @@ nonisolated enum GradientTemplateCorrector {
                 epochCount: layout.count,
                 desired: desired,
                 allowsSelfDonation: config.allowsSelfDonation,
-                isEligible: isEligible
+                isEligible: { candidate in
+                    // Correlation candidates already match the acquisition-order
+                    // slot; fallback must keep that same constraint.
+                    let matchesGroup = scheme != .correlationRanked
+                        && scheme != .squaredCorrelationRanked
+                        || layout.slicePosition[candidate] == layout.slicePosition[target]
+                    return matchesGroup && isEligible(candidate)
+                }
             )
         }
 

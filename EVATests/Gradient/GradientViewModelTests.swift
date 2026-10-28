@@ -21,6 +21,92 @@ import SwiftUI
 struct GradientViewModelTests {
 
     @MainActor
+    @Test func farmPresetAndLegacyReplay() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .farm
+        #expect(vm.donorVolumes == 30)
+        #expect(vm.acquisitionTimingMode == .wholeVolume)
+        #expect(vm.correlationFeature == .firstDifference)
+        #expect(vm.minimumCorrelatedDonors == 30)
+        #expect(vm.correlationSearchWindow == 20)
+        #expect(vm.correlationThreshold == 0.9)
+        #expect(vm.donorRanking == .methodDefault)
+        #expect(vm.synchronizationProfile == .custom)
+        #expect(!vm.alignmentEnabled)
+        #expect(!vm.subSampleAlignment)
+        #expect(vm.upsampleFactor == 1)
+        #expect(vm.templateScaling == .unscaled)
+        #expect(vm.obsSelection == .off)
+        #expect(!vm.ancEnabled)
+        let saved = vm.parameters
+        #expect(saved["alignment"] == "false")
+        #expect(saved["subSample"] == "false")
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: saved)
+        #expect(restored.correlationFeature == .firstDifference)
+        #expect(restored.minimumCorrelatedDonors == 30)
+        #expect(restored.correlationSearchWindow == 20)
+        #expect(restored.donorVolumes == 30)
+        #expect(restored.acquisitionTimingMode == .wholeVolume)
+        #expect(!restored.alignmentEnabled)
+        #expect(!restored.subSampleAlignment)
+        #expect(restored.upsampleFactor == 1)
+        #expect(restored.templateScaling == .unscaled)
+        #expect(restored.obsSelection == .off)
+        #expect(!restored.ancEnabled)
+        var legacy = saved
+        legacy.removeValue(forKey: "correlationFeature")
+        legacy.removeValue(forKey: "minimumCorrelatedDonors")
+        legacy.removeValue(forKey: "correlationSearchWindow")
+        restored.apply(parameters: legacy)
+        #expect(restored.correlationFeature == .rawWaveform)
+        #expect(restored.minimumCorrelatedDonors == 4)
+        #expect(restored.correlationSearchWindow == 240)
+        #expect(MRIGradientMethod.farm.rawValue == "FARM")
+    }
+
+    @MainActor
+    @Test func fastrDefaultsAndFamilySwitchPreserveExplicitSettings() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .fastr
+        #expect(vm.donorVolumes == 30)
+        #expect(vm.acquisitionTimingMode == .wholeVolume)
+        #expect(vm.effectiveAcquisitionGroupCount == 1)
+        #expect(!vm.alignmentEnabled)
+        #expect(MRIGradientMethod.fastr.label == "FASTR-like")
+        #expect(MRIGradientMethod.fastr.rawValue == "FASTR")
+        #expect(vm.upsampleFactor == 1)
+        #expect(vm.synchronizationProfile == .custom)
+        #expect(vm.templateScaling == .unscaled)
+        #expect(vm.relativeTriggerPosition == 0)
+        #expect(vm.obsSelection == .off)
+        #expect(!vm.ancEnabled)
+        vm.donorVolumes = 12
+        vm.relativeTriggerPosition = 0.02
+        let saved = vm.parameters
+        vm.method = .allenIAR
+        #expect(vm.donorVolumes == 8)
+        #expect(vm.relativeTriggerPosition == 0)
+        vm.method = .fastr
+        #expect(vm.donorVolumes == 12)
+        #expect(vm.relativeTriggerPosition == 0.02)
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: saved)
+        #expect(restored.donorVolumes == 12)
+        #expect(restored.relativeTriggerPosition == 0.02)
+        #expect(restored.upsampleFactor == 1)
+        #expect(restored.obsSelection == .off)
+        var old = saved
+        old.removeValue(forKey: "relativeTriggerPosition")
+        old.removeValue(forKey: "acquisitionTimingMode")
+        old["slices"] = "23"
+        restored.apply(parameters: old)
+        #expect(restored.relativeTriggerPosition == 0)
+        #expect(restored.effectiveAcquisitionGroupCount == 23)
+    }
+
+
+    @MainActor
     @Test func parametersReflectMethodAndWindow() {
         let vm = GradientViewModel(store: RecordingStore())
         vm.method = .fastr
@@ -117,6 +203,56 @@ struct GradientViewModelTests {
         #expect(vm.multibandFactor == 2)
         #expect(vm.effectiveAcquisitionSchedule == .offsetsSeconds([0, 0.5]))
         #expect(vm.effectiveAcquisitionGroupCount == 2)
+    }
+
+    @MainActor
+    @Test func importedTimingCanSwitchToEvenGroupsWithoutLosingOffsets() throws {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .fastr
+        let data = Data("""
+        {"SliceTiming": [0, 0.085, 1.895, 0, 0.085, 1.895],
+         "MultibandAccelerationFactor": 2}
+        """.utf8)
+        try vm.applyAcquisitionTimingJSON(data: data, sourceName: "timing.json")
+        #expect(vm.useJSONSliceTiming)
+        #expect(vm.effectiveAcquisitionSchedule == .offsetsSeconds([0, 0.085, 1.895]))
+
+        vm.useJSONSliceTiming = false
+        #expect(vm.effectiveAcquisitionSchedule == .uniform(groupsPerVolume: 3))
+        #expect(vm.acquisitionTimingValidationMessage == nil)
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: vm.parameters)
+        #expect(!restored.useJSONSliceTiming)
+        #expect(restored.effectiveAcquisitionSchedule == .uniform(groupsPerVolume: 3))
+        restored.useJSONSliceTiming = true
+        #expect(restored.effectiveAcquisitionSchedule == .offsetsSeconds([0, 0.085, 1.895]))
+
+        try vm.applyAcquisitionTimingJSON(data: data, sourceName: "new-timing.json")
+        #expect(vm.useJSONSliceTiming)
+    }
+
+    @MainActor
+    @Test func legacyJSONReplayUsesOffsetsAfterEvenSpacingOverride() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.useJSONSliceTiming = false
+        vm.apply(parameters: [
+            "method": "FASTR", "acquisitionTimingMode": "jsonSidecar",
+            "acquisitionOffsetsUnit": "fractionOfTR", "acquisitionOffsets": "0,0.2,0.8"
+        ])
+        #expect(vm.useJSONSliceTiming)
+        #expect(vm.effectiveAcquisitionSchedule == .offsetsFractionOfTR([0, 0.2, 0.8]))
+        vm.useJSONSliceTiming = false
+        #expect(vm.effectiveAcquisitionSchedule == .uniform(groupsPerVolume: 3))
+    }
+
+    @MainActor
+    @Test func evenSpacingOverrideStillRequiresImportedGroupCount() {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .fastr
+        vm.acquisitionTimingMode = .jsonSidecar
+        vm.useJSONSliceTiming = false
+        #expect(vm.effectiveAcquisitionSchedule == nil)
+        #expect(vm.acquisitionTimingValidationMessage != nil)
     }
 
     @MainActor
@@ -266,7 +402,7 @@ struct GradientViewModelTests {
 
     @Test func gradientFamiliesUseDescriptiveUILabelsWithoutChangingPersistenceKeys() {
         #expect(MRIGradientCategory.template.label == "Template")
-        #expect(MRIGradientCategory.fastr.label == "Slice-Based")
+        #expect(MRIGradientCategory.fastr.label == "FASTR family")
         #expect(MRIGradientCategory.fastr.rawValue == "FASTR")
     }
 

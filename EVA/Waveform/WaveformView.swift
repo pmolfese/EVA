@@ -74,7 +74,7 @@ enum MRIGradientCategory: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .template: return "Template"
-        case .fastr: return "Slice-Based"
+        case .fastr: return "FASTR family"
         }
     }
 
@@ -136,9 +136,9 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
         case .mar: return "MAR"
         case .waas: return "wAAS"
         case .waar: return "wAAR"
-        case .fastr: return "FASTR Original"
+        case .fastr: return "FASTR-like"
         case .moosmann: return "Moosmann"
-        case .farm: return "FARM"
+        case .farm: return "FARM-style (experimental)"
         }
     }
 

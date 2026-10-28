@@ -669,7 +669,7 @@ private struct ProcessingDefaultsView: View {
                 Picker("Default Template method", selection: $defaults.gradientDefaultTemplateMethod) {
                     ForEach(MRIGradientCategory.template.methods) { Text($0.label).tag($0) }
                 }
-                Picker("Default Slice-Based method", selection: $defaults.gradientDefaultFASTRMethod) {
+                Picker("Default FASTR family method", selection: $defaults.gradientDefaultFASTRMethod) {
                     ForEach(MRIGradientCategory.fastr.methods) { Text($0.label).tag($0) }
                 }
                 Picker("Compute backend", selection: $defaults.gradientComputeBackend) {
@@ -677,7 +677,7 @@ private struct ProcessingDefaultsView: View {
                 }
                 .disabled(!GradientTemplateCorrector.isMetalAvailable)
                 .help(GradientTemplateCorrector.isMetalAvailable
-                      ? "Applies to the Slice-Based family and to MAS/MAR/wAAS/wAAR. The GPU changes how fast a run is, never what it produces: every decision stays on the CPU and the backends are parity-tested. Falls back to the CPU on its own where a run is too small to be worth the round trip, or past what the kernels can hold."
+                      ? "Applies to the FASTR family family and to MAS/MAR/wAAS/wAAR. The GPU changes how fast a run is, never what it produces: every decision stays on the CPU and the backends are parity-tested. Falls back to the CPU on its own where a run is too small to be worth the round trip, or past what the kernels can hold."
                       : "No compatible Metal GPU is available on this machine.")
                 Text("Fast AAS and Allen AAS have no GPU path and always run on the CPU.")
                     .font(.caption)

@@ -72,7 +72,7 @@ extension WaveformView {
                         Image(systemName: "questionmark.circle")
                     }
                     .buttonStyle(.plain)
-                    .help("About Template vs Slice-Based methods and references")
+                    .help("About Template vs FASTR family methods and references")
                     .popover(isPresented: $gradient.showsMethodHelp, arrowEdge: .trailing) {
                         mriMethodHelp()
                     }
@@ -180,7 +180,7 @@ extension WaveformView {
                             .foregroundStyle(.secondary)
                     }
                     .help(gradient.method.isFASTR
-                        ? "Donor artifact epochs per target. In slice correction each epoch is one acquisition group, not a whole volume. FASTR chooses adjacent group epochs; other strategies determine which epochs qualify."
+                        ? "Donor epochs per target: a whole volume in Whole TR mode, or one acquisition group in slice mode. FASTR-like uses nearby epochs; FARM ranks waveform similarity; Moosmann uses motion information."
                         : "How many neighbouring volumes contribute to each artifact template, in total. The methods take them from both sides of the target and keep reaching outward at the ends of the recording, so an early or late volume still gets a full set rather than half of one.")
                 }
             }
@@ -294,8 +294,8 @@ extension WaveformView {
             }
 
             HStack {
-                Button("Reset \(GradientViewModel.defaultDonorVolumes)") {
-                    gradient.donorVolumes = GradientViewModel.defaultDonorVolumes
+                Button("Reset \(gradient.defaultDonorCount)") {
+                    gradient.donorVolumes = gradient.defaultDonorCount
                 }
 
                 if gradient.correctedSignal != nil {
@@ -525,7 +525,7 @@ extension WaveformView {
     @ViewBuilder
     func mriFASTRAcquisitionTiming() -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Slice Acquisition Timing")
+            Text("Template Timing")
                 .font(.caption.weight(.semibold))
 
             HStack(spacing: 6) {
@@ -543,6 +543,10 @@ extension WaveformView {
             }
 
             switch gradient.acquisitionTimingMode {
+            case .wholeVolume:
+                Text("One template covers the full TR, using matching positions in donor volumes.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             case .slicesAndMultiband:
                 mriIntRow(
                     "Total slices",
@@ -554,7 +558,7 @@ extension WaveformView {
                     "Multiband factor",
                     value: $gradient.multibandFactor,
                     range: 1...64,
-                    help: "Slices acquired simultaneously. EVA uses ceil(total slices / multiband factor) distinct acquisition times per TR."
+                    help: "Number of slices acquired together per multiband excitation. For example, 42 slices with MB2 give 21 acquisition groups per TR. EVA uses ceil(total slices / multiband factor); imported JSON instead supplies the distinct acquisition times."
                 )
 
             case .acquisitionGroupCount:
@@ -562,7 +566,7 @@ extension WaveformView {
                     "Groups / TR",
                     value: $gradient.acquisitionGroupCount,
                     range: 1...512,
-                    help: "Number of distinct slice-acquisition times in each TR. Use this when the scanner protocol already reports acquisition groups directly."
+                    help: "An acquisition group contains slices acquired together in one multiband excitation. For example, 42 slices with MB2 give 21 groups per TR. Group position means acquisition order within the TR, not anatomical slice number. Multiple echoes do not add groups."
                 )
 
             case .jsonSidecar:
@@ -578,12 +582,22 @@ extension WaveformView {
                     }
                 }
                 .help("Import acquisitionGroupOffsetsSeconds or acquisitionGroupOffsetsFractionOfTR. Standard SliceTiming and MultibandAccelerationFactor keys are also accepted without requiring a BIDS dataset. A sidecar may instead provide acquisitionGroupCount, or totalSlices plus multibandFactor.")
+                Toggle("Use JSON slice timing", isOn: $gradient.useJSONSliceTiming)
+                    .font(.caption)
+                    .disabled(gradient.jsonAcquisitionSchedule == nil)
+                    .help("On: use the imported acquisition times relative to each TR trigger. Off: space the same number of acquisition groups evenly across the TR. The imported times are retained, and importing a new timing file turns this on.")
+                Text(gradient.useJSONSliceTiming
+                     ? "Group starts follow the imported timing."
+                     : "Group starts are evenly spaced across the TR.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
-            if gradient.effectiveAcquisitionGroupCount > 0 {
+            if gradient.acquisitionTimingMode != .wholeVolume, gradient.effectiveAcquisitionGroupCount > 0 {
                 Text("\(gradient.effectiveAcquisitionGroupCount) distinct acquisition groups per TR")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .help("A group contains slices acquired together. Group position is its order within the TR: group 7 matches group 7 in other TRs, not anatomical slice 7. Correction intervals run to the next group start, with the final interval ending at the next TR; each sample is corrected once.")
             }
             if let message = gradient.acquisitionTimingValidationMessage {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -666,7 +680,7 @@ extension WaveformView {
     @ViewBuilder
     func mriSliceTemplateOptions() -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Slice-Based Options")
+            Text("FASTR family Options")
                 .font(.caption.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 4) {
@@ -954,22 +968,28 @@ extension WaveformView {
 
     @ViewBuilder
     func mriAdvancedCorrelation() -> some View {
+        Picker("Donor scoring", selection: $gradient.correlationFeature) {
+            ForEach(GradientCorrelationFeature.allCases) { feature in
+                Text(feature.label).tag(feature)
+            }
+        }
+        .help("First differences affect donor selection only. Templates and corrected output use the original, unfiltered signals.")
         mriDoubleRow(
             "Correlation threshold",
             value: $gradient.correlationThreshold,
-            help: "Minimum correlation a candidate must reach to qualify as a donor. Too few qualifying candidates falls back to temporal neighbours for that epoch."
+            help: "Minimum similarity needed to qualify as a FARM donor. If too few qualify, FARM uses the nearest eligible TRs at the same acquisition-group position: for example, group 7 uses group 7 from nearby TRs, not groups 6 or 8. Whole TR mode uses neighboring whole TRs."
         )
         mriIntRow(
             "Min qualified donors",
             value: $gradient.minimumCorrelatedDonors,
             range: 1...64,
-            help: "If fewer than this many candidates qualify, that epoch falls back to temporal neighbours."
+            help: "FARM falls back when fewer than this many donors qualify, capped at the requested donor count. Fallback uses the nearest eligible TRs at the same acquisition-order slot. It can reach beyond the correlation search window; censoring and donor-policy limits still apply."
         )
         mriIntRow(
             "Search window",
             value: $gradient.correlationSearchWindow,
             range: 1...5000,
-            help: "How many same-slice epochs on each side of the target are considered. Bounds an otherwise quadratic search."
+            help: "Number of TRs searched on each side for correlated donors at the same acquisition-group position. For example, ±20 searches up to 20 earlier and 20 later TRs. This limits correlation candidates, not the temporal fallback search."
         )
     }
 
@@ -1053,8 +1073,8 @@ extension WaveformView {
                     "The same local-template family as MAS/MAR, but donors are weighted by how far they sit from the target rather than reduced with an unweighted median, so nearby artifacts dominate. wAAR additionally fits the template's amplitude by least squares before subtracting."
                 )
                 mriMethodEntry(
-                    "FASTR Original — Slice Template Removal",
-                    "Subdivides each volume into slice epochs, aligns them (optionally at sub-sample resolution), subtracts a per-slice template, then optionally removes residual artifact with an Optimal Basis Set and adaptive noise cancellation. Better suppression, more parameters."
+                    "FASTR-like — template subtraction with optional residual correction",
+                    "EVA’s independent implementation defaults to unscaled whole-TR templates from 30 neighboring volumes. Alignment, interpolation, OBS and ANC are off. Slice timing and residual correction remain optional; this is not an exact reproduction of the FMRIB toolbox."
                 )
                 mriMethodEntry(
                     "Moosmann — motion-informed averaging",

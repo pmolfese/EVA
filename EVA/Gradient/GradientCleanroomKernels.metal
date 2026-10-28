@@ -155,6 +155,7 @@ kernel void gcrEpochStats(
     device float       *means   [[buffer(1)]],
     device float       *norms   [[buffer(2)]],
     constant GCRParams &p       [[buffer(3)]],
+    constant uint &difference  [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint length = p.windowLength;
@@ -163,15 +164,15 @@ kernel void gcrEpochStats(
 
     float sum = 0.0f;
     float compensation = 0.0f;
-    for (uint index = 0; index < length; ++index) {
-        gcrAccumulate(sum, compensation, window[index]);
+    for (uint index = 0; index + difference < length; ++index) {
+        gcrAccumulate(sum, compensation, (difference ? window[index + 1] - window[index] : window[index]));
     }
-    float mean = sum / float(length);
+    float mean = sum / float(max(length - difference, 1u));
 
     float variance = 0.0f;
     compensation = 0.0f;
-    for (uint index = 0; index < length; ++index) {
-        float deviation = window[index] - mean;
+    for (uint index = 0; index + difference < length; ++index) {
+        float deviation = (difference ? window[index + 1] - window[index] : window[index]) - mean;
         gcrAccumulate(variance, compensation, deviation * deviation);
     }
 
@@ -191,6 +192,7 @@ kernel void gcrCorrelate(
     device const int   *pairs   [[buffer(3)]],
     device float       *out     [[buffer(4)]],
     constant GCRParams &p       [[buffer(5)]],
+    constant uint &difference  [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint pairCount = p.pairCount;
@@ -216,8 +218,8 @@ kernel void gcrCorrelate(
 
     float covariance = 0.0f;
     float compensation = 0.0f;
-    for (uint index = 0; index < length; ++index) {
-        gcrAccumulate(covariance, compensation, (a[index] - meanA) * (b[index] - meanB));
+    for (uint index = 0; index + difference < length; ++index) {
+        gcrAccumulate(covariance, compensation, ((difference ? a[index + 1] - a[index] : a[index]) - meanA) * ((difference ? b[index + 1] - b[index] : b[index]) - meanB));
     }
     out[gid] = covariance / denominator;
 }

@@ -838,6 +838,60 @@ struct GradientTemplateCorrectorTests {
     }
 
     @Test(arguments: GradientComputeBackend.allCases)
+    func irregularGroupsCorrectEverySampleWithoutCrossingMissingTR(backend: GradientComputeBackend) throws {
+        guard supports(backend) else { return }
+        let triggers = Array(stride(from: 100, to: 4100, by: 100)).filter { $0 != 2100 }
+        let signal = (0..<4200).map { Float(20 + ($0 % 100) * ($0 % 13)) }
+        // A precisely repeatable artifact within each TR, including samples
+        // that fell into gaps between the former fixed-length windows.
+        let artifact = (0..<100).map { Float(20 + $0 * ($0 % 13)) }
+        var input = signal
+        for t in triggers { input.replaceSubrange(t..<(t + 100), with: artifact) }
+        var config = defaultConfig(backend)
+        config.acquisitionSchedule = .offsetsFractionOfTR([0, 0.2, 0.45, 0.75])
+        config.templateScheme = .correlationRanked
+        config.correlationThreshold = 2
+        config.templateScaling = .unscaled
+        config.alignmentEnabled = false
+        config.subSampleAlignment = false
+        config.upsampleFactor = 1
+        config.obs = .off
+        config.anc = false
+        let result = try GradientTemplateCorrector.correct(
+            channels: [input], volumeTriggers: triggers, config: config, samplingRate: 1000)
+        for t in triggers {
+            #expect(result.channels[0][t..<(t + 100)].allSatisfy { abs($0) < 0.001 })
+        }
+        #expect(Array(result.channels[0][2100..<2200]) == Array(input[2100..<2200]))
+        #expect(Array(result.channels[0][0..<100]) == Array(input[0..<100]))
+        let ownership = try #require(result.diagnostics.outputRanges)
+        #expect(ownership.first == 100..<120)
+        #expect(ownership.allSatisfy { !$0.contains(2150) })
+        #expect(ownership.reduce(0) { $0 + $1.count } == triggers.count * 100)
+    }
+
+    @Test(arguments: GradientComputeBackend.allCases)
+    func correlationFallbackKeepsAcquisitionGroupPosition(backend: GradientComputeBackend) throws {
+        guard supports(backend) else { return }
+        let recording = makeRecording(volumes: 30, period: 100)
+        var config = defaultConfig(backend)
+        config.numberOfSlices = 4
+        config.templateScheme = .correlationRanked
+        config.correlationThreshold = 2 // Force fallback for every target.
+        config.censoredVolumes = [2]
+        let result = try GradientTemplateCorrector.correct(
+            channels: [recording.channel], volumeTriggers: recording.triggers,
+            config: config, samplingRate: Self.samplingRate)
+        let corrected = result.diagnostics.epochs.filter { !$0.donorIndices.isEmpty }
+        #expect(!corrected.isEmpty)
+        for epoch in corrected {
+            #expect(epoch.donorIndices.allSatisfy { $0 % 4 == epoch.epoch % 4 })
+            #expect(epoch.donorIndices.allSatisfy { $0 / 4 != 2 })
+            #expect(!epoch.donorIndices.contains(epoch.epoch))
+        }
+    }
+
+    @Test(arguments: GradientComputeBackend.allCases)
     func squaredCorrelationRankingRunsEndToEnd(backend: GradientComputeBackend) throws {
         guard supports(backend) else { return }
 

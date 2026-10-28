@@ -36,6 +36,21 @@ struct GradientDonorSelectionTests {
 
     // MARK: - Temporal neighbors
 
+    @Test func firstDifferenceScoringIgnoresLinearDriftWithoutMutatingWindows() {
+        let a: [Float] = [0, 1, 0, 1, 0]
+        let b: [Float] = [0, 11, 20, 31, 40]
+        let score = a.withUnsafeBufferPointer { left in
+            b.withUnsafeBufferPointer { right in
+                GradientDonorSelection.pearsonCorrelation(
+                    left.baseAddress!, right.baseAddress!, count: a.count,
+                    feature: .firstDifference)
+            }
+        }
+        #expect(abs(score - 1) < 1e-12)
+        #expect(abs(GradientDonorSelection.pearsonCorrelation(a, b)) < 0.1)
+        #expect(b == [0, 11, 20, 31, 40])
+    }
+
     @Test func temporalDonorsAreTheNearestEpochsAndExcludeTheTarget() {
         let donors = GradientDonorSelection.nearestTemporalDonors(
             target: 10, epochCount: 40, desired: 4,

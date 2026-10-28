@@ -66,6 +66,7 @@ enum GradientDonorRanking: String, CaseIterable, Identifiable, Sendable {
 
 /// How FASTR obtains the distinct acquisition times within one TR.
 enum GradientAcquisitionTimingMode: String, CaseIterable, Identifiable, Sendable {
+    case wholeVolume
     case slicesAndMultiband
     case acquisitionGroupCount
     case jsonSidecar
@@ -74,6 +75,7 @@ enum GradientAcquisitionTimingMode: String, CaseIterable, Identifiable, Sendable
 
     var label: String {
         switch self {
+        case .wholeVolume: return "Whole TR"
         case .slicesAndMultiband: return "Slices + MB"
         case .acquisitionGroupCount: return "Group count"
         case .jsonSidecar: return "JSON"
@@ -248,7 +250,16 @@ final class GradientViewModel {
     /// so the split never had an effect — and Allen AAS uses a running section
     /// instead. Only the local-template family honoured a split, where the only
     /// thing asymmetry reliably buys is edge bias.
-    var donorVolumes = GradientViewModel.defaultDonorVolumes
+    private var templateDonorVolumes = GradientViewModel.defaultDonorVolumes
+    private var fastrDonorEpochs = 30
+    var defaultDonorCount: Int { method.isFASTR ? 30 : Self.defaultDonorVolumes }
+    var donorVolumes: Int {
+        get { method.isFASTR ? fastrDonorEpochs : templateDonorVolumes }
+        set {
+            if method.isFASTR { fastrDonorEpochs = newValue }
+            else { templateDonorVolumes = newValue }
+        }
+    }
 
     /// The total split as evenly as the engines want it, remainder before.
     private var donorSplit: (before: Int, after: Int) {
@@ -259,32 +270,46 @@ final class GradientViewModel {
     var trMarkerCode = "TREV"
     var method = MRIGradientMethod.allenIAR
     var slicesPerVolume = 1
-    var acquisitionTimingMode = GradientAcquisitionTimingMode.slicesAndMultiband
+    var acquisitionTimingMode = GradientAcquisitionTimingMode.wholeVolume
     var multibandFactor = 1
     var acquisitionGroupCount = 1
     var jsonAcquisitionSchedule: GradientAcquisitionSchedule?
+    /// Keep imported offsets available while comparing against even spacing.
+    var useJSONSliceTiming = true
     var acquisitionTimingSourceName: String?
     /// Where the trigger sits inside its artifact epoch, as a fraction.
-    var relativeTriggerPosition = 0.0
+    private var templateTriggerPosition = 0.0
+    private var fastrTriggerPosition = 0.0
+    var relativeTriggerPosition: Double {
+        get { method.isFASTR ? fastrTriggerPosition : templateTriggerPosition }
+        set {
+            if method.isFASTR { fastrTriggerPosition = newValue }
+            else { templateTriggerPosition = newValue }
+        }
+    }
     var computeBackend = GradientComputeBackend.cpu
 
     // MARK: Alignment (FASTR family)
-    var alignmentEnabled = true
-    var subSampleAlignment = true
+    var alignmentEnabled = false
+    var subSampleAlignment = false
     var upsampleFactor = 1
-    var synchronizationProfile = GradientSynchronizationProfile.scannerSlaved
+    var synchronizationProfile = GradientSynchronizationProfile.custom
 
     // MARK: Template scaling (FASTR family)
-    var templateScaling = GradientTemplateScaling.driftTracking
+    var templateScaling = GradientTemplateScaling.unscaled
     var templateScaleSmoothingEpochs = 15
     var templateScaleMinimum = 0.2
     var templateScaleMaximum = 5.0
 
     // MARK: Correlation donors (FASTR family)
+    // Retained after the GE/NNU donor and fractional-alignment sweeps:
+    // 30 donors, ±20 TRs, first differences; alignment stays off above.
+    // Replay deliberately restores historical values when these keys are absent.
     var donorRanking = GradientDonorRanking.methodDefault
     var correlationThreshold = 0.9
-    var minimumCorrelatedDonors = 4
-    var correlationSearchWindow = 240
+    var correlationFeature: GradientCorrelationFeature = .firstDifference
+    var minimumCorrelatedDonors = 30
+    var correlationSearchWindow = 20
 
     // MARK: OBS (FASTR family)
     var obsSelection = GradientOBSSelection.off
@@ -439,6 +464,8 @@ final class GradientViewModel {
     /// multiband slices share one group and therefore one artifact epoch.
     var effectiveAcquisitionSchedule: GradientAcquisitionSchedule? {
         switch acquisitionTimingMode {
+        case .wholeVolume:
+            return .uniform(groupsPerVolume: 1)
         case .slicesAndMultiband:
             guard slicesPerVolume >= 1, multibandFactor >= 1 else { return nil }
             return .uniform(
@@ -448,7 +475,10 @@ final class GradientViewModel {
             guard acquisitionGroupCount >= 1 else { return nil }
             return .uniform(groupsPerVolume: acquisitionGroupCount)
         case .jsonSidecar:
-            return jsonAcquisitionSchedule
+            guard let jsonAcquisitionSchedule else { return nil }
+            return useJSONSliceTiming
+                ? jsonAcquisitionSchedule
+                : .uniform(groupsPerVolume: jsonAcquisitionSchedule.groupsPerVolume)
         }
     }
 
@@ -566,6 +596,7 @@ final class GradientViewModel {
         acquisitionGroupCount = candidateGroupCount
         jsonAcquisitionSchedule = candidateJSONSchedule
         acquisitionTimingMode = candidateMode
+        if candidateMode == .jsonSidecar { useJSONSliceTiming = true }
         acquisitionTimingSourceName = sourceName
     }
 
@@ -693,6 +724,7 @@ final class GradientViewModel {
             config.templateScheme = .squaredCorrelationRanked
             config.allowsSelfDonation = true
         }
+        config.correlationFeature = correlationFeature
         config.correlationThreshold = correlationThreshold
         config.minimumCorrelatedDonors = max(1, minimumCorrelatedDonors)
         config.correlationSearchWindow = max(1, correlationSearchWindow)
@@ -818,9 +850,13 @@ final class GradientViewModel {
         ]
         if method.supportsSliceEpochs {
             params["slices"] = "\(slicesPerVolume)"
+            params["relativeTriggerPosition"] = "\(relativeTriggerPosition)"
         }
         if method.isFASTR {
             params["acquisitionTimingMode"] = acquisitionTimingMode.rawValue
+            if acquisitionTimingMode == .jsonSidecar {
+                params["useJSONSliceTiming"] = "\(useJSONSliceTiming)"
+            }
             params["multibandFactor"] = "\(multibandFactor)"
             params["acquisitionGroupCount"] = "\(acquisitionGroupCount)"
             if acquisitionTimingMode == .jsonSidecar, let jsonAcquisitionSchedule {
@@ -857,6 +893,7 @@ final class GradientViewModel {
             params["scaleMinimum"] = String(format: "%.4f", templateScaleMinimum)
             params["scaleMaximum"] = String(format: "%.4f", templateScaleMaximum)
             params["donorRanking"] = donorRanking.rawValue
+            params["correlationFeature"] = correlationFeature.rawValue
             params["correlationThreshold"] = String(format: "%.4f", correlationThreshold)
             params["minimumCorrelatedDonors"] = "\(minimumCorrelatedDonors)"
             params["correlationSearchWindow"] = "\(correlationSearchWindow)"
@@ -941,6 +978,10 @@ final class GradientViewModel {
 
         if let m = p["method"].flatMap(MRIGradientMethod.init(rawValue:)) { method = m }
         if let c = p["trMarkerCode"] { trMarkerCode = c }
+        // Older runs did not persist this control and used the former zero default.
+        if method.supportsSliceEpochs {
+            relativeTriggerPosition = p["relativeTriggerPosition"].flatMap(Double.init) ?? 0
+        }
         if let v = p["donorVolumes"].flatMap(Int.init) {
             donorVolumes = v
         } else if let before = p["windowBefore"].flatMap(Int.init),
@@ -954,7 +995,13 @@ final class GradientViewModel {
 
         if let v = p["acquisitionTimingMode"].flatMap(GradientAcquisitionTimingMode.init(rawValue:)) {
             acquisitionTimingMode = v
+        } else {
+            // Legacy runs derived epochs from their stored slice count.
+            acquisitionTimingMode = .slicesAndMultiband
         }
+        // Older JSON runs always used their imported offsets. Reset explicitly
+        // so replaying one after an even-spacing run cannot inherit its override.
+        useJSONSliceTiming = p["useJSONSliceTiming"] != "false"
         if let v = p["multibandFactor"].flatMap(Int.init) { multibandFactor = v }
         if let v = p["acquisitionGroupCount"].flatMap(Int.init) { acquisitionGroupCount = v }
         if let unit = p["acquisitionOffsetsUnit"], let encoded = p["acquisitionOffsets"] {
@@ -992,8 +1039,9 @@ final class GradientViewModel {
         if let v = p["scaleMaximum"].flatMap(Double.init) { templateScaleMaximum = v }
         if let v = p["donorRanking"].flatMap(GradientDonorRanking.init(rawValue:)) { donorRanking = v }
         if let v = p["correlationThreshold"].flatMap(Double.init) { correlationThreshold = v }
-        if let v = p["minimumCorrelatedDonors"].flatMap(Int.init) { minimumCorrelatedDonors = v }
-        if let v = p["correlationSearchWindow"].flatMap(Int.init) { correlationSearchWindow = v }
+        correlationFeature = p["correlationFeature"].flatMap(GradientCorrelationFeature.init(rawValue:)) ?? .rawWaveform
+        minimumCorrelatedDonors = p["minimumCorrelatedDonors"].flatMap(Int.init) ?? 4
+        correlationSearchWindow = p["correlationSearchWindow"].flatMap(Int.init) ?? 240
 
         if let v = p["obs"].flatMap(GradientOBSSelection.init(rawValue:)) { obsSelection = v }
         if let v = p["obsFixedComponents"].flatMap(Int.init) { obsFixedComponents = v }
@@ -1401,6 +1449,8 @@ final class GradientViewModel {
             parts.append("\(effectiveAcquisitionGroupCount) acquisition groups/TR")
             if acquisitionTimingMode == .slicesAndMultiband {
                 parts.append("\(slicesPerVolume) slices, MB\(multibandFactor)")
+            } else if acquisitionTimingMode == .jsonSidecar {
+                parts.append(useJSONSliceTiming ? "JSON timing" : "evenly spaced groups")
             }
         } else if method.supportsSliceEpochs, slicesPerVolume > 1 {
             parts.append("\(slicesPerVolume) groups/volume")

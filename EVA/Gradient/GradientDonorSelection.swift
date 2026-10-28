@@ -239,14 +239,19 @@ nonisolated enum GradientDonorSelection {
     static func pearsonCorrelation(
         _ a: UnsafePointer<Float>,
         _ b: UnsafePointer<Float>,
-        count: Int
+        count: Int,
+        feature: GradientCorrelationFeature = .rawWaveform
     ) -> Double {
+        let count = count - (feature == .firstDifference ? 1 : 0)
         guard count > 0 else { return 0 }
+        func value(_ p: UnsafePointer<Float>, _ i: Int) -> Double {
+            feature == .firstDifference ? Double(p[i + 1]) - Double(p[i]) : Double(p[i])
+        }
         var meanA = 0.0
         var meanB = 0.0
         for i in 0..<count {
-            meanA += Double(a[i])
-            meanB += Double(b[i])
+            meanA += value(a, i)
+            meanB += value(b, i)
         }
         meanA /= Double(count)
         meanB /= Double(count)
@@ -255,8 +260,8 @@ nonisolated enum GradientDonorSelection {
         var varianceA = 0.0
         var varianceB = 0.0
         for i in 0..<count {
-            let da = Double(a[i]) - meanA
-            let db = Double(b[i]) - meanB
+            let da = value(a, i) - meanA
+            let db = value(b, i) - meanB
             covariance += da * db
             varianceA += da * da
             varianceB += db * db

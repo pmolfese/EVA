@@ -26,7 +26,7 @@ nonisolated struct GradientTimingAssessment: Codable, Sendable, Equatable, Hasha
             } else {
                 timing = "Group timing is not verified. "
             }
-            return timing + "Fractional timing support is off. Integer-only alignment can leave residue even with synchronized clocks; enable interpolation or sub-sample alignment."
+            return timing + "Group spacing falls between EEG samples; this does not establish a trailing acquisition gap. Fractional timing support is off: enable interpolation or sub-sample alignment to reduce rounding-related residual artifact."
         }
         if agreement == .compatible, let observedMilliseconds {
             return String(format: "Group timing agrees: configured %@, measured repeat %.2f ms. Check correction quality after processing.", interval, observedMilliseconds)
@@ -70,7 +70,7 @@ nonisolated struct GradientTimingProbe: Sendable {
         }
         let samples = interval * samplingRate
         let fractional = samples.isFinite && abs(samples - samples.rounded()) > 0.000001 && !fractionalTiming
-        let hint = fractional ? " The group interval is fractional at the EEG sampling rate. This can occur with synchronized clocks; use sub-sample alignment or internal upsampling for slice templates." : ""
+        let hint = fractional ? " The group interval is fractional at the EEG sampling rate. This does not establish a trailing acquisition gap and can occur with synchronized clocks; use sub-sample alignment or internal upsampling for slice templates." : ""
         guard samples.isFinite, samples >= 1, samples < Double(correlations.count - 1),
               let observedLag, comparisons >= 6 else {
             return result(.inconclusive, expected: interval, fractional: fractional,
