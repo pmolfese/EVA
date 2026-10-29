@@ -130,6 +130,11 @@ struct SimulatorGenerateView: View {
                 statusStrip(simulator: simulator)
             }
 
+            if let output = simulator.lastOutput {
+                Divider()
+                SimulatorCommandPanel(output: output)
+            }
+
             Divider()
             bottomBar(simulator: simulator)
         }
@@ -268,6 +273,78 @@ struct SimulatorGenerateView: View {
             return ERPExperimentSampler.requiredDuration(trials) + 1 / c.samplingRate < c.durationSeconds
         }
         return true
+    }
+}
+
+/// Shared by all Generate settings sections, above the persistent bottom bar.
+/// This is a snapshot of the completed run, never a reconstruction from edits
+/// made to the current settings after generation.
+private struct SimulatorCommandPanel: View {
+    let output: SimulatorRunner.Output
+    @State private var isExpanded = false
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .frame(width: 10)
+                        Label("CLI command", systemImage: "terminal")
+                        Text("Last successful run")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("CLI command")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                .accessibilityHint("Shows the command used for the last successful generation")
+
+                Spacer()
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    copied = NSPasteboard.general.setString(output.commandRecord.command, forType: .string)
+                } label: {
+                    Label(copied ? "Copied" : "Copy command",
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .help("Copy the original command, including the executable's full path")
+            }
+
+            if isExpanded {
+                ScrollView {
+                    Text(output.commandRecord.command)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(height: 110)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.vertical, 8)
+
+                HStack(alignment: .top, spacing: 12) {
+                    Text("Settings and seed are in the scenario file. Original temporary paths may no longer exist.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([output.scenarioURL])
+                    } label: {
+                        Label("Reveal Scenario", systemImage: "doc.text")
+                    }
+                    .help(output.scenarioURL.path)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .onChange(of: output.commandRecord.command) { copied = false }
     }
 }
 

@@ -191,6 +191,32 @@ struct SimulatorRunnerTests {
         let json = try String(contentsOf: output.commandURL, encoding: .utf8)
         #expect(json.contains("generate"), "command record should name the subcommand")
         #expect(json.contains("--config"), "command record should carry the arguments")
+        let saved = try JSONDecoder().decode(SimulatorRunner.CommandRecord.self, from: Data(json.utf8))
+        #expect(saved.command == output.commandRecord.command)
+        #expect(saved.executable == SimulatorRunner.locateCLI()?.path)
+        #expect(saved.arguments == ["generate", "--config", output.scenarioURL.path,
+                                    "--output", output.directory.path, "--prefix", "sim"])
+    }
+
+    @Test("copied commands preserve shell metacharacters and empty arguments")
+    func shellCommandPreservesArguments() throws {
+        let arguments = ["", "space here", "it's quoted", "a;b", "$(echo expanded)",
+                         "`echo expanded`", "*.mff", "a&b", "a|b", "<input>", "line\nbreak", "~", "é"]
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", SimulatorRunner.shellCommand(
+            executable: URL(fileURLWithPath: "/usr/bin/printf"),
+            arguments: ["%s\\0"] + arguments
+        )]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        // Process uses macOS's decomposed Unicode representation for arguments.
+        // Compare text canonically while preserving the NUL argument boundaries.
+        #expect(String(decoding: data, as: UTF8.self) == arguments.joined(separator: "\0") + "\0")
     }
 
     @Test("relocates outputs into a chosen directory")
@@ -211,6 +237,13 @@ struct SimulatorRunnerTests {
         #expect(FileManager.default.fileExists(atPath: output.noisyURL.path))
         #expect(FileManager.default.fileExists(atPath: dest.appendingPathComponent("run_scenario.json").path))
         #expect(FileManager.default.fileExists(atPath: dest.appendingPathComponent("run_command.json").path))
+        let saved = try JSONDecoder().decode(SimulatorRunner.CommandRecord.self,
+                                            from: Data(contentsOf: output.commandURL))
+        #expect(saved.command == output.commandRecord.command)
+        // The panel must show the invocation actually executed, including its
+        // original workspace, rather than substituting the relocated paths.
+        #expect(saved.arguments.contains("run"))
+        #expect(!saved.arguments.contains(dest.path))
     }
 
     @Test("scores a recording against its ground truth")

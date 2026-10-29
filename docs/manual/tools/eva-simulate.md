@@ -60,6 +60,20 @@ Eight subcommands:
 
 ## Quick start
 
+### GUI: inspect the generation command
+
+After generating a recording, expand **CLI command** above the bottom bar in
+any Generate settings tab. The panel shows the exact invocation from the last
+successful run; editing settings or dismissing the completion banner does not
+change it. **Copy command** copies the full command, and **Reveal Scenario**
+locates the JSON containing that run's settings and seed.
+
+The command is also saved beside the recording as `<prefix>_command.json`.
+It records the original temporary workspace paths, which may have been removed
+after the results were copied to your chosen output folder. To rerun such a
+command, point `--config` at the saved scenario and `--output` at your desired
+output directory.
+
 ### GUI: waveform and condition editor
 
 Open **File → New Simulated Recording → ERP** and enable event-related

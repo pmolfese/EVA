@@ -61,6 +61,9 @@ nonisolated enum SimulatorRunner {
         let scenarioURL: URL
         /// A record of the exact command used to generate this run.
         let commandURL: URL
+        /// The same invocation saved to `commandURL`, retained for the GUI so
+        /// displaying it does not depend on rereading a relocated output folder.
+        let commandRecord: CommandRecord
         /// The directory holding everything, so the caller can reveal or clean it.
         let directory: URL
     }
@@ -130,7 +133,7 @@ nonisolated enum SimulatorRunner {
 
     /// A record of exactly how a recording was generated, written next to the
     /// outputs as `<prefix>_command.json` so a run is reproducible from disk.
-    private struct CommandRecord: Codable {
+    struct CommandRecord: Codable, Sendable {
         var command: String
         var executable: String
         var arguments: [String]
@@ -195,7 +198,7 @@ nonisolated enum SimulatorRunner {
 
         // Record the command before running, so a failed run is still explained.
         let commandURL = workDir.appendingPathComponent("\(prefix)_command.json")
-        try writeCommandRecord(
+        let commandRecord = try writeCommandRecord(
             executable: cli, arguments: arguments, to: commandURL
         )
 
@@ -233,6 +236,7 @@ nonisolated enum SimulatorRunner {
             truthURL: directory.appendingPathComponent("\(prefix)_truth.json"),
             scenarioURL: directory.appendingPathComponent("\(prefix)_scenario.json"),
             commandURL: directory.appendingPathComponent("\(prefix)_command.json"),
+            commandRecord: commandRecord,
             directory: directory
         )
     }
@@ -541,7 +545,7 @@ nonisolated enum SimulatorRunner {
 
     private static func writeCommandRecord(
         executable: URL, arguments: [String], to url: URL
-    ) throws {
+    ) throws -> CommandRecord {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let record = CommandRecord(
             command: shellCommand(executable: executable, arguments: arguments),
@@ -553,15 +557,17 @@ nonisolated enum SimulatorRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
         try encoder.encode(record).write(to: url, options: .atomic)
+        return record
     }
 
     /// A copy-pasteable command line, quoting any argument that needs it.
-    private static func shellCommand(executable: URL, arguments: [String]) -> String {
-        ([executable.lastPathComponent] + arguments).map(shellQuote).joined(separator: " ")
+    static func shellCommand(executable: URL, arguments: [String]) -> String {
+        ([executable.path] + arguments).map(shellQuote).joined(separator: " ")
     }
 
     private static func shellQuote(_ token: String) -> String {
-        guard token.contains(where: { " \t\n\"'\\$`".contains($0) }) else { return token }
+        let safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-"
+        if !token.isEmpty && token.allSatisfy({ safe.contains($0) }) { return token }
         return "'" + token.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
