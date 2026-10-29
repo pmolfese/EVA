@@ -52,6 +52,31 @@
 
 import Foundation
 
+nonisolated struct ERPGroupContrast: Codable, Sendable, Equatable, Identifiable {
+    var id: String
+    var weights: [String: Double]
+}
+
+/// Exact nominal contrast waveform, before trial recipes, omissions, jitter,
+/// noise, or projection. Terms can have different latencies and widths; their
+/// amplitudes must never be collapsed to one sum of peak amplitudes.
+nonisolated struct GroupERPWaveformContrast: Codable, Sendable, Identifiable {
+    var id: String
+    var weights: [String: Double]
+    var terms: [ERPWaveformPeak]
+    func value(at seconds: Double) -> Double { terms.reduce(0) { $0 + $1.value(at: seconds) } }
+}
+
+nonisolated struct GroupERPExperimentEstimand: Codable, Sendable {
+    var kind: String = "nominal-source-waveform-contrasts"
+    var units: String = "microvolts"
+    var referenceConditionID: String
+    var conditionNames: [String: String]
+    var variationModel: String = "reference fixed; one shared normal subject multiplier scales all condition-minus-reference waveforms"
+    var scope: String = "nominal waveform before trial recipes, peak occurrence, omissions, jitter, noise, and sensor projection"
+    var contrasts: [GroupERPWaveformContrast]
+}
+
 /// Between-subject variability, each declared as a standard deviation.
 ///
 /// Defaults are plausible adult values, not measured ones — they are here to
@@ -105,6 +130,8 @@ nonisolated struct SubjectDraw: Codable, Sendable {
     /// Explicit per-component target-minus-standard peak-amplitude effects.
     /// This is the scoreable truth for multi-component designs.
     var erpComponentEffectsMicrovolts: [String: Double]? = nil
+    /// Exact subject-level nominal waveform contrasts for editable experiments.
+    var erpWaveformContrasts: [GroupERPWaveformContrast]? = nil
 }
 
 nonisolated struct GroupERPComponentEffect: Codable, Sendable {
@@ -137,8 +164,9 @@ nonisolated struct GroupTruth: Codable, Sendable {
     /// contrast. Nil for multi-component contrasts because summing peaks across
     /// different generators, times and topographies is not a valid estimand.
     var populationEffectMicrovolts: Double?
-    /// Explicit, scoreable population ERP estimand. Present for every ERP design.
+    /// Per-component population estimand for legacy ERP designs.
     var erpEstimand: GroupERPEstimand? = nil
+    var erpExperimentEstimand: GroupERPExperimentEstimand? = nil
     var subjects: [SubjectDraw]
     /// Between-subject standard deviations actually realized. Reported because a
     /// requested SD and a realized SD are different things at small N, and a
@@ -187,6 +215,15 @@ nonisolated enum GroupSimulation {
                 effects.reduce(into: [String: Double]()) {
                     $0[$1.componentID] = $1.targetMinusStandardMicrovolts * effect
                 }
+            },
+            erpWaveformContrasts: populationWaveformContrasts(base).map { contrasts in
+                contrasts.map { contrast in
+                    var result = contrast
+                    result.terms = result.terms.map { peak in
+                        var peak = peak; peak.amplitudeMicrovolts *= effect; return peak
+                    }
+                    return result
+                }
             }
         )
     }
@@ -230,7 +267,27 @@ nonisolated enum GroupSimulation {
         // it is estimating. Adjusting the standard ratio instead moves the
         // difference and leaves the common response nearly alone.
         if var erp = config.erp {
-            if var components = erp.components {
+            if var experiment = erp.experiment,
+               let reference = experiment.conditions.first(where: { $0.id == experiment.referenceConditionID }) {
+                // A_s(t) = B(t) + s * (A(t) - B(t)). Appending reference terms
+                // expresses this exactly even when conditions have unrelated
+                // peak latencies/widths or different numbers of components.
+                for c in experiment.conditions.indices where experiment.conditions[c].id != reference.id {
+                    for p in experiment.conditions[c].peaks.indices {
+                        experiment.conditions[c].peaks[p].amplitudeMicrovolts *= subject.erpEffectScale
+                    }
+                    if subject.erpEffectScale != 1 {
+                        for original in reference.peaks {
+                            var peak = original
+                            peak.id = "group-reference/\(reference.id)/\(original.id)"
+                            while experiment.conditions[c].peaks.contains(where: { $0.id == peak.id }) { peak.id = "_" + peak.id }
+                            peak.amplitudeMicrovolts *= 1 - subject.erpEffectScale
+                            experiment.conditions[c].peaks.append(peak)
+                        }
+                    }
+                }
+                erp.experiment = experiment
+            } else if var components = erp.components {
                 for index in components.indices {
                     let ratio = components[index].standardAmplitudeRatio
                     components[index].standardAmplitudeRatio =
@@ -247,10 +304,29 @@ nonisolated enum GroupSimulation {
     }
 
     /// Per-component population contrasts implied by a configuration.
+    static func populationWaveformContrasts(_ config: SimulationConfig) -> [GroupERPWaveformContrast]? {
+        guard let experiment = config.erp?.experiment else { return nil }
+        return experiment.resolvedGroupContrasts.map { contrast in
+            let terms = experiment.conditions.flatMap { condition in
+                condition.peaks.compactMap { original -> ERPWaveformPeak? in
+                    let weight = contrast.weights[condition.id, default: 0]
+                    guard weight != 0 else { return nil }
+                    var peak = original
+                    peak.id = "\(condition.id)/\(original.id)"
+                    peak.amplitudeMicrovolts *= weight
+                    peak.occurrenceFraction = 1
+                    return peak
+                }
+            }
+            return GroupERPWaveformContrast(id: contrast.id, weights: contrast.weights, terms: terms)
+        }
+    }
+
+    /// Per-component population contrasts implied by a legacy configuration.
     static func populationComponentEffects(
         _ config: SimulationConfig
     ) -> [GroupERPComponentEffect]? {
-        guard let erp = config.erp else { return nil }
+        guard let erp = config.erp, erp.experiment == nil else { return nil }
         if let components = erp.components, !components.isEmpty {
             return components.map { component in
                 let standard = component.targetAmplitudeMicrovolts
@@ -303,6 +379,11 @@ nonisolated enum GroupSimulation {
             populationEffectMicrovolts: populationEffect(base),
             erpEstimand: populationComponentEffects(base).map {
                 GroupERPEstimand(components: $0)
+            },
+            erpExperimentEstimand: base.erp?.experiment.map { experiment in
+                GroupERPExperimentEstimand(referenceConditionID: experiment.referenceConditionID,
+                    conditionNames: Dictionary(uniqueKeysWithValues: experiment.conditions.map { ($0.id, $0.name) }),
+                    contrasts: populationWaveformContrasts(base) ?? [])
             },
             subjects: subjects,
             realizedBetweenSubjectSD: [

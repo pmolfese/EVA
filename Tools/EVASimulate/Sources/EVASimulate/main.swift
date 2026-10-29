@@ -33,6 +33,7 @@ import Foundation
 
 nonisolated struct Arguments {
     private var values: [String: String] = [:]
+    private var repeatedValues: [String: [String]] = [:]
     private(set) var positional: [String] = []
 
     init(_ tokens: [String]) {
@@ -43,9 +44,11 @@ nonisolated struct Arguments {
                 let key = String(token.dropFirst(2))
                 if index + 1 < tokens.count, !tokens[index + 1].hasPrefix("--") {
                     values[key] = tokens[index + 1]
+                    repeatedValues[key, default: []].append(tokens[index + 1])
                     index += 2
                 } else {
                     values[key] = "true"
+                    repeatedValues[key, default: []].append("true")
                     index += 1
                 }
             } else {
@@ -66,6 +69,7 @@ nonisolated struct Arguments {
     }
 
     func string(_ key: String) -> String? { values[key] }
+    func strings(_ key: String) -> [String] { repeatedValues[key] ?? [] }
 
     func double(_ key: String) throws -> Double? {
         guard let raw = values[key] else { return nil }
@@ -98,6 +102,7 @@ func usage() -> String {
     """
     Usage:
       eva-simulate generate [--output <dir>] [--write-config <json>] [model options]
+      eva-simulate generate-group --output <dir> [--subjects <n>] [group/model options]
       eva-simulate score --truth <clean.mff> --corrected <file.mff> [options]
       eva-simulate score-cleaning --clean <clean.mff> --noisy <noisy.mff>
                --corrected <file.mff> [--label <name>] [--json <path>]
@@ -231,7 +236,8 @@ func usage() -> String {
       Event-related potentials (off by default)
         --with-erp                  Enable the default 80-trial oddball design.
         --no-erp                    Disable ERPs loaded from a scenario.
-        --erp-trials <n>            Number of standard/target trials.
+        --erp-trials <n>            Total trials across all conditions.
+        --erp-start <s>            First stimulus time (default 1).
         --erp-isi <s>               Inter-stimulus interval (default 1.5).
         --erp-isi-jitter <s>        Uniform onset jitter (default ±0.2).
         --erp-target-fraction <f>   Target-trial fraction (default 0.2).
@@ -247,6 +253,53 @@ func usage() -> String {
         --erp-width <ms>            Analytic component width (default 60).
         --erp-template <path>       Measured waveform, one sample per line.
         --erp-template-rate <hz>    Sampling rate of the measured ERP waveform.
+
+      Editable ERP experiments (also accepted by generate-group; no file needed)
+        --erp-experiment           Enable editable Frequent/Target defaults.
+        --erp-condition <id:name:code:fraction>   Repeat for each condition.
+                                    Replaces the condition list; shares sum to 1.
+                                    Each starts with p1: 300 ms, 8 µV, σ 60 ms.
+        --erp-peak <condition:peak:latency_ms:amplitude_uv:width_ms[:occurrence]>
+                                    Repeat for peaks; replaces peaks in each
+                                    mentioned condition. Occurrence defaults 1.
+        --erp-mixture <condition:attenuated:inverted:divergent>
+                                    Repeat per condition. Fractions sum ≤1;
+                                    Typical fills the remainder, excluding omissions.
+        --erp-recipe <condition:attenuated_gain:shift_ms:width_min:width_max>
+                                    Repeat per condition to tune recipe severity.
+        --erp-peak-jitter <ms>      Independent component latency SD.
+        --erp-width-jitter <f>      Whole-response width multiplier SD fraction.
+        --erp-noise <uv>            Added sensor noise RMS; noisy recording only.
+        --erp-noise-kind <name>     white or smoothed (20 ms time constant).
+        --erp-reference <id>        Group reference; defaults to first condition.
+        --erp-contrast <name:id=weight,id=weight,...>  Repeat named contrasts.
+                                    Weights sum to zero. Default: each condition
+                                    minus reference. Exact nominal waveform truth.
+        --erp-fit-duration         Extend recording to fit actual seeded responses;
+                                    applied separately to each group subject.
+        Shared: --erp-trials, --erp-start, --erp-isi, --erp-isi-jitter,
+                --erp-latency-jitter, --erp-amplitude-jitter, --erp-omission-rate.
+        Experiment ISI jitter varies intervals uniformly, not grid onsets.
+        Fractions use 0...1, not percentages. IDs/names cannot contain colons.
+        Legacy shape/skew/correlation flags are rejected for editable experiments.
+
+      Group generation (generate-group)
+        --subjects <n>             Subject count (default 12).
+        --group-seed <n>           Cohort seed (defaults to recording seed).
+        --erp-effect-sd <f>        Between-subject effect multiplier SD (default 0.3).
+                                    Reference fixed; one shared normal multiplier
+                                    scales all condition-minus-reference waveforms.
+                                    Truth describes nominal effects before trial
+                                    recipes, omissions, jitter, noise, and projection.
+        --homogeneous              Zero all between-subject SDs; explicit SD flags
+                                    override this setting.
+        --head-radius-sd <f>        Head-radius fractional SD (default 0.05).
+        --placement-sd <deg>        Electrode-placement SD (default 3).
+        --alpha-sd <f>              Alpha-amplitude fractional SD (default 0.35).
+        --bcg-sd <f>                BCG-amplitude fractional SD (default 0.3).
+        --impedance-sd <f>          Impedance fractional SD (default 0.3).
+        --heart-rate-sd <bpm>       Heart-rate SD (default 8).
+        Writes sub-XX recordings, participants.tsv, and group_truth.json.
 
       Ocular artifacts (off by default — the paper's model has none)
         --brain-transients <n>      Sharp BRAIN transients per minute (K-complexes,
@@ -537,16 +590,52 @@ func usage() -> String {
                                     `preferredPhaseRadians`.
         --json <path>               Write strength and circular-phase errors.
 
-    sweep — one `generate` per value of a swept parameter
+    sweep — single-subject recordings over one axis or a two-axis grid
 
-        --parameter <name>          One of: qrs-jitter, bcg-amplitude,
-                                    gradient-amplitude, slow-modulation,
-                                    clock-offset, rate, impedance, sources,
-                                    emg-rate, emg-amplitude.
-        --values <a,b,c>            Comma-separated values to sweep.
-        --output <dir>              Parent directory; one subdirectory per value.
-                                    --prefix applies inside each of them.
-        Plus any `generate` model option, applied to every run.
+        --parameter <name>          Primary axis (see list below).
+        --values <a,b,c|start:stop:step>  Explicit values or inclusive stepped range.
+        --condition <id>            Scope to one ERP condition; omit for all.
+        --peak <id>                 Scope to one peak; requires --condition.
+        --parameter2 <name> --values2 <list|range>  Optional crossed second axis.
+        --condition2 <id> --peak2 <id>  Scope for the second axis.
+        --repeats <n>               Paired seed repetitions at every cell (default 1).
+        --sweep-fixed-duration      Disable automatic ERP duration extension.
+        --evaluate <mode>           none (default), average, or reject.
+        --eval-pre <s>              Baseline/epoch pre-stimulus length (default 0.2).
+        --eval-post <s>             Epoch post-stimulus length (default 0.8).
+        --eval-peak-start <s>        Peak-search start (default 0.05).
+        --eval-peak-end <s>          Peak-search end (default 0.7).
+        --eval-channel <n>          Fixed one-based peak channel (default 1).
+        --eval-reject <uv>          Reject any-channel peak-to-peak > value (default 120).
+        --output <dir>              One recording directory per cell/repetition.
+        Plus any generate model option, including inline ERP definitions.
+
+        ERP axes (require editable --erp-experiment or --erp-condition):
+          erp-latency-jitter, erp-peak-jitter (ms SD), erp-amplitude-jitter,
+          erp-width-jitter (fraction SD), erp-peak-amplitude (µV),
+          erp-peak-latency, erp-peak-width (ms), erp-peak-occurrence (fraction),
+          erp-inverted, erp-attenuated, erp-divergent (fractions),
+          erp-attenuated-gain (fraction), erp-divergent-shift (± ms),
+          erp-divergent-width-min, erp-divergent-width-max (width multipliers),
+          erp-omission-rate, erp-condition-share (fractions), erp-trials (integer),
+          erp-isi, erp-isi-jitter (s), erp-noise (µV RMS).
+        Other axes:
+          background-gain (× base EEG SD), bcg-amplitude, gradient-amplitude (µV),
+          qrs-jitter, bcg-latency (ms SD), bcg-morphology, slow-modulation (fractions),
+          clock-offset (µs/s), rate (Hz), impedance (kΩ), sources (integer),
+          emg-rate, blink-rate (/min), emg-amplitude, blink-amplitude (µV),
+          bad-channel-fraction (0–1; rounded to channels).
+        Mixtures consume Typical; other recipes stay fixed. Condition-share
+        requires --condition and redistributes other shares proportionally.
+        Peak axes support all/condition/peak scope; recipes support all/condition;
+        jitter, noise, omissions, and schedules apply to the whole experiment.
+        Evaluation uses unfiltered, baseline-corrected epochs. Clean reference:
+        ALL complete epochs; estimate: retained noisy epochs. Reports per-condition
+        RMSE, correlation, signed peak errors, and trial counts. No artifact
+        correction or recipe classifier is run. Peak = largest absolute deflection
+        on the fixed channel in the search window, not an isolated Gaussian peak.
+        Outputs: per-run scenario.json/evaluation.json, sweep_results.json,
+        sweep_summary.csv, sweep_aggregates.csv (means and sample SD across seeds).
 
     Model defaults follow Grouiller F, Vercueil L, Krainik A, Segebarth C,
     Kahane P, David O (2007), NeuroImage 38(1):124-37. See the README for which
@@ -556,7 +645,7 @@ func usage() -> String {
 
 // MARK: - Config assembly
 
-let generateOptions: Set<String> = [
+let generateOptions: Set<String> = Set([
     "config", "write-config", "write-mixing", "write-transients",
     "brain-transients", "brain-transient-amplitude", "output", "channels", "coordinates", "no-coordinates",
     "rate", "duration", "seed",
@@ -579,7 +668,7 @@ let generateOptions: Set<String> = [
     "erp-target-fraction", "erp-latency", "erp-latency-jitter", "erp-latency-skew",
     "erp-amplitude", "erp-standard-ratio", "erp-amplitude-jitter",
     "erp-latency-amplitude-correlation", "erp-omission-rate", "erp-waveform",
-    "erp-width", "erp-template", "erp-template-rate",
+    "erp-width", "erp-template", "erp-template-rate", "erp-start",
     "artifact-oversample", "artifact-anti-alias", "with-ecg", "no-ecg",
     "ecg-amplitude", "ecg-morphology-jitter", "ecg-noise",
     "with-motion-sensor", "no-motion-sensor", "motion-sensor-gain", "with-impedance",
@@ -601,7 +690,7 @@ let generateOptions: Set<String> = [
     "high-impedance-count", "high-impedance",
     "line-noise", "line-noise-amplitude", "demo",
     "impedance", "no-impedance"
-]
+]).union(ERPExperimentOptions.keys)
 
 /// Validates the output filename prefix and normalizes it to bare stem.
 ///
@@ -740,7 +829,7 @@ func parseChannelBridges(_ spec: String) throws -> [ChannelBridge] {
     }
 }
 
-func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
+func makeConfig(_ arguments: Arguments, fitExperimentDuration: Bool = false) throws -> SimulationConfig {
     var config: SimulationConfig
     if let path = arguments.string("config") {
         guard !arguments.flag("config") else {
@@ -1128,6 +1217,7 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     var erp = config.erp ?? ERPConfig()
     var erpChanged = arguments.flag("with-erp")
     if let value = try arguments.int("erp-trials") { erp.trialCount = value; erpChanged = true }
+    if let value = try arguments.double("erp-start") { erp.startSeconds = value; erpChanged = true }
     if let value = try arguments.double("erp-isi") { erp.interStimulusIntervalSeconds = value; erpChanged = true }
     if let value = try arguments.double("erp-isi-jitter") { erp.interStimulusJitterSeconds = value; erpChanged = true }
     if let value = try arguments.double("erp-target-fraction") { erp.targetFraction = value; erpChanged = true }
@@ -1155,6 +1245,21 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
     }
     if let value = try arguments.double("erp-template-rate") {
         erp.measuredTemplateRateHz = value; erpChanged = true
+    }
+    let experimentOptions = ERPExperimentOptions.keys.reduce(into: [String: [String]]()) { result, key in
+        let supplied = arguments.strings(key)
+        if !supplied.isEmpty { result[key] = supplied }
+    }
+    if !experimentOptions.isEmpty {
+        guard !arguments.flag("no-erp") else { throw SimulateError.usage("--no-erp conflicts with experiment definition flags.") }
+        try ERPExperimentOptions.apply(experimentOptions, to: &erp)
+        erpChanged = true
+    }
+    if erp.experiment != nil, !arguments.flag("no-erp") {
+        let unsupported = ERPExperimentOptions.legacyShapeKeys.filter { arguments.string($0) != nil }.sorted()
+        guard unsupported.isEmpty else {
+            throw SimulateError.usage("Legacy shape options \(unsupported.map { "--" + $0 }.joined(separator: ", ")) do not edit experiment peaks. Use --erp-condition and --erp-peak; response jitter, amplitude jitter, omissions, and ISI flags remain shared.")
+        }
     }
     if arguments.flag("no-erp") {
         config.erp = nil
@@ -1368,7 +1473,16 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
             }
         }
     }
-    if let erp = config.erp {
+    if let erp = config.erp, let experiment = erp.experiment {
+        try experiment.validate(erp: erp)
+        let trials = try ERPExperimentSampler.trials(erp: erp, seed: config.seed)
+        if arguments.flag("erp-fit-duration") || fitExperimentDuration {
+            config.durationSeconds = max(config.durationSeconds, ceil(ERPExperimentSampler.requiredDuration(trials) + 1))
+        }
+        guard ERPExperimentSampler.requiredDuration(trials) + 1 / config.samplingRate < config.durationSeconds else {
+            throw SimulateError.usage("ERP schedule plus waveform tails does not fit inside the recording")
+        }
+    } else if let erp = config.erp {
         guard erp.trialCount > 0 else { throw SimulateError.usage("--erp-trials must be positive") }
         guard erp.startSeconds >= erp.interStimulusJitterSeconds,
               erp.interStimulusIntervalSeconds > 0,
@@ -1542,7 +1656,8 @@ func makeConfig(_ arguments: Arguments) throws -> SimulationConfig {
 // MARK: - generate
 
 @discardableResult
-func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory: URL) throws -> CorrectionScore {
+func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory: URL,
+                 evaluate: (([[Double]], [[Double]], [ERPTrialTruth]) throws -> Void)? = nil) throws -> CorrectionScore {
     var config = config
     try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     let prefix = try normalizedPrefix(arguments.string("prefix") ?? "sim")
@@ -1662,6 +1777,9 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         into: &eeg.channels, config: config, montage: montage, source: &brainTransientSource)
 
     var noisy = eeg.channels
+
+    // Editor noise is sensor contamination; preserve the clean ERP truth twin.
+    ERPExperimentSampler.addSensorNoise(to: &noisy, config: config)
 
     // Coupled impedance must exist before sample noise is generated. It is a
     // latent electrode property even when --no-impedance suppresses the ICAL
@@ -2091,8 +2209,15 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
         let targets = erp.trials.filter { $0.condition == "target" }.count
         let omitted = erp.trials.filter(\.omitted).count
         let overlapping = erp.trials.filter { $0.overlapsAnotherTrial == true }.count
-        print("ERP trials: \(erp.trials.count) (\(targets) targets, \(omitted) omitted responses, "
-            + "\(overlapping) overlapping windows)")
+        if let experiment = config.erp?.experiment {
+            let shares = experiment.conditions.map { condition in
+                "\(condition.name): \(erp.trials.filter { $0.condition == condition.id }.count)"
+            }.joined(separator: ", ")
+            print("ERP trials: \(erp.trials.count) (\(shares); \(omitted) omitted responses, \(overlapping) overlapping windows)")
+        } else {
+            print("ERP trials: \(erp.trials.count) (\(targets) targets, \(omitted) omitted responses, "
+                + "\(overlapping) overlapping windows)")
+        }
     }
     if config.gradientEnabled, config.preScanSeconds > 0 || config.postScanSeconds > 0 {
         print(String(format: "Scanner running %.1f-%.1f s (BCG runs the whole recording)",
@@ -2130,6 +2255,7 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             .map { "\($0.key) (\($0.value))" }
         print("Bad EOG channels: " + described.joined(separator: ", "))
     }
+    try evaluate?(eeg.channels, noisy, erp?.trials ?? [])
     print(String(format: "Uncorrected broadband SNR: %.4f", baseline.broadbandSNR))
     return baseline
 }
@@ -2295,6 +2421,11 @@ func runGenerateGroup(_ arguments: Arguments) throws {
     if let value = try arguments.double("impedance-sd") { variation.impedanceSD = value }
     if let value = try arguments.double("heart-rate-sd") { variation.heartRateSDBPM = value }
     if let value = try arguments.double("erp-effect-sd") { variation.erpEffectSD = value }
+    guard [variation.headRadiusSD, variation.electrodePlacementSDDegrees, variation.alphaAmplitudeSD,
+           variation.bcgAmplitudeSD, variation.impedanceSD, variation.heartRateSDBPM, variation.erpEffectSD]
+        .allSatisfy({ $0.isFinite && $0 >= 0 }) else {
+        throw SimulateError.usage("Between-subject SDs must be finite and non-negative.")
+    }
 
     let root = URL(fileURLWithPath: outputPath)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2305,7 +2436,11 @@ func runGenerateGroup(_ arguments: Arguments) throws {
             index: index, groupSeed: groupSeed, variation: variation, base: base
         )
         subjects.append(draw)
-        let config = GroupSimulation.configure(base, with: draw)
+        var config = GroupSimulation.configure(base, with: draw)
+        if arguments.flag("erp-fit-duration"), let erp = config.erp, erp.experiment != nil {
+            let trials = try ERPExperimentSampler.trials(erp: erp, seed: config.seed)
+            config.durationSeconds = max(config.durationSeconds, ceil(ERPExperimentSampler.requiredDuration(trials) + 1))
+        }
         FileHandle.standardError.write(Data(
             "[sub-\(draw.label)] \(index + 1)/\(subjectCount)\n".utf8
         ))
@@ -2331,7 +2466,15 @@ func runGenerateGroup(_ arguments: Arguments) throws {
     print("Cohort: \(subjectCount) subjects in \(root.lastPathComponent)")
     let componentEffects = truth.erpEstimand?.components ?? []
     let nonzeroEffects = componentEffects.filter { abs($0.targetMinusStandardMicrovolts) > 1e-9 }
-    if let effect = truth.populationEffectMicrovolts, abs(effect) > 1e-9,
+    if let estimand = truth.erpExperimentEstimand {
+        print("  population ERP estimand: nominal waveform contrasts; reference \(estimand.referenceConditionID)")
+        for contrast in estimand.contrasts {
+            let weights = contrast.weights.keys.sorted().map { "\($0)=\(contrast.weights[$0]!)" }.joined(separator: ", ")
+            print("    \(contrast.id): \(weights)")
+        }
+        print("  one shared subject multiplier scales all differences; SD \(variation.erpEffectSD)")
+        print("  exact Gaussian terms are saved per population/subject; no sum-of-peaks scalar")
+    } else if let effect = truth.populationEffectMicrovolts, abs(effect) > 1e-9,
        nonzeroEffects.count == 1 {
         let realized = truth.realizedBetweenSubjectSD["erpEffectScale"] ?? 0
         print(String(
@@ -2380,7 +2523,7 @@ func runGenerateGroup(_ arguments: Arguments) throws {
     print("  wrote participants.tsv and group_truth.json")
     print("")
     print("  A requested SD and a realized SD are different things at small N.")
-    print("  Score group results against group_truth.json's per-component ERP estimand,")
+    print("  Score group results against group_truth.json's population ERP estimand,")
     print("  not against any one subject.")
 }
 
@@ -4265,92 +4408,118 @@ func runSourceScore(_ arguments: Arguments) throws {
 // MARK: - sweep
 
 func applySweep(_ parameter: String, value: Double, to config: inout SimulationConfig) throws {
-    switch parameter {
-    case "qrs-jitter": config.qrsDetectionJitterSDSeconds = value / 1000
-    case "bcg-amplitude": config.bcgAmplitudeMicrovolts = value
-    case "gradient-amplitude": config.gradientAmplitudeMaxMicrovolts = value
-    case "slow-modulation": config.slowModulationFraction = value
-    case "clock-offset": config.clockOffsetMicrosecondsPerSecond = value
-    case "rate": config.samplingRate = value
-    case "impedance":
-        guard value > 0 else { throw SimulateError.usage("an impedance sweep needs positive values") }
-        config.impedanceTypicalKOhm = value
-        config.includeImpedance = true
-        config.impedanceNoise = config.impedanceNoise ?? ImpedanceNoiseConfig()
-    case "emg-rate":
-        guard value > 0 else { throw SimulateError.usage("an EMG-rate sweep needs positive values") }
-        var emg = config.emg ?? EMGConfig()
-        emg.burstsPerMinute = value
-        config.emg = emg
-    case "emg-amplitude":
-        guard value > 0 else { throw SimulateError.usage("an EMG-amplitude sweep needs positive values") }
-        var emg = config.emg ?? EMGConfig()
-        emg.amplitudeMicrovolts = value
-        config.emg = emg
-    case "sources":
-        guard config.eegGenerationModel == .dipole else {
-            throw SimulateError.usage("a sources sweep requires --eeg-model dipole")
-        }
-        guard value > 0, value == value.rounded() else {
-            throw SimulateError.usage("a sources sweep needs positive whole-number values")
-        }
-        config.dipoleSourceCount = Int(value)
-    default:
-        throw SimulateError.usage(
-            "unknown --parameter \"\(parameter)\"; expected one of qrs-jitter, bcg-amplitude, "
-            + "gradient-amplitude, slow-modulation, clock-offset, rate, impedance, sources, "
-            + "emg-rate, emg-amplitude"
-        )
-    }
+    try SimulationSweep.apply(SimulationSweepAxis(parameter: parameter, values: [value]), value: value, to: &config)
 }
 
 func runSweep(_ arguments: Arguments) throws {
-    try arguments.validate(known: generateOptions.union(["parameter", "values"]))
-
-    if arguments.string("write-config") != nil {
-        throw SimulateError.usage(
-            "--write-config is ambiguous for a sweep; save the base scenario with generate first"
-        )
+    let sweepKeys: Set<String> = ["parameter", "values", "condition", "peak", "parameter2", "values2", "condition2", "peak2",
+        "repeats", "evaluate", "eval-pre", "eval-post", "eval-peak-start", "eval-peak-end", "eval-channel", "eval-reject", "sweep-fixed-duration"]
+    try arguments.validate(known: generateOptions.union(sweepKeys))
+    for key in ["write-config", "write-mixing", "write-transients"] where arguments.string(key) != nil {
+        throw SimulateError.usage("--\(key) is ambiguous for a sweep. Every run saves its resolved scenario and truth automatically.")
     }
-
-    guard let parameter = arguments.string("parameter") else {
-        throw SimulateError.usage("sweep needs --parameter <name>")
-    }
-    guard let rawValues = arguments.string("values") else {
-        throw SimulateError.usage("sweep needs --values <a,b,c>")
-    }
-    guard let output = arguments.string("output") else {
-        throw SimulateError.usage("sweep needs --output <dir>")
-    }
-    let values = try rawValues.split(separator: ",").map { token -> Double in
-        guard let value = Double(token.trimmingCharacters(in: .whitespaces)) else {
-            throw SimulateError.usage("--values contains a non-number: \"\(token)\"")
+    func axis(_ suffix: String) throws -> SimulationSweepAxis {
+        guard let parameter = arguments.string("parameter" + suffix), let values = arguments.string("values" + suffix) else {
+            throw SimulateError.usage("Sweep needs --parameter\(suffix) and --values\(suffix).")
         }
-        return value
+        return SimulationSweepAxis(parameter: parameter, values: try SimulationSweep.values(values),
+            conditionID: arguments.string("condition" + suffix), peakID: arguments.string("peak" + suffix))
     }
-    guard !values.isEmpty else { throw SimulateError.usage("--values is empty") }
-
+    var plan = SimulationSweepPlan(axes: [try axis("")])
+    if ["parameter2", "values2", "condition2", "peak2"].contains(where: { arguments.string($0) != nil }) { plan.axes.append(try axis("2")) }
+    plan.repeats = try arguments.int("repeats") ?? 1
+    plan.fitDuration = !arguments.flag("sweep-fixed-duration")
+    if let mode = arguments.string("evaluate") {
+        guard let parsed = SweepEvaluationMode(rawValue: mode) else { throw SimulateError.usage("--evaluate expects none, average, or reject.") }
+        plan.evaluation.mode = parsed
+    }
+    plan.evaluation.preSeconds = try arguments.double("eval-pre") ?? 0.2
+    plan.evaluation.postSeconds = try arguments.double("eval-post") ?? 0.8
+    plan.evaluation.peakStartSeconds = try arguments.double("eval-peak-start") ?? 0.05
+    plan.evaluation.peakEndSeconds = try arguments.double("eval-peak-end") ?? 0.7
+    plan.evaluation.peakChannel = try arguments.int("eval-channel") ?? 1
+    plan.evaluation.rejectionMicrovolts = try arguments.double("eval-reject") ?? 120
+    try plan.validate()
+    guard let output = arguments.string("output") else { throw SimulateError.usage("Sweep needs --output <dir>.") }
     let root = URL(fileURLWithPath: output)
-    var summary: [String] = ["parameter,value,uncorrected_broadband_snr,directory"]
-
-    for value in values {
-        var config = try makeConfig(arguments)
-        try applySweep(parameter, value: value, to: &config)
-        let name = "\(parameter)-\(formatSweepValue(value))"
-        let directory = root.appendingPathComponent(name)
-        print("=== \(name) ===")
-        let baseline = try runGenerate(config: config, arguments: arguments, outputDirectory: directory)
-        summary.append("\(parameter),\(value),\(String(format: "%.6f", baseline.broadbandSNR)),\(directory.path)")
-        print("")
+    let fm = FileManager.default
+    _ = try normalizedPrefix(arguments.string("prefix") ?? "sim")
+    guard !["sweep_results.json", "sweep_summary.csv", "sweep_aggregates.csv"].contains(where: { fm.fileExists(atPath: root.appendingPathComponent($0).path) }) else {
+        throw SimulateError.usage("This output folder already contains sweep results. Choose a new folder.")
     }
-
-    let summaryURL = root.appendingPathComponent("sweep_summary.csv")
-    try (summary.joined(separator: "\n") + "\n").write(to: summaryURL, atomically: true, encoding: .utf8)
-    print("Wrote \(summaryURL.path)")
+    let scratch = fm.temporaryDirectory.appendingPathComponent("SweepPreflight-" + UUID().uuidString)
+    try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: scratch) }
+    let scenario = scratch.appendingPathComponent("scenario.json")
+    // The base must itself be valid. Auto-fit applies to the base and every cell.
+    let base = try makeConfig(arguments, fitExperimentDuration: plan.fitDuration)
+    if plan.evaluation.mode != .none, base.erp == nil { throw SimulateError.usage("ERP evaluation requires enabled ERP events.") }
+    var cells: [(SimulationConfig, SimulationSweepRow)] = []
+    for (i, value) in plan.axes[0].values.enumerated() {
+        for (j, second) in (plan.axes.count == 2 ? plan.axes[1].values.map(Optional.some) : [nil]).enumerated() {
+            for repetition in 0..<plan.repeats {
+                var config = base
+                config.seed = repetition == 0 ? base.seed : ERPExperimentSampler.seed(base.seed, "sweep-repeat/\(repetition)")
+                try SimulationSweep.apply(plan.axes[0], value: value, to: &config)
+                if let second { try SimulationSweep.apply(plan.axes[1], value: second, to: &config) }
+                if let erp = config.erp, erp.experiment != nil {
+                    let trials = try ERPExperimentSampler.trials(erp: erp, seed: config.seed)
+                    let tails = ERPExperimentSampler.requiredDuration(trials) + 1
+                    let epochs = (trials.last?.onsetSeconds ?? 0) + plan.evaluation.postSeconds + 1
+                    if plan.fitDuration { config.durationSeconds = max(config.durationSeconds, ceil(max(tails, epochs))) }
+                }
+                try plan.evaluation.validate(rate: config.samplingRate, channels: config.channelCount)
+                // Reuse the full generator validation after mutations, before ANY runs.
+                try SimulationScenarioFile.write(config: config, to: scenario)
+                config = try makeConfig(Arguments(["--config", scenario.path]))
+                let name = plan.axes.count == 1 && plan.repeats == 1 ? "\(plan.axes[0].parameter)-\(formatSweepValue(value))" : String(format: "cell-%03d-%03d-repeat-%03d", i + 1, j + 1, repetition + 1)
+                guard !fm.fileExists(atPath: root.appendingPathComponent(name).path) else { throw SimulateError.usage("Sweep output already exists: \(name). Choose a new output folder.") }
+                cells.append((config, SimulationSweepRow(value: value, secondValue: second, repetition: repetition + 1, seed: config.seed, directory: name, evaluations: [])))
+            }
+        }
+    }
+    print("Single-subject sweep: \(cells.count) recordings; paired seeds across cells; \(plan.evaluation.mode.title).")
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    var report = SimulationSweepReport(plan: plan, baseSeed: base.seed, rows: [])
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    var summary = ["parameter,value,uncorrected_broadband_snr,directory,second_value,repetition,seed"]
+    for (config, initialRow) in cells {
+        var row = initialRow
+        let directory = root.appendingPathComponent(row.directory)
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try SimulationScenarioFile.write(config: config, to: directory.appendingPathComponent("scenario.json"))
+        let score = try runGenerate(config: config, arguments: arguments, outputDirectory: directory) { clean, noisy, trials in
+            let conditions = config.erp?.experiment?.conditions.map { ($0.id, $0.name) }
+                ?? Array(Set(trials.map(\.condition))).sorted().map { ($0, $0) }
+            row.evaluations = try SweepEvaluation.evaluate(clean: clean, noisy: noisy, rate: config.samplingRate,
+                trials: trials, conditions: conditions, options: plan.evaluation)
+        }
+        row.uncorrectedSNR = score.broadbandSNR.isFinite ? score.broadbandSNR : nil
+        report.rows.append(row)
+        try encoder.encode(row).write(to: directory.appendingPathComponent("evaluation.json"), options: .atomic)
+        try encoder.encode(report).write(to: root.appendingPathComponent("sweep_results.json"), options: .atomic)
+        summary.append([plan.axes[0].parameter, String(row.value), String(score.broadbandSNR), row.directory,
+                        row.secondValue.map(String.init(describing:)) ?? "", String(row.repetition), String(row.seed)].map(sweepCSV).joined(separator: ","))
+    }
+    try (summary.joined(separator: "\n") + "\n").write(to: root.appendingPathComponent("sweep_summary.csv"), atomically: true, encoding: .utf8)
+    var aggregates = ["value,second_value,condition,metric,n,mean,sd"]
+    let conditions = base.erp?.experiment?.conditions.map(\.id) ?? Array(Set(report.rows.flatMap { $0.evaluations.map(\.conditionID) })).sorted()
+    for metric in SweepMetric.allCases {
+        for condition in metric == .snr ? [""] : conditions {
+            for x in report.aggregates(metric: metric, condition: condition) {
+                aggregates.append([String(x.value), x.secondValue.map(String.init(describing:)) ?? "", condition, metric.rawValue,
+                    String(x.count), String(x.mean), x.sd.map(String.init(describing:)) ?? ""].map(sweepCSV).joined(separator: ","))
+            }
+        }
+    }
+    try (aggregates.joined(separator: "\n") + "\n").write(to: root.appendingPathComponent("sweep_aggregates.csv"), atomically: true, encoding: .utf8)
+    print("Wrote sweep_results.json, sweep_summary.csv, and sweep_aggregates.csv")
 }
 
+func sweepCSV(_ value: String) -> String { "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+
 func formatSweepValue(_ value: Double) -> String {
-    value == value.rounded() ? String(Int(value)) : String(value)
+    value.isFinite && abs(value) < 1e15 && value == value.rounded() ? String(Int(value)) : String(value)
 }
 
 // MARK: - Entry point

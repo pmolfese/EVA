@@ -335,10 +335,7 @@ nonisolated enum SimulatorRunner {
     // MARK: - Sweep
 
     /// The parameters the CLI `sweep` accepts.
-    static let sweepParameters = [
-        "rate", "bcg-amplitude", "gradient-amplitude", "clock-offset",
-        "slow-modulation", "qrs-jitter", "impedance", "emg-rate", "emg-amplitude", "sources",
-    ]
+    static let sweepParameters = SimulationSweep.parameters.map(\.id)
 
     struct SweepRun: Sendable, Identifiable {
         let id = UUID()
@@ -348,6 +345,7 @@ nonisolated enum SimulatorRunner {
         let directory: URL
     }
     struct SweepOutcome: Sendable {
+        let report: SimulationSweepReport
         let parameter: String
         let runs: [SweepRun]
         let directory: URL
@@ -357,7 +355,7 @@ nonisolated enum SimulatorRunner {
     /// the current base `config`. Returns the parsed `sweep_summary.csv`.
     static func sweep(
         config: SimulationConfig, name: String,
-        parameter: String, values: [Double], options: Options
+        parameter: String, values: [Double], options: Options, plan suppliedPlan: SimulationSweepPlan? = nil
     ) throws -> SweepOutcome {
         guard let cli = locateCLI() else {
             throw RunError.cliNotFound("Expected it beside the app executable at Contents/MacOS/EVASimulate.")
@@ -373,33 +371,38 @@ nonisolated enum SimulatorRunner {
                                          name: name.isEmpty ? "Sweep base" : name,
                                          description: "Sweep base (SIM-1)")
 
-        let csv = values.map { $0 == $0.rounded() ? String(Int($0)) : String($0) }.joined(separator: ",")
-        let log = try run(cli, [
-            "sweep", "--config", scenarioURL.path, "--parameter", parameter,
-            "--values", csv, "--output", workDir.path, "--prefix", prefix,
-        ])
-
-        let summary = workDir.appendingPathComponent("sweep_summary.csv")
-        guard fm.fileExists(atPath: summary.path) else { throw RunError.missingOutput(summary, log: log) }
-
-        let directory = try relocateTree(from: workDir, to: options.outputDirectory)
-        let text = try String(contentsOf: directory.appendingPathComponent("sweep_summary.csv"), encoding: .utf8)
-        var runs: [SweepRun] = []
-        for line in text.split(whereSeparator: \.isNewline).dropFirst() {
-            let fields = line.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-            guard fields.count >= 4, let value = Double(fields[1]), let snr = Double(fields[2]) else { continue }
-            let subdir = directory.appendingPathComponent((fields[3] as NSString).lastPathComponent)
-            runs.append(SweepRun(value: value, uncorrectedSNR: snr,
-                                 noisyURL: subdir.appendingPathComponent("\(prefix)_noisy.mff"),
-                                 directory: subdir))
+        let plan = suppliedPlan ?? SimulationSweepPlan(axes: [SimulationSweepAxis(parameter: parameter, values: values)])
+        try plan.validate()
+        var args = ["sweep", "--config", scenarioURL.path, "--output", workDir.path, "--prefix", prefix,
+                    "--repeats", String(plan.repeats), "--evaluate", plan.evaluation.mode.rawValue]
+        for (i, axis) in plan.axes.enumerated() {
+            let suffix = i == 0 ? "" : "2"
+            args += ["--parameter" + suffix, axis.parameter, "--values" + suffix, axis.values.map(String.init(describing:)).joined(separator: ",")]
+            if let id = axis.conditionID { args += ["--condition" + suffix, id] }
+            if let id = axis.peakID { args += ["--peak" + suffix, id] }
         }
-        return SweepOutcome(parameter: parameter, runs: runs, directory: directory)
+        if !plan.fitDuration { args.append("--sweep-fixed-duration") }
+        args += ["--eval-pre", String(plan.evaluation.preSeconds), "--eval-post", String(plan.evaluation.postSeconds),
+                 "--eval-peak-start", String(plan.evaluation.peakStartSeconds), "--eval-peak-end", String(plan.evaluation.peakEndSeconds),
+                 "--eval-channel", String(plan.evaluation.peakChannel), "--eval-reject", String(plan.evaluation.rejectionMicrovolts)]
+        let log = try run(cli, args)
+        let summary = workDir.appendingPathComponent("sweep_results.json")
+        guard fm.fileExists(atPath: summary.path) else { throw RunError.missingOutput(summary, log: log) }
+        let directory = try relocateTree(from: workDir, to: options.outputDirectory)
+        let report = try JSONDecoder().decode(SimulationSweepReport.self, from: Data(contentsOf: directory.appendingPathComponent("sweep_results.json")))
+        let runs = report.rows.map { row in
+            let subdir = directory.appendingPathComponent(row.directory)
+            return SweepRun(value: row.value, uncorrectedSNR: row.uncorrectedSNR ?? .infinity,
+                            noisyURL: subdir.appendingPathComponent("\(prefix)_noisy.mff"), directory: subdir)
+        }
+        return SweepOutcome(report: report, parameter: parameter, runs: runs, directory: directory)
     }
 
     // MARK: - Group
 
     /// Between-subject variability for a group run (SDs; 0 leaves the CLI default).
     struct GroupVariability: Sendable {
+        var fitERPDuration: Bool = true
         var homogeneous = false
         var headRadiusSD = 0.08
         var placementSD = 3.0
@@ -447,6 +450,7 @@ nonisolated enum SimulatorRunner {
             "--subjects", String(subjects), "--output", workDir.path, "--prefix", prefix,
         ]
         if let groupSeed { arguments += ["--group-seed", String(groupSeed)] }
+        if variability.fitERPDuration, config.erp?.experiment != nil { arguments.append("--erp-fit-duration") }
         if variability.homogeneous {
             arguments.append("--homogeneous")
         } else {

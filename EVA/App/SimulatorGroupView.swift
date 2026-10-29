@@ -49,6 +49,16 @@ struct SimulatorGroupView: View {
                         }
                     }
 
+                    if simulator.config.erp?.experiment != nil {
+                        ERPGroupEffectsEditor(erp: Binding(
+                            get: { simulator.config.erp ?? ERPConfig() },
+                            set: { simulator.config.erp = $0 }))
+                        HStack {
+                            Toggle("Fit recording length for each subject", isOn: $simulator.groupVariability.fitERPDuration)
+                            HelpButton(topic: ERPStudioHelp.groupDuration)
+                        }
+                    }
+
                     HStack(spacing: 4) {
                         Toggle("Homogeneous (no between-subject variability)",
                                isOn: $simulator.groupVariability.homogeneous)
@@ -169,5 +179,81 @@ struct SimulatorGroupView: View {
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url { assign(url) }
+    }
+}
+
+private struct ERPGroupEffectsEditor: View {
+    @Binding var erp: ERPConfig
+    @State private var positiveID = ""
+    @State private var negativeID = ""
+    @State private var contrastName = ""
+    private var design: ERPExperimentConfig { erp.experiment ?? ERPExperimentConfig() }
+    private var positive: String { design.conditions.first(where: { $0.id == positiveID })?.id ?? design.conditions.last?.id ?? "" }
+    private var negative: String { design.conditions.first(where: { $0.id == negativeID })?.id ?? design.referenceConditionID }
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("ERP group contrasts").font(.callout.weight(.semibold))
+                    HelpButton(topic: ERPStudioHelp.groupEffects)
+                    Spacer()
+                    Button("Default comparisons") { erp.experiment?.groupContrasts = nil }
+                }
+                Picker("Reference condition", selection: Binding(get: { design.referenceConditionID }, set: { erp.experiment?.groupReferenceConditionID = $0 })) {
+                    ForEach(design.conditions) { condition in Text(condition.name).tag(condition.id) }
+                }
+                Text("Reference stays fixed. The ERP-effect SD varies one shared multiplier on all differences from it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(design.resolvedGroupContrasts) { contrast in
+                    HStack {
+                        Text(contrastLabel(contrast)).font(.callout)
+                        Text(weightLabel(contrast)).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Remove") {
+                            erp.experiment?.groupContrasts = design.resolvedGroupContrasts.filter { $0.id != contrast.id }
+                        }
+                    }
+                }
+                if design.resolvedGroupContrasts.isEmpty {
+                    Text("No contrasts selected; condition waveforms still receive the shared group effect.").font(.caption)
+                }
+                HStack {
+                    TextField("Contrast name", text: $contrastName).textFieldStyle(.roundedBorder)
+                    Picker("Positive", selection: Binding(get: { positive }, set: { positiveID = $0 })) {
+                        ForEach(design.conditions) { Text($0.name).tag($0.id) }
+                    }
+                    Picker("Minus", selection: Binding(get: { negative }, set: { negativeID = $0 })) {
+                        ForEach(design.conditions) { Text($0.name).tag($0.id) }
+                    }
+                    Button("Add comparison") {
+                        let id = contrastName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        erp.experiment?.groupContrasts = design.resolvedGroupContrasts + [ERPGroupContrast(id: id, weights: [positive: 1, negative: -1])]
+                        contrastName = ""
+                    }
+                    .disabled(positive == negative || contrastName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || design.resolvedGroupContrasts.contains { $0.id == contrastName.trimmingCharacters(in: .whitespacesAndNewlines) })
+                }
+                Text("Truth stores exact population and subject contrast waveforms before trial mixtures, jitter, omissions, and noise.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(6)
+        }
+    }
+    private func contrastLabel(_ contrast: ERPGroupContrast) -> String {
+        // Default truth IDs stay stable, while the UI uses readable condition names.
+        if contrast.weights.count == 2,
+           let positive = design.conditions.first(where: { contrast.weights[$0.id] == 1 }),
+           let negative = design.conditions.first(where: { contrast.weights[$0.id] == -1 }),
+           contrast.id == "\(positive.id)-minus-\(negative.id)" {
+            return "\(positive.name) − \(negative.name)"
+        }
+        return contrast.id
+    }
+
+    private func weightLabel(_ contrast: ERPGroupContrast) -> String {
+        design.conditions.compactMap { condition in
+            guard let weight = contrast.weights[condition.id], weight != 0 else { return nil }
+            return "\(condition.name) × \(weight.formatted())"
+        }.joined(separator: " + ")
     }
 }

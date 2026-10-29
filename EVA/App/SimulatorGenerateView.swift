@@ -262,7 +262,12 @@ struct SimulatorGenerateView: View {
     }
 
     private func isValid(_ c: SimulationConfig) -> Bool {
-        c.channelCount >= 4 && c.durationSeconds > 0 && c.samplingRate > 0
+        guard c.channelCount >= 4 && c.durationSeconds > 0 && c.samplingRate > 0 else { return false }
+        if let erp = c.erp, erp.experiment != nil {
+            guard let trials = try? ERPExperimentSampler.trials(erp: erp, seed: c.seed) else { return false }
+            return ERPExperimentSampler.requiredDuration(trials) + 1 / c.samplingRate < c.durationSeconds
+        }
+        return true
     }
 }
 
@@ -852,8 +857,27 @@ private struct ERPTab: View {
     var body: some View {
         @Bindable var simulator = simulator
         TabForm {
-            Toggle("Event-related potentials", isOn: erpEnabled).font(.callout.weight(.semibold))
-            if simulator.config.erp != nil {
+            HStack {
+                Toggle("Event-related potentials", isOn: erpEnabled).font(.callout.weight(.semibold))
+                HelpButton(topic: ERPStudioHelp.conditions)
+            }
+            if simulator.config.erp?.experiment != nil {
+                ERPExperimentEditor(erp: Binding(
+                    get: { simulator.config.erp ?? ERPConfig() },
+                    set: { simulator.config.erp = $0 }),
+                    seed: simulator.config.seed, samplingRate: simulator.config.samplingRate,
+                    recordingDuration: $simulator.config.durationSeconds)
+            } else if simulator.config.erp != nil {
+                HStack {
+                    Button("Open waveform & condition editor") {
+                        if let erp = simulator.config.erp,
+                           let experiment = ERPExperimentConfig.editing(erp) {
+                            simulator.config.erp?.experiment = experiment
+                        }
+                    }
+                    .disabled(ERPExperimentConfig.editing(simulator.config.erp ?? ERPConfig()) == nil)
+                    HelpButton(topic: ERPStudioHelp.legacy)
+                }
                 Group {
                     IntRow(title: "Trials", value: erpInt(\.trialCount), range: 1...2000)
                     DoubleRow(title: "Target fraction", value: erpDouble(\.targetFraction),
@@ -866,7 +890,7 @@ private struct ERPTab: View {
                 Text("Trials are written as events; the ERP overlays and single-trial tools read them like any real recording.")
                     .font(.caption2).foregroundStyle(.secondary)
             } else {
-                Text("Adds an oddball-style stimulus train with standard/target conditions.")
+                Text("Create named stimulus conditions, edit their ERP waveforms, and vary responses across trials.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
@@ -874,7 +898,13 @@ private struct ERPTab: View {
     private var erpEnabled: Binding<Bool> {
         Binding(
             get: { simulator.config.erp != nil },
-            set: { simulator.config.erp = $0 ? ERPConfig() : nil }
+            set: {
+                if $0 {
+                    var erp = ERPConfig()
+                    erp.experiment = ERPExperimentConfig()
+                    simulator.config.erp = erp
+                } else { simulator.config.erp = nil }
+            }
         )
     }
     private func erpInt(_ keyPath: WritableKeyPath<ERPConfig, Int>) -> Binding<Int> {

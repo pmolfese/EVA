@@ -228,6 +228,16 @@ final class SimulatorController {
 
     var sweepParameter = "bcg-amplitude"
     var sweepValuesText = "50, 100, 150, 200"
+    var sweepCondition = ""
+    var sweepPeak = ""
+    var sweepGrid = false
+    var sweepParameter2 = "erp-noise"
+    var sweepValuesText2 = "0, 1.5, 5"
+    var sweepCondition2 = ""
+    var sweepPeak2 = ""
+    var sweepRepeats = 1
+    var sweepFitDuration = true
+    var sweepEvaluation = SweepEvaluationOptions()
     var sweepOutputDir: URL?
     private(set) var sweepPhase: Phase = .idle
     private(set) var sweepMessage = ""
@@ -236,13 +246,10 @@ final class SimulatorController {
 
     func sweep() {
         guard sweepPhase != .generating else { return }
-        let values = sweepValuesText
-            .split(separator: ",")
-            .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-        guard !values.isEmpty else {
-            sweepPhase = .failed("Enter comma-separated numeric values.")
-            return
-        }
+        let plan: SimulationSweepPlan
+        do { plan = try sweepPlan(); try plan.validate() }
+        catch { sweepPhase = .failed(error.localizedDescription); return }
+        let values = plan.axes[0].values
         sweepPhase = .generating
         sweepMessage = "Running sweep…"
         let config = self.config
@@ -254,7 +261,7 @@ final class SimulatorController {
         Task {
             do {
                 let outcome = try await Task.detached(priority: .userInitiated) {
-                    try SimulatorRunner.sweep(config: config, name: name, parameter: parameter, values: values, options: runOptions)
+                    try SimulatorRunner.sweep(config: config, name: name, parameter: parameter, values: values, options: runOptions, plan: plan)
                 }.value
                 self.sweepOutcome = outcome
                 self.sweepPhase = .done
@@ -265,6 +272,18 @@ final class SimulatorController {
                 self.sweepMessage = error.localizedDescription
             }
         }
+    }
+
+    func sweepPlan() throws -> SimulationSweepPlan {
+        func axis(_ parameter: String, _ values: String, _ condition: String, _ peak: String) throws -> SimulationSweepAxis {
+            let scope = try SimulationSweep.parameter(parameter).scope
+            return SimulationSweepAxis(parameter: parameter, values: try SimulationSweep.values(values),
+                conditionID: scope != .global && !condition.isEmpty ? condition : nil,
+                peakID: scope == .peak && !condition.isEmpty && !peak.isEmpty ? peak : nil)
+        }
+        var axes = [try axis(sweepParameter, sweepValuesText, sweepCondition, sweepPeak)]
+        if sweepGrid { axes.append(try axis(sweepParameter2, sweepValuesText2, sweepCondition2, sweepPeak2)) }
+        return SimulationSweepPlan(axes: axes, repeats: sweepRepeats, fitDuration: sweepFitDuration, evaluation: sweepEvaluation)
     }
 
     func clearSweepStatus() { sweepPhase = .idle; sweepMessage = "" }

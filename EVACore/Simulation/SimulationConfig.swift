@@ -769,6 +769,10 @@ nonisolated struct ERPConfig: Codable, Sendable {
     /// makes published dipole models (and overlapping P1/N1/P2 complexes)
     /// expressible at all.
     var components: [ERPComponentConfig]? = nil
+
+    /// Opt-in waveform editor and arbitrary named conditions. Nil retains the
+    /// legacy oddball/placed-component paths and their random streams exactly.
+    var experiment: ERPExperimentConfig? = nil
 }
 
 /// One explicitly placed ERP generator.

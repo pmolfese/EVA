@@ -60,6 +60,150 @@ Eight subcommands:
 
 ## Quick start
 
+### GUI: waveform and condition editor
+
+Open **File → New Simulated Recording → ERP** and enable event-related
+potentials. The editor starts with **Frequent** and **Target**, and supports
+additional named conditions through **Add condition** or **Duplicate**. Each
+condition has its own waveform, event code, trial percentage, and trial recipe
+mix. Use unique 1–4 character alphanumeric event codes for epoching. The condition
+name is written as the event label; its stable internal ID links truth and scores.
+
+- Double-click the waveform to add a Gaussian peak; drag a handle horizontally
+  for latency and vertically for amplitude. Numeric fields offer the same edits
+  without dragging. Width is Gaussian σ in milliseconds. Overlapping peaks sum,
+  and negative amplitudes create negative deflections.
+- **Present in** controls the fraction of non-omitted trials containing that
+  individual peak. **Omitted** removes the whole ERP but retains the stimulus.
+- Whole-response latency jitter moves all peaks together. Independent peak
+  jitter moves them separately. Amplitude and width variation use shared
+  trial-level multipliers. The **?** buttons explain units, distributions,
+  clipping, and interactions.
+- Mean ISI and its ± range specify uniformly varied onset-to-onset intervals.
+  **Fit recording** extends recording duration to contain the actual seeded
+  schedule and all realized waveform tails. Short ISIs can produce overlapping
+  responses in the recording.
+- Added white or smoothed sensor noise is continuous and independent across
+  channels. It affects the noisy recording only and adds to other configured
+  background/artifact sources. Smoothed noise has a 20 ms time constant.
+- Each condition's non-omitted trials receive one **Typical**, **Attenuated**,
+  **Inverted**, or **Divergent** recipe. Typical fills the remainder to 100%.
+  Recipe parameters control attenuation gain, extra latency shift, and width
+  distortion. These are generation recipes, not guaranteed TrialsView labels:
+  the latter depend on measured similarity to the reference average.
+
+Condition counts and recipe counts use largest-remainder rounding; omission and
+peak-presence counts round to the nearest trial within each condition. Peak
+presence is shuffled independently per peak and may overlap. Condition shares
+must total 100%; **Normalize shares** rescales the entered proportions. Adding a
+condition gives it 20% while scaling existing shares proportionally. All
+assignments are reproducible from the seed.
+
+**Trial preview** shows the template, all-trial mean (including omissions), and
+up to twelve example trials. **Show other conditions** shows/hides the remaining
+conditions; all plots share time and voltage scales. The preview uses the same
+trial sampler as generation, with illustrative added noise. It excludes spatial
+projection, re-referencing, other background/artifact sources, and neighboring
+trial overlap. Peaks share one source in this editor; arbitrary placed-source
+models remain available through existing scenarios.
+
+The scenario's optional `config.erp.experiment` stores conditions, peaks,
+recipes, and noise settings. The truth sidecar records `conditionName`, `recipe`,
+and `realizedPeaks` for every trial, in addition to existing event and overlap
+information. Existing scenarios without `experiment` retain their original
+two-condition generation path and random streams. A legacy single Gaussian can
+be copied into the editor with **Open waveform & condition editor**; this opts
+into the new scheduling and allocation rules. Placed, biphasic, and measured
+legacy models are not silently converted.
+
+### Define conditions, peaks, and mixtures from the CLI
+
+Both `generate` and `generate-group` accept inline experiment definitions. No
+scenario file is required. For example, this makes a three-condition cohort with
+two target peaks, including a negative peak present in half of responding target
+trials:
+
+```bash
+Tools/EVASimulate/.build/eva-simulate generate-group \
+  --output ~/sim-group --subjects 12 --group-seed 42 \
+  --erp-condition frequent:Frequent:FREQ:0.5 \
+  --erp-condition target:Target:TARG:0.3 \
+  --erp-condition novel:Novel:NOVL:0.2 \
+  --erp-peak frequent:p1:180:4:30 \
+  --erp-peak target:p1:300:8:60 \
+  --erp-peak target:p2:500:-3:40:0.5 \
+  --erp-peak novel:p1:450:6:50 \
+  --erp-mixture target:0.1:0.2:0.15 \
+  --erp-recipe target:0.3:100:0.65:1.6 \
+  --erp-trials 100 --erp-isi 1.2 --erp-isi-jitter 0.2 \
+  --erp-latency-jitter 30 --erp-peak-jitter 10 \
+  --erp-width-jitter 0.1 --erp-noise 1.5 --erp-noise-kind white \
+  --erp-reference frequent --erp-effect-sd 0.3 --erp-fit-duration
+```
+
+| Flag | Value and meaning |
+|---|---|
+| `--erp-experiment` | Enable editable Frequent/Target defaults without defining conditions. |
+| `--erp-condition` | `id:name:eventCode:fraction`; repeat for each condition. Shares must sum to 1. |
+| `--erp-peak` | `conditionID:peakID:latency_ms:amplitude_uV:width_ms[:occurrence]`; repeat for every peak. Width is Gaussian σ; occurrence defaults to 1. |
+| `--erp-mixture` | `conditionID:attenuated:inverted:divergent`; Typical fills the remainder. These fractions apply after omissions. |
+| `--erp-recipe` | `conditionID:attenuated_gain:shift_ms:width_min:width_max`; shift is the ± range of extra divergent latency, widths are multipliers. |
+| `--erp-peak-jitter` | Independent per-peak latency SD, in milliseconds. |
+| `--erp-width-jitter` | Shared trial width multiplier SD, as a fraction. |
+| `--erp-noise`, `--erp-noise-kind` | Continuous sensor noise RMS in µV; `white` or `smoothed` (20 ms time constant). |
+| `--erp-reference` | Condition ID used as the group reference; defaults to the first condition. |
+| `--erp-contrast` | `name:conditionID=weight,conditionID=weight,...`; repeat for named comparisons. Weights must sum to zero. |
+| `--erp-fit-duration` | Extend recording duration to fit the actual seeded responses; applied separately to each group subject. |
+
+All fractions use **0–1**, not percentages. IDs and names cannot contain colons;
+quote a whole value when its name contains spaces. Condition IDs used in contrast
+weights should also avoid commas and equals signs. Supplying `--erp-condition`
+replaces the entire condition list and resets group comparisons. Each new
+condition initially has peak `p1` at 300 ms, 8 µV, σ 60 ms. Supplying `--erp-peak`
+replaces all peaks in each mentioned condition; unmentioned conditions retain
+their peaks. These same rules apply when overriding a loaded `--config` file.
+
+Shared flags remain available: `--erp-trials` (total across all conditions),
+`--erp-start` (seconds), `--erp-isi` and `--erp-isi-jitter` (seconds),
+`--erp-latency-jitter` (whole-response SD in milliseconds),
+`--erp-amplitude-jitter`, and `--erp-omission-rate` (fractions). Experiment ISI
+jitter varies successive intervals uniformly. Legacy shape, target-fraction,
+skew, and latency/amplitude correlation flags are rejected for editable
+experiments rather than silently ignored. Use `generate --write-config path.json`
+with these flags to save a reusable scenario without generating a recording.
+
+### Group effects across multiple conditions
+
+The GUI's **Group** panel supports all conditions in the ERP editor. Select a
+reference condition, keep the default comparisons (each other condition minus
+the reference), or add named pairwise comparisons. **Fit recording length for
+each subject** extends durations as needed for individual schedules. The **?**
+buttons explain the group model and duration setting.
+
+The CLI also supports weighted comparisons. For example, append this to the
+command above to report Target minus the average of Frequent and Novel instead
+of the default comparisons:
+
+```bash
+--erp-contrast 'target-vs-others:target=1,frequent=-0.5,novel=-0.5'
+```
+
+For a reference waveform B(t), condition waveform A(t), and subject multiplier
+s, the subject waveform is **B(t) + s × (A(t) − B(t))**. The reference stays fixed.
+The existing `--erp-effect-sd` controls the SD of s around 1 (default 0.30).
+One shared multiplier scales every condition difference within a subject, so
+their effect variation is correlated, not independent. Negative draws reverse
+the differences; `--homogeneous` sets all between-subject SDs to zero, with
+explicit SD flags able to override it.
+
+`group_truth.json` stores exact Gaussian terms for population contrasts in
+`erpExperimentEstimand` and each subject's contrasts in `erpWaveformContrasts`.
+These describe **nominal source waveforms before** trial mixtures, peak
+occurrence, omissions, jitter, noise, and sensor projection. They are not
+predictions of observed trial averages. Different peak times and widths remain
+separate terms; the truth does not collapse them to a sum of peak amplitudes.
+Existing legacy two-condition group scenarios retain their original effect model.
+
 ```bash
 Tools/EVASimulate/.build/eva-simulate generate --output ~/sim
 ```
@@ -678,26 +822,158 @@ recording from leaking upward and making a broken correction look fine at 60 Hz.
 
 ---
 
-## Sweeping a parameter
+## Single-subject sweeps: generate and evaluate
+
+The **Sweep** tab and CLI use the same parameter registry. A sweep changes the
+current Generate-tab scenario for one subject; seed repetitions are repeated
+simulations, not a cohort. Group sweeps are not implemented.
+
+In the GUI, choose an axis, its values, and any condition/peak scope. **Example
+values** fills a suitable list. Enter either `0, 15, 30, 60` or an inclusive
+`start:stop:step` range such as `0:60:15`. Enable **Two-axis grid** to cross every
+value of one parameter with every value of another. The recording count is shown
+before running: first-axis values × second-axis values × seed repetitions.
+Every new control has contextual **?** help.
+
+### Axes and scope
+
+| Category | CLI parameter names | Units / scope |
+|---|---|---|
+| Response variability | `erp-latency-jitter`, `erp-peak-jitter` | ms SD; whole experiment |
+| Gain/width variability | `erp-amplitude-jitter`, `erp-width-jitter` | Fraction SD; whole experiment |
+| Peak shape | `erp-peak-amplitude`, `erp-peak-latency`, `erp-peak-width` | µV, ms, ms σ; all peaks, one condition, or one peak |
+| Peak presence | `erp-peak-occurrence` | Fraction of responding trials; peak scope |
+| Mixtures | `erp-inverted`, `erp-attenuated`, `erp-divergent` | Fractions; all conditions or one condition |
+| Recipe severity | `erp-attenuated-gain`, `erp-divergent-shift` | Fraction gain, extra ± ms; condition scope |
+| Divergent width | `erp-divergent-width-min`, `erp-divergent-width-max` | Positive width multipliers with min ≤ max; condition scope |
+| Omissions/count | `erp-omission-rate`, `erp-trials` | Fraction, integer; whole experiment |
+| Allocation | `erp-condition-share` | Fraction; one selected condition required |
+| Timing | `erp-isi`, `erp-isi-jitter` | Seconds; whole experiment |
+| Noise | `erp-noise`, `background-gain` | Added sensor µV RMS, multiplier of base background EEG SD |
+| Cardiac artifacts | `bcg-amplitude`, `qrs-jitter`, `bcg-latency`, `bcg-morphology` | µV, ms SD, ms SD, fraction |
+| Scanner | `gradient-amplitude`, `clock-offset`, `slow-modulation` | µV, µs/s, fraction |
+| Other artifacts | `blink-rate`, `blink-amplitude`, `emg-rate`, `emg-amplitude` | Events/min, µV, bursts/min, µV |
+| Recording/model | `rate`, `impedance`, `sources`, `bad-channel-fraction` | Hz, kΩ, integer, fraction rounded to channel count |
+
+ERP axes require an editable experiment, enabled in **Generate → ERP** or with
+`--erp-experiment` / inline `--erp-condition` definitions. Complex legacy ERP
+models are not silently converted. Global jitter, noise, omissions, and scheduling
+cannot currently be restricted to one condition.
+
+Use `--condition ID` to restrict a condition/peak axis, and `--peak ID` to select
+one peak within that condition. Without these flags, the setting applies to all
+eligible conditions/peaks. Axis 2 uses `--condition2` and `--peak2`. Condition-share
+sweeps redistribute other shares proportionally; if all others have zero shares,
+they divide the remainder equally. Recipe fractions consume the Typical remainder
+and leave other recipes fixed. Totals above 1 fail validation. All fractions use
+**0–1**, not percentages; trial and recipe allocations still round to actual counts.
+
+Background gain changes the calibrated background amplitude, preserving its
+spectral proportions. Gradient amplitude preserves the base minimum/maximum
+ratio. BCG amplitude/latency axes enable BCG; BCG morphology also selects the
+spatial generator model. Blink amplitude requires a nonzero blink rate. EMG rate
+zero disables bursts. Clock offset requires gradients; QRS jitter requires BCG.
+Bad-channel fraction requires no explicitly named bad channels and uses the base
+placement/defect settings. Source count requires the dipole EEG model.
+
+### Example: jitter × noise with repeated seeds
 
 ```bash
 Tools/EVASimulate/.build/eva-simulate sweep \
-  --parameter qrs-jitter --values 0,10,25,50 \
-  --output ~/sweeps --duration 120
+  --erp-experiment --erp-trials 80 \
+  --parameter erp-latency-jitter --values 0:60:15 \
+  --parameter2 erp-noise --values 0,1.5,5 \
+  --repeats 5 --seed 42 \
+  --evaluate average --eval-channel 1 \
+  --no-gradient --no-bcg --no-impedance-noise \
+  --output ~/sweeps/jitter-noise
 ```
 
-One `generate` per value, into `~/sweeps/qrs-jitter-0/`, `qrs-jitter-10/` and so
-on, plus `sweep_summary.csv` at the top listing each run's uncorrected broadband
-SNR and directory. `--prefix` applies inside each subdirectory.
+This produces 75 recordings. The same five seeds are used at every grid point;
+the first is the base seed and the rest are deterministically derived from it.
+Independent model streams preserve unrelated draws where possible. Changing a
+schedule, duration, or legacy model structure can still change realized samples.
 
-Sweepable parameters: `qrs-jitter`, `bcg-amplitude`, `gradient-amplitude`,
-`slow-modulation`, `clock-offset`, `rate`. Any `generate` option may be passed
-alongside and applies to every run.
+For a condition-specific mixture sweep, replace the axes above with:
 
-!!! note
-    For `qrs-jitter` the summary's baseline SNR is identical across runs, and that
-    is correct — jitter perturbs only the event times written to the file, never
-    the signal. The column is informative for the amplitude sweeps.
+```bash
+--parameter erp-inverted --condition target --values 0:0.5:0.1
+```
+
+For one selected peak:
+
+```bash
+--parameter erp-peak-latency --condition target --peak p1 --values 200,300,400
+```
+
+Recording duration automatically extends for editable ERP schedules, including
+response tails and evaluation post-stimulus windows. `--sweep-fixed-duration`
+keeps the base duration; a waveform extending outside it fails preflight. Missing
+pre-stimulus baselines are excluded from evaluation and reported in counts.
+Every cell is validated before any recordings are generated. Existing run
+folders are rejected rather than overwritten. Each axis supports up to 1000
+values, repetitions range from 1–100, and a sweep is limited to 10,000 recordings.
+
+### Generate + Evaluate
+
+Choose a GUI evaluation mode or pass `--evaluate`:
+
+- `none`: generate recordings and broadband SNR only (default).
+- `average`: baseline-correct and average complete ERP epochs for every condition.
+- `reject`: first reject any noisy epoch whose peak-to-peak amplitude on **any**
+  EEG channel exceeds `--eval-reject` (default 120 µV), then average the survivors.
+
+These initial pipelines use **unfiltered** data. They do not perform artifact
+correction or TrialsView classification. Decisions use noisy data only. The
+reference is the average of **all complete clean epochs**, including omitted
+responses, background EEG, and overlapping responses. The estimate averages
+retained noisy epochs, so trial-selection distortion contributes to the error.
+This measures recovery of the clean recording average, not recovery of an
+isolated Gaussian component or agreement with generation recipe labels.
+
+| Evaluation flag | Default | Meaning |
+|---|---|---|
+| `--eval-pre` | 0.2 s | Pre-stimulus epoch length and baseline interval |
+| `--eval-post` | 0.8 s | Post-stimulus epoch length |
+| `--eval-peak-start` | 0.05 s | Peak search start |
+| `--eval-peak-end` | 0.7 s | Peak search end, within post-stimulus epoch |
+| `--eval-channel` | 1 | Fixed one-based EEG channel for peaks |
+| `--eval-reject` | 120 µV | Unfiltered peak-to-peak rejection threshold |
+
+Each condition reports scheduled trials, complete candidate epochs, retained
+trials, retention fraction, post-stimulus waveform RMSE and Pearson correlation
+across all EEG channel/sample pairs, clean/measured peak amplitudes and latencies,
+and their signed measured-minus-clean errors. Peaks are the largest absolute
+signed deflection in the fixed channel/search window. Narrow the search window
+when targeting a component; a broad window can switch between components.
+Clean peak amplitude is useful for seeing how jitter/mixtures change the clean
+average even when noisy-to-clean recovery error is small.
+
+No complete epochs or no retained trials produces an explicit status and missing
+recovery metrics. Constant waveforms have undefined correlation; a zero clean
+response has no defined peak. These are not reported as successful zero errors.
+Infinite/undefined broadband SNR is stored as missing in JSON and excluded from
+finite aggregate statistics. A zero added-noise setting does not remove other
+artifacts or default impedance noise; disable these explicitly for an identity
+check, as in the example above.
+
+### Outputs and results
+
+Every run contains clean/noisy MFFs, trial truth, a resolved `scenario.json`, and
+`evaluation.json`. The sweep root contains:
+
+- `sweep_results.json`: plan, evaluation settings, base/repetition seeds, relative
+  run directories, and all per-condition results.
+- `sweep_summary.csv`: one row per recording, with values, repetition, seed, and
+  uncorrected broadband SNR.
+- `sweep_aggregates.csv`: per-cell/condition/metric means, sample SD, and valid n.
+
+The GUI plots means with **sample SD**, not confidence intervals, across seed
+repetitions. For grids, each second-axis value gets a separate line. Select a
+condition and metric, inspect n and missing-result notices, or open any recording.
+One valid repetition has no SD. Undefined values are excluded and reflected in n.
+For QRS jitter, uncorrected broadband SNR can remain unchanged because only event
+timestamps change; these ERP pipelines do not use QRS markers for correction.
 
 ---
 

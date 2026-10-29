@@ -3561,6 +3561,37 @@ nonisolated enum SelfTest {
         }
 
         outcomes.append(contentsOf: SI0ContractFixtures.run())
+        do {
+            var erp = ERPConfig()
+            erp.trialCount = 30
+            erp.omissionRate = 0
+            erp.latencyJitterSDSeconds = 0
+            erp.amplitudeJitterFraction = 0
+            erp.experiment = ERPExperimentConfig(conditions: [
+                ERPConditionConfig(id: "a", name: "A", eventCode: "AAA", fraction: 0.5),
+                ERPConditionConfig(id: "b", name: "B", eventCode: "BBB", fraction: 0.3),
+                ERPConditionConfig(id: "c", name: "C", eventCode: "CCC", fraction: 0.2,
+                                   recipes: ERPTrialRecipeMix(invertedFraction: 1))
+            ])
+            let trials = try ERPExperimentSampler.trials(erp: erp, seed: 42)
+            let repeated = try ERPExperimentSampler.trials(erp: erp, seed: 42)
+            outcomes.append(Outcome(name: "Editable ERP allocates arbitrary conditions deterministically",
+                snr: Double(trials.count), passed: (0..<3).map { c in trials.filter { $0.conditionIndex == c }.count } == [15, 9, 6]
+                    && trials.map(\.conditionIndex) == repeated.map(\.conditionIndex)
+                    && trials.map(\.onsetSeconds) == repeated.map(\.onsetSeconds),
+                expectation: "30 trials allocated 15/9/6 with reproducible schedule"))
+            outcomes.append(Outcome(name: "Editable ERP inversion preserves timing and reverses polarity",
+                snr: trials.last?.value(at: 0.3) ?? 0,
+                passed: trials.filter { $0.conditionIndex == 2 }.allSatisfy { $0.recipe == .inverted && abs($0.value(at: 0.3) + 8) < 1e-12 },
+                expectation: "all six C trials peak at -8 µV and 300 ms"))
+            let roundTrip = try JSONDecoder().decode(ERPConfig.self, from: JSONEncoder().encode(erp))
+            outcomes.append(Outcome(name: "Editable ERP scenario preserves conditions and recipes",
+                snr: 0, passed: roundTrip.experiment == erp.experiment,
+                expectation: "lossless Codable round trip"))
+        } catch {
+            outcomes.append(Outcome(name: "Editable ERP experiment", snr: 0, passed: false,
+                                    expectation: error.localizedDescription))
+        }
         return outcomes
     }
 }

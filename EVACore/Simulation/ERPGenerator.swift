@@ -25,6 +25,10 @@ nonisolated struct ERPTrialTruth: Codable, Sendable {
     var overlapsPreviousTrial: Bool? = nil
     var overlapsNextTrial: Bool? = nil
     var overlapsAnotherTrial: Bool? = nil
+    var conditionName: String? = nil
+    /// Generation recipe, distinct from a subsequently measured TrialsView class.
+    var recipe: ERPTrialRecipe? = nil
+    var realizedPeaks: [ERPRealizedPeak]? = nil
 }
 
 nonisolated struct ERPRandomSeedTruth: Codable, Sendable, Equatable {
@@ -82,7 +86,11 @@ nonisolated enum ERPGenerator {
         config: SimulationConfig,
         montage: Montage
     ) throws -> ERPInjection? {
-        guard let erp = config.erp, erp.trialCount > 0 else { return nil }
+        guard let erp = config.erp else { return nil }
+        if erp.experiment != nil {
+            return try injectExperiment(into: &channels, config: config, erp: erp, montage: montage)
+        }
+        guard erp.trialCount > 0 else { return nil }
         if let placed = erp.components, !placed.isEmpty {
             return try injectPlaced(
                 into: &channels, config: config, erp: erp, components: placed, montage: montage
@@ -260,6 +268,85 @@ nonisolated enum ERPGenerator {
         )
     }
 
+
+    private static func injectExperiment(
+        into channels: inout [[Double]], config: SimulationConfig, erp: ERPConfig, montage: Montage
+    ) throws -> ERPInjection {
+        let design = erp.experiment!
+        let sampled = try ERPExperimentSampler.trials(erp: erp, seed: config.seed)
+        guard config.samplingRate.isFinite, config.samplingRate > 0,
+              ERPExperimentSampler.requiredDuration(sampled) + 1 / config.samplingRate < config.durationSeconds else {
+            throw SimulateError.usage("ERP schedule plus realized waveform tails does not fit inside the recording. Use Fit recording in the ERP panel.")
+        }
+        let source = makeSource(config: config)
+        let field = try config.forwardModel.leadField(
+            montage: montage, sources: [source], reference: config.effectiveRecordingReference,
+            terms: config.leadFieldTerms)
+        var topography = field.matrixMicrovoltsPerNanoampereMeter.map { $0[0] }
+        let maximum = topography.map(abs).max() ?? 0
+        if maximum > 0 { topography = topography.map { $0 / maximum } }
+        let window = sampled.map(\.windowSeconds).max() ?? 0
+        let sampleCount = Int(ceil(window * config.samplingRate)) + 1
+        var averages = design.conditions.map { _ in [Double](repeating: 0, count: sampleCount) }
+        var counts = design.conditions.map { _ in 0 }
+        var trials: [ERPTrialTruth] = []
+        var previousEnd = -Double.infinity
+        for (index, trial) in sampled.enumerated() {
+            let condition = design.conditions[trial.conditionIndex]
+            let length = Int(ceil(trial.windowSeconds * config.samplingRate)) + 1
+            let waveform = (0..<length).map { trial.value(at: Double($0) / config.samplingRate) }
+            let peakIndex = waveform.indices.max { abs(waveform[$0]) < abs(waveform[$1]) } ?? 0
+            let peakLatency = Double(peakIndex) / config.samplingRate
+            counts[trial.conditionIndex] += 1
+            for i in waveform.indices { averages[trial.conditionIndex][i] += waveform[i] }
+            let start = Int((trial.onsetSeconds * config.samplingRate).rounded())
+            for c in channels.indices {
+                let gain = c < topography.count ? topography[c] : 0
+                for i in waveform.indices where start + i < channels[c].count {
+                    channels[c][start + i] += waveform[i] * gain
+                }
+            }
+            let end = trial.onsetSeconds + trial.windowSeconds
+            let overlapsPrevious = trial.onsetSeconds < previousEnd
+            let overlapsNext = index + 1 < sampled.count && sampled[index + 1].onsetSeconds < end
+            trials.append(ERPTrialTruth(
+                id: String(format: "trial-%04d", index + 1), condition: condition.id,
+                eventCode: condition.eventCode, onsetSeconds: trial.onsetSeconds,
+                peakLatencySeconds: peakLatency, peakTimeSeconds: trial.onsetSeconds + peakLatency,
+                peakAmplitudeMicrovolts: waveform[peakIndex], omitted: trial.recipe == .omitted,
+                componentWindowEndSeconds: end, overlapsPreviousTrial: overlapsPrevious,
+                overlapsNextTrial: overlapsNext, overlapsAnotherTrial: overlapsPrevious || overlapsNext,
+                conditionName: condition.name, recipe: trial.recipe, realizedPeaks: trial.peaks))
+            previousEnd = max(previousEnd, end)
+        }
+        let summaries = design.conditions.indices.compactMap { c -> ERPComponent? in
+            guard counts[c] > 0 else { return nil }
+            let average = averages[c].map { $0 / Double(counts[c]) }
+            let peak = average.indices.max { abs(average[$0]) < abs(average[$1]) } ?? 0
+            return ERPComponent(id: design.conditions[c].id,
+                                peakLatencySeconds: Double(peak) / config.samplingRate,
+                                peakAmplitudeMicrovolts: average[peak])
+        }
+        let sources = design.conditions.enumerated().flatMap { c, condition in
+            condition.peaks.enumerated().map { p, peak in
+                ERPComponentTruth(id: "\(condition.id)/\(peak.id)", source: source, topography: topography,
+                    waveformDescription: "Gaussian peak in \(condition.name)",
+                    nominalPeakLatencySeconds: peak.latencySeconds,
+                    nearestNeuralSourceMillimetres: nearestNeuralSourceMillimetres(to: source, config: config),
+                    trialLatencySeconds: sampled.map { $0.conditionIndex == c ? $0.peaks[p].latencySeconds : 0 },
+                    trialAmplitudeMicrovolts: sampled.map { $0.conditionIndex == c ? $0.peaks[p].amplitudeMicrovolts : 0 })
+            }
+        }
+        return ERPInjection(trials: trials, components: summaries, source: source, topography: topography,
+            waveformDescription: "Editable ERP experiment: \(design.conditions.count) conditions",
+            componentSources: sources, realizedLatencyAmplitudeCorrelation: 0,
+            randomSeeds: ERPRandomSeedTruth(
+                latency: ERPExperimentSampler.seed(config.seed, "latency/0"),
+                amplitude: ERPExperimentSampler.seed(config.seed, "amplitude/0"),
+                conditionOrder: ERPExperimentSampler.seed(config.seed, "experiment/conditions"),
+                onsetJitter: ERPExperimentSampler.seed(config.seed, "experiment/isi"),
+                omission: ERPExperimentSampler.seed(config.seed, "recipes/\(design.conditions[0].id)")))
+    }
 
     /// How far an ERP generator sits from the nearest ongoing-EEG source.
     static func nearestNeuralSourceMillimetres(
