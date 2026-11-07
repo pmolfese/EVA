@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
@@ -27,8 +34,12 @@ struct ArtifactReviewResultCache<Value> {
     private var entries: [String: Value] = [:]
     private var order: [String] = []
 
+    /// Looks up a completed result without changing eviction order; reads are synchronous.
     subscript(key: String) -> Value? { entries[key] }
 
+    /// Stores a result and moves its key to the newest insertion position. Evicts
+    /// oldest inserted/updated entries beyond capacity (at least one); reads do not
+    /// refresh recency, so this is not a least-recently-read cache.
     mutating func insert(_ value: Value, for key: String) {
         entries[key] = value
         order.removeAll { $0 == key }
@@ -45,6 +56,8 @@ struct ArtifactWorkspace<Content: View>: View {
     let isBusy: Bool
     @ViewBuilder let content: () -> Content
 
+    /// Provides a fixed-size tab frame around caller-supplied content. The tab
+    /// binding belongs to the parent, and busy work temporarily disables tab changes.
     var body: some View {
         VStack(spacing: 0) {
             Picker("Artifact workflow", selection: $tab) {
@@ -68,6 +81,10 @@ struct ArtifactWorkspace<Content: View>: View {
     }
 }
 
+/// Coordinates review choices, browsing and cached analyses for artifact definitions.
+/// Bindings write back to the owning workflow; State holds session-only selection,
+/// grouping controls and caches. Analysis/grouping tasks use keys to prevent stale
+/// results from replacing the currently selected artifact’s data.
 struct ArtifactReviewWorkspace: View {
     @Binding var artifacts: [DefinedArtifact]
     @Binding var selectedArtifactID: UUID?
@@ -79,6 +96,8 @@ struct ArtifactReviewWorkspace: View {
     let onClose: () -> Void
     let onClean: () -> Void
 
+    // These bounded caches belong to this view identity. Persisted review choices
+    // are stored in artifacts instead, so switching the visible class does not lose them.
     @State private var analysisCache = ArtifactReviewResultCache<ArtifactReviewAnalysis>(capacity: 12)
     @State private var spatialCache = ArtifactReviewResultCache<ArtifactSpatialHierarchy>(capacity: 24)
     @State private var cutCache = ArtifactReviewResultCache<ArtifactSpatialCut>(capacity: 48)
@@ -128,33 +147,44 @@ struct ArtifactReviewWorkspace: View {
     @State private var ruleUndo: [String: ArtifactReviewChoice]?
     @FocusState private var eventFocus: Bool
 
+    /// Filters to definitions supported by the review engine that still have candidates.
     private var reviewable: [DefinedArtifact] {
         artifacts.filter { ArtifactReviewEngine.canReview($0) && !ArtifactReviewEngine.candidates(for: $0).isEmpty }
     }
+    /// Resolves the focused artifact, falling back to the first reviewable definition.
     private var selected: DefinedArtifact? {
         reviewable.first { $0.id == selectedArtifactID } ?? reviewable.first
     }
+    /// Removes stale IDs from the batch selection and falls back to the focused artifact
+    /// when no selected IDs remain. This computed view does not mutate stored selection.
     private var effectiveSelectedArtifactIDs: Set<UUID> {
         let reviewableIDs = Set(reviewable.map(\.id))
+        // Set intersection discards IDs whose artifacts were removed or became unreviewable.
+        // This avoids applying a batch treatment to hidden/stale selection entries.
         let retained = selectedArtifactIDs.intersection(reviewableIDs)
         if !retained.isEmpty { return retained }
         return selected.map { [$0.id] } ?? []
     }
+    /// Returns reviewable definitions affected by a batch treatment change.
     private var treatmentTargets: [DefinedArtifact] {
         let ids = effectiveSelectedArtifactIDs
         return reviewable.filter { ids.contains($0.id) }
     }
+    /// Returns the shared method of all treatment targets, or nil for mixed/empty selection.
     private var commonTreatment: ArtifactCleaningMethod? {
         guard let first = treatmentTargets.first?.cleaningMethod,
               treatmentTargets.dropFirst().allSatisfy({ $0.cleaningMethod == first }) else { return nil }
         return first
     }
+    /// Intersects allowed method lists so a batch menu offers only choices valid for every target.
     private var batchCleaningMethods: [ArtifactCleaningMethod] {
         guard let first = treatmentTargets.first else { return [] }
         return cleaningMethods(first).filter { method in
             treatmentTargets.dropFirst().allSatisfy { cleaningMethods($0).contains(method) }
         }
     }
+    /// Offers sibling classes from the same source and compatible threshold ocular
+    /// classes, excluding the current class. Transfer validity is also checked by the engine.
     private var compatibleSplitDestinations: [DefinedArtifact] {
         guard let selected else { return [] }
         let sourceID = selected.reviewState?.sourceArtifactID ?? selected.id
@@ -166,6 +196,9 @@ struct ArtifactReviewWorkspace: View {
             return sameSource || crossOcular
         }
     }
+    /// Hashes inputs that affect example analysis, including sample revision, events,
+    /// window settings and sensor geometry. Hasher values are session-local, not stable
+    /// serialized identifiers. Review decisions alone do not rebuild the fixed reference.
     private var analysisKey: String {
         guard let artifact = selected else { return "empty" }
         var hasher = Hasher()
@@ -190,29 +223,38 @@ struct ArtifactReviewWorkspace: View {
         }
         return String(hasher.finalize())
     }
+    /// Uses the active result only if its key matches; otherwise checks the synchronous cache.
     private var currentAnalysis: ArtifactReviewAnalysis? { loadedKey == analysisKey ? analysis : analysisCache[analysisKey] }
+    /// Defaults ocular-like artifacts to polarity-insensitive grouping, others to signed grouping.
     private var defaultSpatialPolarityMode: ArtifactSpatialPolarityMode {
         switch selected?.type {
         case .ocular, .saccadicSpike, .corneoRetinal: return .ignoreGlobalPolarity
         default: return .signed
         }
     }
+    /// Uses the user’s override when present, otherwise the type-specific default.
     private var spatialPolarityMode: ArtifactSpatialPolarityMode {
         spatialPolarityOverride ?? defaultSpatialPolarityMode
     }
+    /// Defaults waveform orientation to match the spatial family when global polarity is ignored.
     private var waveformPolarityMode: ArtifactWaveformPolarityMode {
         waveformPolarityOverride ?? (spatialPolarityMode == .ignoreGlobalPolarity ? .orientToSpatialFamily : .preserve)
     }
+    /// Exposes the selected spatial comparison metric for keys, grouping and labels.
     private var effectiveSpatialSimilarityMetric: ArtifactSpatialSimilarityMetric {
         spatialSimilarityMetric
     }
+    /// Labels Pearson scores as signed r or absolute |r|; other comparisons use score.
     private var spatialScoreLabel: String {
         effectiveSpatialSimilarityMetric == .globalPearson ? (spatialPolarityMode == .signed ? "r" : "|r|") : "score"
     }
+    /// Chooses spatial browsing initially for definitions with maps or threshold-family provenance.
     private func prefersSpatialGroups(_ artifact: DefinedArtifact?) -> Bool {
         guard let artifact else { return false }
         return artifact.topography != nil || ArtifactReviewEngine.isThresholdFamily(artifact)
     }
+    /// Resets session grouping controls when entering another artifact. Extracted
+    /// standalone families start as one group because the user already chose that partition.
     private func resetGroupingDefaults(for artifact: DefinedArtifact?) {
         usesSpatialGroups = prefersSpatialGroups(artifact)
         spatialPolarityOverride = nil
@@ -224,25 +266,35 @@ struct ArtifactReviewWorkspace: View {
         spatialCohesionRule = .tenthPercentile
         spatialOutlierFloor = 0.60
     }
+    /// Identifies the expensive hierarchy by analysis, polarity and comparison metric.
+    /// An empty key disables building when spatial browsing or analysis is unavailable.
     private var spatialTaskKey: String {
         usesSpatialGroups && currentAnalysis != nil
             ? "\(analysisKey)/spatial/\(spatialPolarityMode.rawValue)/\(effectiveSpatialSimilarityMetric.rawValue)" : ""
     }
+    /// Identifies the cheaper hierarchy-cut settings separately from the hierarchy itself.
     private var spatialCutParametersKey: String {
         "\(spatialGroupingControl.rawValue)/\(spatialTargetCount)/\(spatialThreshold)/\(spatialCohesionRule.rawValue)/\(spatialOutlierFloor)"
     }
+    /// Combines hierarchy and cut identities so an early preview matches current controls.
     private var spatialPreviewRequestKey: String { "\(spatialTaskKey)/cut/\(spatialCutParametersKey)" }
+    /// Prefers a complete active hierarchy, then a cached hierarchy, then a matching
+    /// early preview. Never displays a preview computed for different cut settings.
     private var currentSpatial: ArtifactSpatialHierarchy? {
         if spatialLoadedKey == spatialTaskKey, let spatialHierarchy { return spatialHierarchy }
         if let cached = spatialCache[spatialTaskKey] { return cached }
         return spatialPreviewLoadedKey == spatialPreviewRequestKey ? spatialPreview : nil
     }
+    /// Enables cutting only after a usable full or preview hierarchy is available.
     private var spatialCutTaskKey: String {
         currentSpatial != nil ? spatialPreviewRequestKey : ""
     }
+    /// Returns a cut matching current controls from active state or the local cache.
     private var currentSpatialCut: ArtifactSpatialCut? {
         spatialCutLoadedKey == spatialCutTaskKey ? spatialCut : cutCache[spatialCutTaskKey]
     }
+    /// Overlays manual session merges on the computed groups, removing overlapping
+    /// original groups, then sorts by size. Merges here change browsing groups, not event data.
     private var spatialGroups: [ArtifactSpatialGroup] {
         var groups = currentSpatialCut?.groups ?? []
         for merged in manuallyMergedSpatialGroups {
@@ -255,7 +307,10 @@ struct ArtifactReviewWorkspace: View {
             return $0.eventIDs.count > $1.eventIDs.count
         }
     }
+    /// Exposes events that the current spatial cut could not assign to a family.
     private var spatialUnassignedIDs: [String] { currentSpatialCut?.unassignedIDs ?? [] }
+    /// Chooses one nonzero amplitude limit for all visible spatial cards, based on
+    /// canonical centroids or representative events according to the display mode.
     private var spatialCardScale: Double {
         switch spatialCardMapMode {
         case .centroid:
@@ -266,6 +321,8 @@ struct ArtifactReviewWorkspace: View {
             }.max() ?? 1, 1e-9)
         }
     }
+    /// Checks every unordered pair and returns the highest-similarity pair. IDs are
+    /// for selection; indices supply current one-based display labels after sorting.
     private var closestSpatialGroups: (leftID: Int, rightID: Int, leftIndex: Int, rightIndex: Int, score: Double)? {
         guard let hierarchy = currentSpatial, spatialGroups.count >= 2 else { return nil }
         var best: (Int, Int, Int, Int, Double)?
@@ -279,24 +336,32 @@ struct ArtifactReviewWorkspace: View {
         }
         return best.map { ($0.0, $0.1, $0.2, $0.3, $0.4) }
     }
+    /// Resolves exactly one real family. The sentinel ID −1 means unassigned, not a family.
     private var selectedSpatialFamily: ArtifactSpatialGroup? {
         guard selectedSpatialGroupIDs.count == 1, let id = selectedSpatialGroupIDs.first, id != -1 else { return nil }
         return spatialGroups.first { $0.id == id }
     }
+    /// Keys waveform grouping by its selected spatial family, event membership and
+    /// polarity policy. No single family selected means no waveform hierarchy is requested.
     private var waveformTaskKey: String {
         guard usesSpatialGroups, let family = selectedSpatialFamily else { return "" }
         var hasher = Hasher()
         hasher.combine(family.eventIDs)
         return "\(spatialTaskKey)/waveform/\(family.id)/\(hasher.finalize())/\(waveformPolarityMode.rawValue)"
     }
+    /// Uses only waveform grouping matching the current family, with local-cache fallback.
     private var currentWaveform: ArtifactWaveformGroupingResult? {
         !waveformTaskKey.isEmpty && waveformLoadedKey == waveformTaskKey ? waveformGrouping : waveformCache[waveformTaskKey]
     }
+    /// Returns the subgroup filter, including the −1 unassigned sentinel. nil means
+    /// no subgroup filter; an empty set means the chosen subgroup contains no events.
     private var waveformEventIDs: Set<String>? {
         guard let id = waveformGroupID, let result = currentWaveform else { return nil }
         return Set(id == -1 ? result.hierarchy.unassignedIDs
             : result.hierarchy.groups(minimumCorrelation: waveformThreshold).first { $0.id == id }?.eventIDs ?? [])
     }
+    /// Unions members of selected spatial families, optionally including unassigned
+    /// events. nil means no spatial filter rather than an empty selection result.
     private var spatialEventIDs: Set<String>? {
         guard usesSpatialGroups, !selectedSpatialGroupIDs.isEmpty else { return nil }
         var ids = Set<String>()
@@ -306,6 +371,8 @@ struct ArtifactReviewWorkspace: View {
         }
         return ids
     }
+    /// Filters by spatial/subgroup membership or fixed waveform band, then sorts
+    /// by descending correlation and event time. Missing correlations sort after scored events.
     private var examples: [ArtifactReviewExample] {
         let spatialIDs = spatialEventIDs
         let waveformIDs = waveformEventIDs
@@ -319,25 +386,33 @@ struct ArtifactReviewWorkspace: View {
             return ($0.correlation ?? -2) > ($1.correlation ?? -2)
         }
     }
+    /// Builds pagination from filtered examples and the selected event’s current position.
     private var navigation: ArtifactReviewNavigation {
         let items = examples
         return ArtifactReviewNavigation(count: items.count,
             selectedIndex: items.firstIndex { $0.id == selectedEventID } ?? 0)
     }
+    /// Finds one nonzero scalp-map scale for the currently visible page of examples.
     private var topographyScale: Double {
         let items = examples
         let page = ArtifactReviewNavigation(count: items.count,
             selectedIndex: items.firstIndex { $0.id == selectedEventID } ?? 0).visibleRange
         return max(items[page].compactMap { $0.topography?.maximumAbsoluteAmplitude }.max() ?? 1, 1e-6)
     }
+    /// Resolves the selected event within the current filter, falling back to its first example.
     private var selectedExample: ArtifactReviewExample? {
         examples.first { $0.id == selectedEventID } ?? examples.first
     }
+    /// Keeps the chosen overview channel only if analysis supports it, otherwise uses the first.
     private var activeChannel: Int {
         currentAnalysis?.channelIndices.contains(channel) == true ? channel : currentAnalysis?.channelIndices.first ?? 0
     }
+    /// Reads stored auto-selection rules or their defaults without applying any decisions.
     private var rules: ArtifactReviewRules { selected?.reviewState?.rules ?? ArtifactReviewRules() }
 
+    /// Composes sidebar, analysis canvas and inspector, then attaches four keyed tasks
+    /// for analysis, spatial hierarchy, cuts and waveform subgroups. onChange handlers
+    /// clear incompatible browsing state; actual event decisions remain in artifact bindings.
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
@@ -392,6 +467,8 @@ struct ArtifactReviewWorkspace: View {
             }.padding(16)
         }
         .frame(height: 770)
+        // SwiftUI cancels/restarts each task when its ID changes. Separate keys let
+        // a threshold adjustment recut an existing hierarchy without recomputing features.
         .task(id: analysisKey) { await loadAnalysis() }
         .task(id: spatialTaskKey) { await loadSpatialGrouping() }
         .task(id: spatialCutTaskKey) { await loadSpatialCut() }
@@ -430,6 +507,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Displays reviewable artifact classes with multi-selection and batch-treatment
+    /// status. The sidebar accepts a spatial-family drag to create an independent class.
     private var classList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 4) {
@@ -488,6 +567,8 @@ struct ArtifactReviewWorkspace: View {
                 perform: acceptSpatialFamilyDrop)
     }
 
+    /// Shows current decisions and batch-selection count. Unreviewed events initially
+    /// count as included, so unreviewed is not a mutually exclusive decision category.
     private func reviewHeader(_ artifact: DefinedArtifact) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
@@ -507,6 +588,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Builds treatment, grouping and auto-rule controls in collapsible sections.
+    /// The proposed rule counts are a preview; Apply Rules commits them separately.
     private func reviewInspector(_ artifact: DefinedArtifact) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -603,10 +686,13 @@ struct ArtifactReviewWorkspace: View {
         .background(Color(nsColor: .underPageBackgroundColor).opacity(0.32))
     }
 
+    /// Caps the requested family count by available features and the UI limit of 40.
     private var maximumSpatialFamilyCount: Int {
         max(1, min(40, currentSpatial?.features.count ?? 1))
     }
 
+    /// Edits target count/cohesion, polarity and comparison mode. Polarity changes
+    /// also clear waveform overrides and selections that depended on the old orientation.
     private var spatialEssentialsInspector: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Grouping", selection: $spatialGroupingControl) {
@@ -666,6 +752,8 @@ struct ArtifactReviewWorkspace: View {
         .font(.caption)
     }
 
+    /// Edits cohesion/outlier policy and card-map display. A completed hierarchy
+    /// can suggest a target count without rebuilding the underlying feature comparisons.
     private var spatialQualityInspector: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Cohesion rule", selection: $spatialCohesionRule) {
@@ -698,6 +786,8 @@ struct ArtifactReviewWorkspace: View {
         .font(.caption)
     }
 
+    /// Controls waveform subgroup orientation and threshold within one spatial family.
+    /// These settings filter browsing; they do not themselves include or exclude events.
     private var waveformInspector: some View {
         VStack(alignment: .leading, spacing: 10) {
             Picker("Polarity", selection: Binding(
@@ -724,6 +814,8 @@ struct ArtifactReviewWorkspace: View {
         .font(.caption)
     }
 
+    /// Provides compact rule controls plus apply/undo actions. Before committing
+    /// proposals, saves the prior choices so Undo can restore automatic decisions.
     private func autoRulesInspector(_ artifact: DefinedArtifact) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
@@ -765,6 +857,8 @@ struct ArtifactReviewWorkspace: View {
         .font(.caption)
     }
 
+    /// Builds the expanded rule panel with explanations and live proposed counts.
+    /// Changing thresholds stores rule settings; Apply rules changes active event choices.
     private func autoRules(_ artifact: DefinedArtifact) -> some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
@@ -838,6 +932,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Renders family cards, closest-pair suggestions, merge actions and unassigned
+    /// events. Cards select/filter examples; drag payloads move membership only when dropped.
     private func spatialGroupingCanvas(_ result: ArtifactReviewAnalysis) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
@@ -952,6 +1048,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Displays waveform subgroups only within one selected spatial family, or
+    /// explains why no subgroup view is available. Selection updates the event filter.
     @ViewBuilder
     private func waveformGroupingPreview() -> some View {
         if selectedSpatialFamily != nil {
@@ -984,6 +1082,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Shows fixed waveform-similarity bands with mean/example traces. Clicking
+    /// a band filters browsing and focuses keyboard navigation without changing decisions.
     private func similarityGroups(_ result: ArtifactReviewAnalysis) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 5) {
@@ -1022,6 +1122,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Presents controls to move the current filtered examples into a compatible
+    /// existing class or a new class. The full-set/empty-set guards prevent meaningless splits.
     @ViewBuilder
     private func splitControls(_ artifact: DefinedArtifact) -> some View {
         let hasGroupSelection = usesSpatialGroups ? !selectedSpatialGroupIDs.isEmpty : band != nil
@@ -1074,6 +1176,9 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Combines paged example tiles, decision buttons, detailed traces and reference
+    /// rebuilding. Keyboard focus routes arrows/space to review navigation. Display
+    /// controls affect plots; decision and reference actions call the review engine.
     private func eventWorkspace(_ artifact: DefinedArtifact, _ result: ArtifactReviewAnalysis) -> some View {
         let browsedExamples = examples
         let mapScale = topographyScale
@@ -1234,6 +1339,9 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Selects one overview channel or the event’s most impacted channels, then draws
+    /// them with a shared time/amplitude scale and raw surrounding context. Context
+    /// changes do not alter correction windows or multichannel similarity scoring.
     private func eventDisplay(_ artifact: DefinedArtifact, _ example: ArtifactReviewExample,
                               _ result: ArtifactReviewAnalysis) -> some View {
         let displayed = displayMode == .single ? [activeChannel]
@@ -1286,6 +1394,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Displays the waveform match score and reference support, including missing
+    /// score explanations. This is shape similarity, not a calibrated artifact probability.
     private func confidenceSummary(_ example: ArtifactReviewExample) -> some View {
         let confidence = example.matchConfidence
         return VStack(alignment: .leading, spacing: 6) {
@@ -1313,11 +1423,15 @@ struct ArtifactReviewWorkspace: View {
         .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 6))
     }
 
+    /// Maps available match scores to display bands; absent scores use secondary styling.
     private func confidenceColor(_ confidence: ArtifactReviewMatchConfidence) -> Color {
         guard let score = confidence.score else { return .secondary }
         return score >= 90 ? .blue : score >= 75 ? .orange : .secondary
     }
 
+    /// Builds a typed two-way binding to a rule field, preparing review state and
+    /// clamping coupled thresholds/limits. invalidates:false stores settings without
+    /// notifying the parent to invalidate cleaning; rules are committed by Apply Rules.
     private func ruleBinding<Value>(_ key: WritableKeyPath<ArtifactReviewRules, Value>) -> Binding<Value> {
         Binding(get: { rules[keyPath: key] }, set: { value in
             edit(invalidates: false) { artifact in
@@ -1333,6 +1447,9 @@ struct ArtifactReviewWorkspace: View {
         })
     }
 
+    /// Copies the focused artifact, applies an inout mutation and writes it back
+    /// through the array binding. The invalidates flag controls the parent callback,
+    /// not whether the mutation is saved.
     private func edit(invalidates: Bool = true, _ mutation: (inout DefinedArtifact) -> Void) {
         guard let id = selected?.id, let index = artifacts.firstIndex(where: { $0.id == id }) else { return }
         var updated = artifacts[index]
@@ -1341,6 +1458,7 @@ struct ArtifactReviewWorkspace: View {
         if invalidates { onChange() }
     }
 
+    /// Removes no-longer-reviewable IDs and keeps focused and batch selections consistent.
     private func synchronizeArtifactSelection() {
         let validIDs = Set(reviewable.map(\.id))
         selectedArtifactIDs.formIntersection(validIDs)
@@ -1355,6 +1473,9 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Implements desktop selection: Shift chooses an anchored range, Command/Control
+    /// toggles members, and an ordinary click replaces selection. Keeps a focused
+    /// artifact for the main canvas while a batch may contain several definitions.
     private func selectArtifact(_ artifact: DefinedArtifact, at index: Int) {
         let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if modifiers.contains(.shift), let anchorID = artifactSelectionAnchorID,
@@ -1380,6 +1501,8 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Changes method on eligible selected artifacts, commits their current review
+    /// choices and notifies the owner once if anything changed. Does not run cleaning.
     private func applyTreatment(_ method: ArtifactCleaningMethod) {
         let ids = effectiveSelectedArtifactIDs
         var changed = false
@@ -1393,6 +1516,7 @@ struct ArtifactReviewWorkspace: View {
         if changed { onChange() }
     }
 
+    /// Chooses a sidebar SF Symbol for the artifact’s domain type.
     private func artifactSymbol(_ artifact: DefinedArtifact) -> String {
         switch artifact.type {
         case .ocular: return "eye"
@@ -1405,12 +1529,15 @@ struct ArtifactReviewWorkspace: View {
         }
     }
 
+    /// Commits one manual decision for the selected event and restores keyboard focus.
     private func choose(_ decision: ArtifactReviewDecision) {
         guard let example = selectedExample else { return }
         edit { ArtifactReviewEngine.setChoice(decision, eventID: example.id, artifact: &$0) }
         eventFocus = true
     }
 
+    /// Restores the saved pre-rule automatic choices while preserving current manual
+    /// choices, then rebuilds the active event set. This is a single-level rule undo.
     private func undoRules() {
         guard let previous = ruleUndo else { return }
         edit { artifact in
@@ -1423,6 +1550,9 @@ struct ArtifactReviewWorkspace: View {
         ruleUndo = nil
     }
 
+    /// Moves currently filtered event IDs to an existing compatible class or a new
+    /// child through the engine. Saves source/destination, focuses the destination and
+    /// clears transient grouping/undo state. No signal samples are changed.
     private func splitClass() {
         let ids = Set(examples.map(\.id))
         guard let id = selected?.id, let index = artifacts.firstIndex(where: { $0.id == id }) else { return }
@@ -1447,6 +1577,9 @@ struct ArtifactReviewWorkspace: View {
         ruleUndo = nil
     }
 
+    /// Encodes source artifact ID and unique event IDs as JSON text for AppKit drag/drop.
+    /// Dragging a selected family includes the other selected real families; dragging
+    /// an unselected family includes only that family. Encoding failure yields an empty provider.
     private func spatialFamilyDragProvider(_ group: ArtifactSpatialGroup,
                                            familyNumber: Int) -> NSItemProvider {
         guard let sourceID = selected?.id else { return NSItemProvider() }
@@ -1465,6 +1598,9 @@ struct ArtifactReviewWorkspace: View {
         return NSItemProvider(object: text as NSString)
     }
 
+    /// Starts loading the first text-capable drag item and decodes its JSON payload.
+    /// Returns whether loading was accepted, not whether extraction later succeeds.
+    /// The callback hops to MainActor before editing SwiftUI-bound state.
     private func acceptSpatialFamilyDrop(_ providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else {
             return false
@@ -1480,6 +1616,9 @@ struct ArtifactReviewWorkspace: View {
         return true
     }
 
+    /// Extracts dropped event IDs into a standalone artifact with OBS treatment.
+    /// Keeps the source visible while its remaining families rebuild, appends the new
+    /// artifact and clears session selections. Invalid/stale source payloads are ignored.
     @MainActor
     private func extractSpatialFamily(_ payload: ArtifactSpatialDragPayload) {
         guard !payload.eventIDs.isEmpty,
@@ -1501,12 +1640,17 @@ struct ArtifactReviewWorkspace: View {
         ruleUndo = nil
     }
 
+    /// Selects the navigation helper’s next event/page destination and restores focus.
+    /// An out-of-range destination leaves the selection unchanged.
     private func move(_ direction: Int, byPage: Bool? = nil) {
         guard let index = navigation.destination(direction, byPage: byPage) else { return }
         selectedEventID = examples[index].id
         eventFocus = true
     }
 
+    /// Loads waveform grouping from local/shared caches or builds it off the UI actor.
+    /// Forwards cancellation to the detached worker and checks the family key after
+    /// awaits, preventing an old family’s result from replacing the current view.
     @MainActor
     private func loadWaveformGrouping() async {
         let key = waveformTaskKey
@@ -1533,6 +1677,9 @@ struct ArtifactReviewWorkspace: View {
         waveformGrouping = result; waveformLoadedKey = key
     }
 
+    /// Loads or builds a spatial hierarchy, optionally publishing an early cut preview.
+    /// Snapshots geometry/polarity/comparison inputs, forwards cancellation and checks
+    /// request identity before caching/publishing. Missing layout yields unassigned events.
     @MainActor
     private func loadSpatialGrouping() async {
         let key = spatialTaskKey
@@ -1571,6 +1718,8 @@ struct ArtifactReviewWorkspace: View {
         spatialPreview = nil; spatialPreviewLoadedKey = ""
     }
 
+    /// Publishes an early hierarchy only while both its analysis and initial-cut
+    /// request still match the controls; outdated preview callbacks are discarded.
     @MainActor
     private func publishSpatialPreview(_ preview: ArtifactSpatialHierarchy, taskKey: String, requestKey: String) {
         guard !Task.isCancelled, spatialTaskKey == taskKey, spatialPreviewRequestKey == requestKey else { return }
@@ -1578,6 +1727,8 @@ struct ArtifactReviewWorkspace: View {
         spatialPreviewLoadedKey = requestKey
     }
 
+    /// Cuts the current hierarchy by cohesion or target count using captured settings.
+    /// Caches/publishes only if the task is still current after the background calculation.
     @MainActor
     private func loadSpatialCut() async {
         let key = spatialCutTaskKey
@@ -1604,16 +1755,22 @@ struct ArtifactReviewWorkspace: View {
         spatialCut = result; spatialCutLoadedKey = key
     }
 
+    /// Clears selected spatial families, range anchor and the dependent waveform subgroup.
     private func clearSpatialSelection() {
         selectedSpatialGroupIDs = []
         spatialSelectionAnchorID = nil
         waveformGroupID = nil
     }
 
+    /// Chooses a consistent display polarity for sign-insensitive families: prefer
+    /// positive mean over the frontmost quarter of located sensors, with peak-sign
+    /// fallback. Returns ±1 for display only; recorded maps remain unchanged.
     private func canonicalDisplaySign(for group: ArtifactSpatialGroup) -> Double {
         guard group.polarityMode == .ignoreGlobalPolarity,
               let layout = sensorLayout, let hierarchy = currentSpatial,
               group.meanFeature.count == hierarchy.channels.count else { return 1 }
+        // Resolve coordinates by channel ID, not by the position of an item in the
+        // layout array; duplicate IDs retain the first coordinate.
         let positions = Dictionary(layout.positions.map { ($0.channelIndex, $0) },
             uniquingKeysWith: { first, _ in first })
         let located = hierarchy.channels.indices.compactMap { offset -> (Int, Double)? in
@@ -1626,6 +1783,9 @@ struct ArtifactReviewWorkspace: View {
         return group.meanFeature[peak] < 0 ? -1 : 1
     }
 
+    /// Expands a family’s normalized centroid into recording-channel index space
+    /// and applies its canonical display sign. This is a synthetic centroid map,
+    /// so sample/time metadata are zero rather than an actual event timestamp.
     private func canonicalTopography(for group: ArtifactSpatialGroup) -> ArtifactReviewTopography? {
         guard let hierarchy = currentSpatial, group.meanFeature.count == hierarchy.channels.count,
               let last = hierarchy.channels.max() else { return nil }
@@ -1638,12 +1798,15 @@ struct ArtifactReviewWorkspace: View {
             sampleIndex: 0, timeSeconds: 0, globalFieldPower: sqrt(meanSquare))
     }
 
+    /// Swaps positive/negative member counts when the displayed canonical centroid is flipped.
     private func displayedOrientationCounts(_ group: ArtifactSpatialGroup) -> (positive: Int, negative: Int) {
         canonicalDisplaySign(for: group) < 0
             ? (group.negativeOrientationCount, group.positiveOrientationCount)
             : (group.positiveOrientationCount, group.negativeOrientationCount)
     }
 
+    /// Handles anchored range/toggle/single selection of family cards, removes the
+    /// unassigned sentinel, resets subgroup filtering and focuses a representative event.
     private func selectSpatialGroup(_ group: ArtifactSpatialGroup, at index: Int) {
         let modifiers = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if modifiers.contains(.shift), let anchorID = spatialSelectionAnchorID,
@@ -1669,6 +1832,7 @@ struct ArtifactReviewWorkspace: View {
         eventFocus = true
     }
 
+    /// Selects the suggested two-family pair and clears the old waveform subgroup filter.
     private func selectSpatialPair(_ left: Int, _ right: Int) {
         selectedSpatialGroupIDs = [left, right]
         spatialSelectionAnchorID = left
@@ -1676,6 +1840,9 @@ struct ArtifactReviewWorkspace: View {
         selectedEventID = spatialGroups.first { $0.id == left }?.representativeID
     }
 
+    /// Creates a session-only merged browsing group from selected families. Replaces
+    /// overlapping prior manual merges and selects the new representative. Negative
+    /// IDs below −1000 distinguish manual groups from engine groups and unassigned −1.
     private func mergeSpatialGroups(_ ids: [Int]) {
         guard let hierarchy = currentSpatial else { return }
         let wanted = Set(ids.filter { $0 != -1 })
@@ -1693,6 +1860,9 @@ struct ArtifactReviewWorkspace: View {
         eventFocus = true
     }
 
+    /// Prepares review state, then loads or computes example analysis from a value
+    /// snapshot. Cancellation is forwarded to the worker; a key check protects publication
+    /// if the artifact, signal or settings changed while suspended.
     @MainActor
     private func loadAnalysis() async {
         guard let id = selected?.id, let index = artifacts.firstIndex(where: { $0.id == id }) else { return }
@@ -1714,6 +1884,9 @@ struct ArtifactReviewWorkspace: View {
             ArtifactReviewEngine.analyze(artifact: artifact, signal: source, excluding: excluded,
                 sensorLayoutName: layout, topographyChannelIndices: mappedChannels)
         }
+        // A detached task does not inherit cancellation automatically. Forward it
+        // explicitly, then also verify identity: cancellation alone cannot prove this
+        // result still belongs to the selected artifact.
         let result = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
         guard !Task.isCancelled, analysisKey == key else { return }
         analysisCache.insert(result, for: key)
@@ -1722,19 +1895,24 @@ struct ArtifactReviewWorkspace: View {
         if !result.channelIndices.contains(channel) { channel = result.channelIndices.first ?? 0 }
     }
 
+    /// Uses recorded channel names when in bounds, otherwise a one-based Ch label.
     private func channelName(_ index: Int) -> String {
         guard let names = signal.channelNames, names.indices.contains(index) else { return "Ch \(index + 1)" }
         return names[index]
     }
+    /// Labels the fixed browsing-band thresholds independently of editable auto-selection rules.
     private func bandDescription(_ band: ArtifactReviewBand) -> String {
         switch band { case .close: return "r ≥ 0.90"; case .variation: return "0.75 ≤ r < 0.90"; case .low: return "r < 0.75" }
     }
+    /// Formats available correlation, amplitude and measured duration with explicit missing-data labels.
     private func metricDescription(_ example: ArtifactReviewExample) -> String {
         let r = example.correlation.map { String(format: "r %.3f", $0) } ?? "No similarity score"
         let peak = example.peakMicrovolts.map { String(format: "%.1f µV peak", $0) } ?? "No finite waveform"
         let duration = example.durationSeconds.map { String(format: "%.0f ms span", $0 * 1000) } ?? "Span unknown"
         return "\(r) · \(peak) · \(duration)"
     }
+    /// Offers general review treatments plus PCA-S for BCG, retaining an existing
+    /// specialized method so an already-configured definition can still display it.
     private func cleaningMethods(_ artifact: DefinedArtifact) -> [ArtifactCleaningMethod] {
         var methods: [ArtifactCleaningMethod] = [.doNothing, .obs, .sspPCA, .regression, .mas, .mar, .waas, .waar, .wavelet]
         if artifact.type == .bcg { methods.append(.pcaS) }
@@ -1751,6 +1929,9 @@ struct ArtifactWaveformSubgroupCards: View {
     @Binding var selectedGroupID: Int?
     let onSelect: (String?) -> Void
 
+    /// Shows subgroup mean/representative traces with selection callbacks. nil means
+    /// the whole spatial family; −1 selects unassigned waveforms. These bindings
+    /// control browsing and never modify source waveforms.
     var body: some View {
         let groups = result.hierarchy.groups(minimumCorrelation: threshold)
         let channel = result.channelIndices.contains(preferredChannel) ? preferredChannel : result.channelIndices.first ?? 0
@@ -1802,6 +1983,8 @@ struct ArtifactReviewTopomapPreview: View {
     let scale: Double
     var showsScale = false
 
+    /// Draws a noninteractive topomap with the supplied shared scale, or an accessible
+    /// missing-data/layout placeholder. Detailed mode adds electrodes and a color bar.
     var body: some View {
         if let layout, let topography {
             TopomapView(layout: layout, values: topography.values, timeSeconds: topography.timeSeconds,
@@ -1828,6 +2011,7 @@ private struct ArtifactReviewHelp: View {
     let text: String
     @State private var isPresented = false
 
+    /// Displays a local help popover; State owns visibility and $ passes its dismissal binding.
     var body: some View {
         Button { isPresented.toggle() } label: {
             Image(systemName: "questionmark.circle")
@@ -1851,10 +2035,14 @@ private struct ArtifactReviewTracePlot: View {
     let traces: [[Float]]
     let reference: [Float]
     var minimumScale: Float = 1
+    /// Draws example traces and a reference with one finite-value amplitude scale.
+    /// Multiple examples are translucent; the reference is emphasized in blue.
     var body: some View {
         Canvas { context, size in
             let all = traces.flatMap { $0 } + reference
             let scale = max(all.filter(\.isFinite).map { abs($0) }.max() ?? minimumScale, minimumScale)
+            /// Maps normalized trace indices and amplitudes to canvas coordinates. Nonfinite
+            /// values break the line instead of drawing across a data gap.
             func path(_ values: [Float]) -> Path {
                 Path { p in
                     var started = false
@@ -1882,6 +2070,9 @@ private struct ArtifactReviewEventPlot: View {
     let window: ArtifactReviewContextWindow
     let sharedScale: Double
 
+    /// Draws raw context, class reference and core/taper/measured-span overlays for one
+    /// channel. Raw samples are centered using the finite core mean; the reference is
+    /// positioned across the core, with time labels relative to the event center.
     var body: some View {
         Canvas { context, size in
             guard signal.data.indices.contains(channel), signal.samplingRate > 0 else { return }
@@ -1900,8 +2091,11 @@ private struct ArtifactReviewEventPlot: View {
             let indices = ArtifactReviewEngine.traceIndices(row, range: available)
             let reference = analysis.waveform(analysis.reference, channel: channel)
             let scale = sharedScale
+            /// Maps an absolute sample index into horizontal canvas points with side padding.
             func x(_ sample: Double) -> Double { 5 + (sample - Double(start)) / Double(max(end - start, 1)) * (size.width - 10) }
+            /// Maps a centered amplitude into vertical canvas points; positive values draw upward.
             func y(_ value: Double) -> Double { 15 + (1 - value / scale) / 2 * (size.height - 42) }
+            /// Fills a sample-range background using the same x mapping as traces and event markers.
             func shade(_ range: Range<Int>, _ color: Color) {
                 context.fill(Path(CGRect(x: x(Double(range.lowerBound)), y: 0,
                     width: x(Double(range.upperBound)) - x(Double(range.lowerBound)), height: size.height - 23)), with: .color(color))
@@ -1913,6 +2107,8 @@ private struct ArtifactReviewEventPlot: View {
                 let upper = min(end, Int((detail.endTimeSeconds * signal.samplingRate).rounded()))
                 if upper > lower { shade(lower..<upper, .orange.opacity(0.15)) }
             }
+            // Break the path at nonfinite samples. Joining across such a gap would invent
+            // a continuous waveform where no valid measurement is available.
             var raw = Path(), drawing = false
             for index in indices {
                 guard row[index].isFinite else { drawing = false; continue }

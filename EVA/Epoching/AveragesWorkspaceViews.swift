@@ -18,8 +18,8 @@ import SwiftUI
 
 /// One row of the per-category signal-to-noise table in the Averages workspace.
 /// Optional metrics keep their `nil` for display ("n/a"); the `*Sort` keys map
-/// `nil` to the smallest value so missing metrics sink to the bottom of an
-/// ascending sort.
+/// `nil` to the smallest value, placing missing metrics first in an ascending
+/// sort and last in a descending sort.
 struct AverageSNRRow: Identifiable {
     let id: String
     let category: String
@@ -30,13 +30,20 @@ struct AverageSNRRow: Identifiable {
     let sme: Double?
     let splitHalf: Double?
 
+    /// Numeric sort key for optional ±SNR; missing values sort first in ascending order.
     var plusMinusSort: Double { plusMinusSNR ?? -.greatestFiniteMagnitude }
+    /// Numeric sort key for optional baseline SNR using the same missing-value sentinel.
     var baselineSort: Double { baselineSNR ?? -.greatestFiniteMagnitude }
+    /// Numeric sort key for optional standardized measurement error.
     var smeSort: Double { sme ?? -.greatestFiniteMagnitude }
+    /// Numeric sort key for optional split-half reliability.
     var splitHalfSort: Double { splitHalf ?? -.greatestFiniteMagnitude }
 }
 
 extension WaveformView {
+    /// Builds the averaged-category workspace from visible segments and panel toggles.
+    /// All plots share an epoch-relative sample selection. Empty averages and fully
+    /// hidden panels receive explicit placeholders; layout adapts to available width.
     @ViewBuilder
     func averagesWorkspace(for signal: MFFSignalData) -> some View {
         let segments = selectedOverlaySegments()
@@ -159,6 +166,8 @@ extension WaveformView {
         return min(requested, ceiling)
     }
 
+    /// Builds display scale, responsive panel-toggle buttons, GFP, category/channel
+    /// selection, and mode controls. ViewThatFits chooses a row or grid that fits.
     func averagesToolbar(for signal: MFFSignalData) -> some View {
         return HStack(spacing: 12) {
             toolbarScaleControls(showsTimeScale: false)
@@ -217,6 +226,8 @@ extension WaveformView {
         static let compact = AveragesToggleMetrics(buttonWidth: 52, buttonHeight: 46, iconSize: 16, labelSize: 7)
     }
 
+    /// Pairs each panel’s label/icon with its state Binding so row/grid presentations
+    /// share the same visibility controls rather than duplicating independent state.
     private var averagesViewToggles: [(title: String, image: String, binding: Binding<Bool>)] {
         [
             ("Waveforms", "waveform.path.ecg", $epoching.showsAveragesInspector),
@@ -229,6 +240,7 @@ extension WaveformView {
         ]
     }
 
+    /// Builds a single row of panel-toggle buttons using the supplied size metrics.
     private func averagesViewToggleRow(metrics: AveragesToggleMetrics) -> some View {
         HStack(spacing: 6) {
             ForEach(Array(averagesViewToggles.enumerated()), id: \.offset) { _, toggle in
@@ -263,6 +275,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds an icon button that toggles the bound panel visibility. Reads
+    /// wrappedValue for styling and writes it on click; it owns no separate toggle state.
     private func averagesToolbarToggle(
         title: String,
         systemImage: String,
@@ -297,6 +311,8 @@ extension WaveformView {
         .help(isOn.wrappedValue ? "Hide \(title)" : "Show \(title)")
     }
 
+    /// Wraps the interactive butterfly content in a standard panel and adds the
+    /// source-model context action at the current relative latency. Requires segments.
     private func averagesButterflyPane(signal: MFFSignalData, segments: [EpochSegment], relativeSample currentRelativeSample: Int) -> some View {
         averagesPanel {
             AveragesButterflyPaneContent(
@@ -315,6 +331,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds per-category scalp maps at the shared relative sample, using common
+    /// scale settings. Option-key controls edit the scale; tapping an electrode selects
+    /// it in the channel inspector. Without sensor geometry, shows a placeholder.
     @ViewBuilder
     private func averagesTopographyPane(signal: MFFSignalData, relativeSample: Int) -> some View {
         averagesPanel {
@@ -338,6 +357,8 @@ extension WaveformView {
 
                 if let layout = recording.sensorLayout {
                     let samples = averagedTopomapSamples(relativeSample: relativeSample, in: signal)
+                    // Resolve one common scale for all category maps at this latency so color
+                    // differences reflect comparable values rather than independent autoscaling.
                     let autoScale = fixedTopomapScale(for: samples.map(\.sample), in: signal) ?? 1
                     let autoZ = topomapAutoZ(samples: samples, in: signal)
                     let colorRange = topomapColorRange()
@@ -436,6 +457,9 @@ extension WaveformView {
         }
     }
 
+    /// Plots the selected channel/group across visible categories, optionally with
+    /// standard-error bands. Scrubbing updates the shared workspace latency; its
+    /// context menu exposes display options and a matching figure export.
     private func averagesChannelInspectorPane(signal: MFFSignalData, segments: [EpochSegment], relativeSample: Int) -> some View {
         let selection = channelInspectorSelection
         let indices = channelInspectorIndices(for: selection, signal: signal)
@@ -505,6 +529,8 @@ extension WaveformView {
         }
     }
 
+    /// Wraps the draft/commit latency slider in a compact panel. Converts its committed
+    /// relative sample into shared workspace state using the supplied reference segment.
     private func averagesLatencyScrubber(segment: EpochSegment, relativeSample: Int) -> some View {
         return averagesPanel(fillHeight: false) {
             AveragesLatencyScrubberControl(
@@ -516,6 +542,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds the exclusion/event log panel and adds the SNR table when metrics exist
+    /// or are being calculated. These are derived displays, not new analysis runs.
     private func averagesEventsLogPanel(signal: MFFSignalData, segments: [EpochSegment]) -> some View {
         let showsSNR = !epoching.averageSNRByCategory.isEmpty || epoching.isComputingAverageSNR
         return averagesPanel {
@@ -532,6 +560,8 @@ extension WaveformView {
         }
     }
 
+    /// Displays PSA candidate/accepted/rejected counts and exclusion reasons, with
+    /// popovers for full summary text and per-epoch bad-channel details.
     private func averagesEventsLogColumn(segments: [EpochSegment]) -> some View {
         let summary = epoching.psaExclusionSummary
         return VStack(alignment: .leading, spacing: 10) {
@@ -597,6 +627,8 @@ extension WaveformView {
         }
     }
 
+    /// Maps category metrics to display rows and applies the user’s table sort order.
+    /// Original category keys supply stable identity while display names may be customized.
     private var averageSNRRows: [AverageSNRRow] {
         epoching.averageSNRByCategory.map { category, m in
             AverageSNRRow(
@@ -683,6 +715,7 @@ extension WaveformView {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Builds the help popover explaining the table’s SNR, SME, and reliability metrics.
     @ViewBuilder
     private func averagesSNRHelpPopover() -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -705,6 +738,7 @@ extension WaveformView {
         .frame(width: 340, alignment: .leading)
     }
 
+    /// Builds an aligned metric abbreviation and its explanatory text.
     private func snrHelpRow(_ term: String, _ description: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(term)
@@ -717,11 +751,15 @@ extension WaveformView {
         }
     }
 
+    /// Formats a finite optional metric to the requested decimal precision; missing,
+    /// NaN, or infinite values display n/a.
     private func snrText(_ value: Double?, digits: Int = 2) -> String {
         guard let value, value.isFinite else { return "n/a" }
         return String(format: "%.\(digits)f", value)
     }
 
+    /// Formats exclusion reasons from most frequent to least frequent, breaking
+    /// count ties by localized name ordering for a stable, readable summary.
     private func artifactSkipBreakdownText(_ breakdown: [String: Int]) -> String {
         breakdown
             .sorted {
@@ -761,6 +799,7 @@ extension WaveformView {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Builds a bounded, scrollable popover with selectable monospaced log text.
     private func averagesLogBubble(title: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title)
@@ -777,6 +816,7 @@ extension WaveformView {
         .frame(width: 400)
     }
 
+    /// Builds a labeled integer count for the events/exclusions grid.
     private func averagesLogMetric(_ title: String, value: Int) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -787,6 +827,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds a combined butterfly/topography/inspector figure from visible averages.
+    /// Uses the same selected latency and scale settings as the workspace; produces
+    /// no content when there are no selected segments.
     @ViewBuilder
     private func averagesWorkspaceFigure(signal: MFFSignalData) -> some View {
         let segments = selectedOverlaySegments()
@@ -843,6 +886,9 @@ extension WaveformView {
 
     /// Not private: reused by `JointPlotView.swift`'s pane for the same
     /// bordered-card chrome.
+    /// Wraps caller-supplied views in the shared padded card appearance. The generic
+    /// Content preserves the view type; @ViewBuilder lets the closure contain several
+    /// SwiftUI elements. fillHeight controls whether the card expands vertically.
     func averagesPanel<Content: View>(fillHeight: Bool = true, @ViewBuilder content: () -> Content) -> some View {
         content()
             .padding(12)
@@ -851,19 +897,26 @@ extension WaveformView {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor).opacity(0.55)))
     }
 
+    /// Initializes the shared cursor at the stimulus only when no latency is selected.
     private func seedAveragesWorkspaceLatencyIfNeeded(segment: EpochSegment) {
         guard epoching.butterflyTopomapRelativeSample == nil else { return }
         setAveragesWorkspaceLatency(segment.stimulusOffsetSamples, segment: segment)
     }
 
+    /// Clamps a relative sample to the reference epoch, stores it for all average
+    /// panels, and clears the separate absolute topomap selection.
     fileprivate func setAveragesWorkspaceLatency(_ value: Int, segment: EpochSegment) {
         let maxIndex = max(segment.endSample - segment.startSample, 0)
         epoching.butterflyTopomapRelativeSample = min(max(value, 0), maxIndex)
         topomapSample = nil
     }
 
+    /// Returns the stored latency clamped to the first visible segment, or its
+    /// stimulus offset by default. Empty segment lists resolve to zero.
     private func averagesWorkspaceRelativeSample(for segments: [EpochSegment]) -> Int {
         guard let first = segments.first else { return 0 }
+        // Epoch endpoints are inclusive. Their difference is the LAST relative
+        // index; the number of samples would be that value plus one.
         let maxIndex = max(first.endSample - first.startSample, 0)
         if let current = epoching.butterflyTopomapRelativeSample {
             return min(max(current, 0), maxIndex)
@@ -871,6 +924,8 @@ extension WaveformView {
         return min(max(first.stimulusOffsetSamples, 0), maxIndex)
     }
 
+    /// Formats signed milliseconds relative to the stimulus: sample offset minus
+    /// stimulus offset, divided by samples/second. Invalid rates display 0 ms.
     fileprivate func averagesLatencyText(segment: EpochSegment, relativeSample: Int, samplingRate: Double) -> String {
         guard samplingRate > 0 else { return "0 ms" }
         let latencyMilliseconds = Double(relativeSample - segment.stimulusOffsetSamples) / samplingRate * 1_000
@@ -886,18 +941,25 @@ private struct AveragesLatencyScrubberControl: View {
 
     @State private var draftSample: Double?
 
+    /// Last zero-based sample offset inside this inclusive epoch segment.
     private var maxIndex: Int {
         max(segment.endSample - segment.startSample, 0)
     }
 
+    /// Slider range in relative samples. Uses at least 0…1 because Slider needs
+    /// a nondegenerate range; the control is disabled for a single-sample segment.
     private var range: ClosedRange<Double> {
         0...max(Double(maxIndex), 1)
     }
 
+    /// Rounds the local drag value, or committed parent value, to a valid sample index.
     private var displayedSample: Int {
         min(max(Int((draftSample ?? Double(relativeSample)).rounded()), 0), maxIndex)
     }
 
+    /// Builds the latency slider with local draft state. Dragging updates its label;
+    /// releasing commits one sample to the parent so expensive linked plots need
+    /// not refresh for every intermediate slider position.
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
@@ -916,6 +978,8 @@ private struct AveragesLatencyScrubberControl: View {
                 ),
                 in: range,
                 step: 1,
+                // Commit only when dragging ends. Capture displayedSample before clearing
+                // draftSample, or it would revert to the previously committed parent value.
                 onEditingChanged: { isEditing in
                     guard !isEditing else { return }
                     let committed = displayedSample
@@ -956,6 +1020,8 @@ private struct AveragesLatencyScrubberControl: View {
         }
     }
 
+    /// Formats the scrubber’s relative sample as signed stimulus-relative milliseconds.
+    /// The slider stores samples, while the label shows time.
     private func latencyText(relativeSample: Int) -> String {
         guard samplingRate > 0 else { return "0 ms" }
         let latencyMilliseconds = Double(relativeSample - segment.stimulusOffsetSamples) / samplingRate * 1_000
@@ -977,6 +1043,9 @@ private struct AveragesButterflyPaneContent: View {
 
     @State private var pointerRelativeSample: Int?
 
+    /// Builds interactive butterfly traces, optional GFP, and joint-marker boxes.
+    /// Retains pointer latency locally for the Add Joint context menu, while taps
+    /// and scrubs update the workspace’s shared latency. Requires nonempty segments.
     var body: some View {
         let gfpHeight: CGFloat = view.epoching.showsAveragesGFP ? 50 : 0
         // For the export size (must be known before rendering, so it can't
@@ -1120,6 +1189,8 @@ private struct AveragesButterflyFigure: View {
     let gfpHeight: CGFloat
     let boxHeight: CGFloat
 
+    /// Builds the fixed export layout with shared marker geometry and an explicit
+    /// time axis. Requires nonempty segments; no interactive marker callbacks are installed.
     var body: some View {
         VStack(spacing: 0) {
             GeometryReader { proxy in
@@ -1197,6 +1268,8 @@ private struct AveragesTopographyResizer: View {
 
     @State private var widthAtDragStart: Double?
 
+    /// Builds the draggable divider and resize cursor behavior. Updates the parent’s
+    /// width binding within both the allowed size range and available window space.
     var body: some View {
         let range = EpochingViewModel.averagesTopographyWidthRange
 
@@ -1211,6 +1284,8 @@ private struct AveragesTopographyResizer: View {
             .gesture(
                 DragGesture(minimumDistance: 1)
                     .onChanged { value in
+                        // Drag translation is cumulative from the gesture’s start. Keep that initial
+                        // width stable; adding translation repeatedly to the current width would drift.
                         let start = widthAtDragStart ?? width
                         if widthAtDragStart == nil { widthAtDragStart = start }
                         // Dragging left (negative translation) grows the pane.

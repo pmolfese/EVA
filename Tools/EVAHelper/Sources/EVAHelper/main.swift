@@ -36,6 +36,7 @@ enum HelperError: LocalizedError {
         relativeRMSTolerance: Double
     )
 
+    /// Turn usage, input, output and backend-comparison failures into terminal-readable messages.
     var errorDescription: String? {
         switch self {
         case .usage(let message):
@@ -118,6 +119,8 @@ struct Options {
     var compareRelativeMaxDiff = 5e-2
     var compareRelativeRMSDiff = 1e-2
 
+    /// Parse arguments after the executable name and validate required paths, flags and numeric ranges.
+    /// Throw helpRequested for help, or usage for missing/unsupported values; no processing runs here.
     static func parse(_ arguments: [String]) throws -> Options {
         var inputPath: String?
         var prefix: String?
@@ -144,6 +147,8 @@ struct Options {
         var compareRelativeMaxDiff = 5e-2
         var compareRelativeRMSDiff = 1e-2
 
+        // Value-taking flags advance once to consume their value; the final increment
+        // then moves to the next option. Boolean flags need only the final increment.
         var index = 0
         while index < arguments.count {
             let argument = arguments[index]
@@ -304,6 +309,7 @@ struct Options {
         )
     }
 
+    /// Read the argument following a flag, throwing a usage error if it is missing.
     private static func value(at index: Int, in arguments: [String], flag: String) throws -> String {
         guard arguments.indices.contains(index) else {
             throw HelperError.usage("Missing value for \(flag).")
@@ -311,6 +317,7 @@ struct Options {
         return arguments[index]
     }
 
+    /// Parse a flag value as Double; flag-specific range checks happen after argument collection.
     private static func doubleValue(at index: Int, in arguments: [String], flag: String) throws -> Double {
         let raw = try value(at: index, in: arguments, flag: flag)
         guard let value = Double(raw) else {
@@ -319,6 +326,7 @@ struct Options {
         return value
     }
 
+    /// Parse a flag value as an integer or report which flag received invalid text.
     private static func intValue(at index: Int, in arguments: [String], flag: String) throws -> Int {
         let raw = try value(at: index, in: arguments, flag: flag)
         guard let value = Int(raw) else {
@@ -350,6 +358,7 @@ final class ProgressPrinter {
     private var lastMessage = ""
     private var printedProgress = false
 
+    /// Rewrite the terminal progress line only when its integer percent or displayed message changes.
     func update(_ fraction: Double, _ message: String, detail: String? = nil) {
         let clamped = min(max(fraction, 0), 1)
         let percent = Int((clamped * 100).rounded(.down))
@@ -361,6 +370,7 @@ final class ProgressPrinter {
         writeStdout(String(format: "\u{001B}[2K\r%3d%% %@", percent, display))
     }
 
+    /// End or erase an active progress line and reset the duplicate-update cache.
     func finishLine(clear: Bool = false) {
         if printedProgress {
             writeStdout(clear ? "\u{001B}[2K\r" : "\n")
@@ -370,16 +380,19 @@ final class ProgressPrinter {
         lastMessage = ""
     }
 
+    /// Erase the active progress display before printing ordinary output.
     func clearLine() {
         finishLine(clear: true)
     }
 
+    /// Clear progress and print a separate verbose diagnostic line.
     func log(_ message: String) {
         clearLine()
         writeStdoutLine("[verbose] \(message)")
     }
 }
 
+/// Return the command’s help text without reading files or running correction.
 func usage() -> String {
     """
     Usage:
@@ -419,6 +432,7 @@ func usage() -> String {
     """
 }
 
+/// Map one operation’s 0–1 progress into its allocated interval in the overall workflow.
 func remapCWLProgress(
     _ progress: @escaping (CWLCorrectorEngine.ProgressUpdate) -> Void,
     start: Double,
@@ -434,6 +448,9 @@ func remapCWLProgress(
     }
 }
 
+/// Run the helper workflow: parse options, load continuous EEG/PNS, choose TR markers,
+/// apply AAS to both streams, optionally downsample, perform CWL and write a new MFF.
+/// Comparison failures throw before export; output naming and replacement policy come from CLI options.
 func run() throws {
     let options = try Options.parse(Array(CommandLine.arguments.dropFirst()))
     let outputURL = options.inputURL
@@ -492,6 +509,8 @@ func run() throws {
         signalTypeSuffix: "AAS"
     )
 
+    // EEG and PNS can have different sample rates, so convert the same event
+    // times separately before applying gradient correction to each stream.
     let pnsTRSamples = trMarkers(in: signal, code: trCode, samplingRate: pnsSignal.samplingRate)
     verboseLog?("AAS CPU: correcting \(pnsSignal.numberOfChannels) PNS/reference channels")
     progress.update(0.44, "Applying AAS MRI correction to PNS")
@@ -571,6 +590,9 @@ func run() throws {
         )
     }
     let cwlResult: CWLCorrectorEngine.RunInfo
+    // This branch compares different algorithms and exports the original-style
+    // CPU result. The normal compare branch compares implementations of one
+    // algorithm, exports Metal output and can enforce equivalence tolerances.
     if options.useOriginalCWL && options.cwlBackend == .compare {
         verboseLog?("Original CWL compare mode: comparing Metal path against MATLAB-style tapered Hann CPU path")
         let fastConfig = CWLCorrectorEngine.Config(
@@ -713,6 +735,8 @@ func run() throws {
             } else {
                 relativePassed = false
             }
+            // Either pair of tolerances can pass: both absolute limits, or both relative
+            // limits. Relative error is normalized by the amount of correction applied.
             let passed = absolutePassed || relativePassed
             let basis = absolutePassed ? "absolute" : (relativePassed ? "relative" : "none")
             writeStdoutLine(String(
@@ -752,6 +776,7 @@ func run() throws {
     writeStdoutLine("Wrote \(outputURL.path)")
 }
 
+/// Dispatch MFF or BrainVision input loading and map its progress into the workflow’s first 20%.
 func loadRecording(
     from inputURL: URL,
     progress: ProgressPrinter,
@@ -788,6 +813,8 @@ func loadRecording(
     }
 }
 
+/// List repeated event codes and read a valid number/code from stdin until selected.
+/// End-of-input throws guidance to supply --tr-code for noninteractive use.
 func promptForTRCode(events: [MFFEvent]) throws -> String {
     let candidates = eventCandidates(events)
     guard !candidates.isEmpty else { throw HelperError.noEventCandidates }
@@ -824,6 +851,8 @@ func promptForTRCode(events: [MFFEvent]) throws -> String {
     }
 }
 
+/// Group events by code and summarize chronological inter-event gaps for codes occurring at least twice.
+/// Order candidates by descending count, then by natural code order.
 func eventCandidates(_ events: [MFFEvent]) -> [EventCandidate] {
     let grouped = Dictionary(grouping: events, by: \.code)
     return grouped.compactMap { code, codeEvents in
@@ -847,6 +876,7 @@ func eventCandidates(_ events: [MFFEvent]) -> [EventCandidate] {
     }
 }
 
+/// Convert matching events’ stored times to sorted sample indices at the supplied EEG or PNS rate.
 func trMarkers(in signal: MFFSignalData, code: String, samplingRate: Double) -> [Int] {
     signal.events
         .filter { $0.code.caseInsensitiveCompare(code) == .orderedSame }
@@ -854,6 +884,7 @@ func trMarkers(in signal: MFFSignalData, code: String, samplingRate: Double) -> 
         .sorted()
 }
 
+/// Select PNS channels whose trimmed names begin with CWL, ignoring case.
 func cwlChannelIndices(in pns: MFFSignalData) -> [Int] {
     (0..<pns.numberOfChannels).filter { index in
         channelName(at: index, in: pns, fallbackPrefix: "PNS")
@@ -862,6 +893,7 @@ func cwlChannelIndices(in pns: MFFSignalData) -> [Int] {
     }
 }
 
+/// Use a nonempty stored channel name or synthesize a one-based label with the supplied prefix.
 func channelName(at index: Int, in signal: MFFSignalData, fallbackPrefix: String) -> String {
     if let names = signal.channelNames, names.indices.contains(index), !names[index].isEmpty {
         return names[index]
@@ -869,6 +901,8 @@ func channelName(at index: Int, in signal: MFFSignalData, fallbackPrefix: String
     return "\(fallbackPrefix) \(index + 1)"
 }
 
+/// Block-average each channel using an integer factor and return a signal at the resulting effective rate.
+/// The effective rate need not equal the requested target exactly; event times remain in seconds.
 func downsample(
     _ signal: MFFSignalData,
     targetRate: Double,
@@ -896,10 +930,12 @@ func downsample(
     )
 }
 
+/// Compare sample rates within an absolute tolerance of 0.0001 Hz.
 func samplingRatesMatch(_ lhs: Double, _ rhs: Double) -> Bool {
     abs(lhs - rhs) < 0.0001
 }
 
+/// Sort values and return the middle value/pair mean, using zero for an empty list.
 func median(_ values: [Double]) -> Double {
     guard !values.isEmpty else { return 0 }
     let sorted = values.sorted()
@@ -910,14 +946,17 @@ func median(_ values: [Double]) -> Double {
     return sorted[mid]
 }
 
+/// Format a duration to three decimal places with an s suffix.
 func seconds(_ value: Double) -> String {
     String(format: "%.3fs", value)
 }
 
+/// Provide a visible placeholder for an empty event code.
 func displayCode(_ code: String) -> String {
     code.isEmpty ? "(empty)" : code
 }
 
+/// Resolve a path against the working directory and standardize it; this does not expand a tilde.
 func absoluteFileURL(_ path: String) -> URL {
     if path.hasPrefix("/") {
         return URL(fileURLWithPath: path).standardizedFileURL
@@ -927,18 +966,23 @@ func absoluteFileURL(_ path: String) -> URL {
         .standardizedFileURL
 }
 
+/// Write UTF-8 bytes to standard output without automatically adding a newline.
 func writeStdout(_ text: String) {
     FileHandle.standardOutput.write(Data(text.utf8))
 }
 
+/// Write one complete standard-output line, or a blank line when omitted.
 func writeStdoutLine(_ text: String = "") {
     writeStdout(text + "\n")
 }
 
+/// Write UTF-8 diagnostic bytes to standard error.
 func writeStderr(_ text: String) {
     FileHandle.standardError.write(Data(text.utf8))
 }
 
+/// Generate synthetic reference-contaminated EEG and run both Metal kernels against CPU.
+/// Print comparison metrics; this diagnostic does not itself assert a numerical tolerance.
 func runCWLSelfTest() throws {
     let sampleRate = 128.0
     let sampleCount = 768
@@ -984,6 +1028,7 @@ func runCWLSelfTest() throws {
     }
 }
 
+/// Shift a reference by a signed lag, extending its endpoint values beyond the available samples.
 func helperShifted(_ signal: [Float], by lag: Int) -> [Float] {
     guard lag != 0 else { return signal }
     let sampleCount = signal.count
@@ -993,10 +1038,14 @@ func helperShifted(_ signal: [Float], by lag: Int) -> [Float] {
 }
 
 extension MFFSignalData {
+    /// Use the first channel length as the signal sample count, or zero for no channels.
     var sampleCount: Int {
         data.first?.count ?? 0
     }
 
+    /// Build a new sample/rate snapshot with updated duration and an optional signal-type suffix.
+    /// Preserve the metadata explicitly listed here. This helper does not remap epoch sample indices;
+    /// the processing entry point restricts inputs to continuous recordings.
     func copying(
         data newData: [[Float]],
         samplingRate newSamplingRate: Double,
@@ -1023,6 +1072,8 @@ extension MFFSignalData {
     }
 }
 
+// Top-level executable entry point. Diagnostic self-test bypasses normal input
+// parsing; help exits successfully, while other errors print usage and exit 1.
 do {
     if CommandLine.arguments.contains("--self-test-cwl") {
         try runCWLSelfTest()

@@ -26,14 +26,18 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 extension WaveformView {
+    /// Embeds the trial-analysis interface in the workspace without a Close button.
     func singleTrialAnalysisWorkspace() -> some View {
         singleTrialAnalysisView(isEmbedded: true, onClose: nil)
     }
 
+    /// Presents the same trial interface as a sheet whose Close callback dismisses it.
     func singleTrialAnalysisSheet() -> some View {
         singleTrialAnalysisView(isEmbedded: false, onClose: { singleTrial.showsSheet = false })
     }
 
+    /// Supplies raw trials, displayed averages, processing settings, and callbacks to the sheet.
+    /// Committing exclusions crosses back into the recording pipeline and rebuilds its average.
     private func singleTrialAnalysisView(isEmbedded: Bool, onClose: (() -> Void)?) -> some View {
         SingleTrialAnalysisSheet(
             viewModel: singleTrial,
@@ -83,6 +87,11 @@ extension WaveformView {
     }
 }
 
+/// Presents trial measurements and reviewed exclusions using explicitly supplied
+/// signals, segments and callbacks. The averaged signal is for context/display;
+/// raw pre-average trials are the inputs for individual-trial measurements.
+/// onCommitTrialExclusion crosses back to the owning pipeline. Selection, sorting
+/// and preview state here should not be confused with a committed processing step.
 struct SingleTrialAnalysisSheet: View {
     @Bindable var viewModel: SingleTrialAnalysisViewModel
     let averagedSignal: MFFSignalData?
@@ -138,10 +147,13 @@ struct SingleTrialAnalysisSheet: View {
     private let amplitudeScaleBounds: ClosedRange<Double> = 1...5_000
     private let singleTrialPlotHeight: CGFloat = 220
 
+    /// Logarithmic slider limits: equal travel represents equal amplitude ratios.
     private var amplitudeScaleSliderBounds: ClosedRange<Double> {
         log10(amplitudeScaleBounds.lowerBound)...log10(amplitudeScaleBounds.upperBound)
     }
 
+    /// Bridges a log10 slider coordinate to the positive amplitude scale used by plots.
+    /// The setter exponentiates, clamps, and rounds to readable display increments.
     private var amplitudeScaleSliderBinding: Binding<Double> {
         Binding(
             get: {
@@ -153,11 +165,13 @@ struct SingleTrialAnalysisSheet: View {
         )
     }
 
+    /// Finds the displayed average segment for the selected category, or nil if unavailable.
     private var averagedSegment: EpochSegment? {
         guard let category = viewModel.selectedCategory else { return nil }
         return averagedSegments.first { $0.category == category }
     }
 
+    /// Resolves the selected single channel or stored channel-set (ROI) into raw channel indices.
     private var selectedChannelIndices: [Int] {
         switch viewModel.channelScope {
         case .singleChannel:
@@ -191,6 +205,8 @@ struct SingleTrialAnalysisSheet: View {
         return "Not ready to run."
     }
 
+    /// Checks mode-specific prerequisites before enabling Run. Diagnostics uses named
+    /// windows, RIDE uses component windows, and the other modes may use a dragged span.
     private var canRun: Bool {
         guard averagedSegment != nil, !selectedChannelIndices.isEmpty,
               let category = viewModel.selectedCategory,
@@ -236,6 +252,8 @@ struct SingleTrialAnalysisSheet: View {
         return (start, end)
     }
 
+    /// Returns the outer bounds of valid windows, or nil if none have positive width.
+    /// This envelope can include gaps; callers that need disjoint windows retain the list.
     private func analysisSpan(fromWindows windows: [TrialAlignmentMetrics.AnalysisWindow]) -> (startMs: Double, endMs: Double)? {
         let valid = windows.filter { $0.endMs > $0.startMs }
         guard let start = valid.map(\.startMs).min(),
@@ -243,6 +261,7 @@ struct SingleTrialAnalysisSheet: View {
         return (start, end)
     }
 
+    /// Returns the explicitly selected measurement-window result, falling back to the first.
     private var selectedMeasurementWindowResult: SingleTrialAnalyzer.WindowResult? {
         if let selectedMeasurementWindowID,
            let selected = viewModel.measurementWindowResults.first(where: { $0.id == selectedMeasurementWindowID }) {
@@ -251,12 +270,16 @@ struct SingleTrialAnalysisSheet: View {
         return viewModel.measurementWindowResults.first
     }
 
+    /// Uses the selected window’s measurements when present, otherwise the legacy single result.
     private var displayedMeasurementResult: SingleTrialAnalyzer.Result? {
         selectedMeasurementWindowResult?.result ?? viewModel.result
     }
 
+    /// Builds drawable S/C/R windows for enabled RIDE components. Response-relative bounds
+    /// are shifted by the configured response anchor so they appear on the stimulus time axis.
     private var activeRIDEComponentWindows: [TrialWindowSelection] {
         var windows: [TrialWindowSelection] = []
+        /// Adds one enabled component’s named/color-coded window to the overlay list.
         func append(_ component: RIDEAnalyzer.Component, _ startMs: Double, _ endMs: Double, _ colorIndex: Int) {
             windows.append(
                 TrialWindowSelection(
@@ -305,6 +328,7 @@ struct SingleTrialAnalysisSheet: View {
         viewModel.analysisMode == .ride ? activeRIDEComponentWindows : activeUserWindows
     }
 
+    /// Routes an edited overlay window to a RIDE component or a user window identified by UUID.
     private func setWindow(id: String, startMs: Double, endMs: Double) {
         if viewModel.analysisMode == .ride {
             guard let component = RIDEAnalyzer.Component(rawValue: id) else { return }
@@ -315,6 +339,9 @@ struct SingleTrialAnalysisSheet: View {
         viewModel.updateWindow(uuid, startMs: startMs, endMs: endMs, for: viewModel.analysisMode)
     }
 
+    /// Composes setup and the active result pane. Observable model Bindings keep controls
+    /// in sync; local State owns presentation choices. SwiftUI tasks drive animations and
+    /// onDisappear cancels the owned run task and clears transient running/animation flags.
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -437,11 +464,13 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Header / footer
 
+    /// Whether measurement/alignment exports or an optional Close action need a footer.
     private var showsFooter: Bool {
         viewModel.result != nil || viewModel.woodyResult != nil || viewModel.rideResult != nil
             || onClose != nil
     }
 
+    /// Displays workspace context and the number/rate of available raw trials.
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -462,6 +491,7 @@ struct SingleTrialAnalysisSheet: View {
         .padding(.vertical, 14)
     }
 
+    /// Offers exports for computed results and the optional sheet-dismiss callback.
     private var footer: some View {
         HStack(spacing: 12) {
             Spacer()
@@ -483,6 +513,7 @@ struct SingleTrialAnalysisSheet: View {
         .padding(.vertical, 12)
     }
 
+    /// Preserves a still-valid category selection or falls back to the first available category.
     private func ensureSelectedCategoryAvailable() {
         if let selected = viewModel.selectedCategory, categories.contains(selected) {
             return
@@ -492,6 +523,7 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Selection controls
 
+    /// Selects the analysis mode and opens the method-description popover.
     private var modeControls: some View {
         HStack(spacing: 8) {
             Picker("Analysis Mode", selection: $viewModel.analysisMode) {
@@ -517,6 +549,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Presents descriptions and references for the analysis methods; it does not run them.
     @ViewBuilder
     private func singleTrialMethodHelp() -> some View {
         ScrollView {
@@ -596,6 +629,8 @@ struct SingleTrialAnalysisSheet: View {
         .frame(maxHeight: 520)
     }
 
+    /// Selects the category and channel/ROI. Optional picker tags match the optional
+    /// selection types, including nil when no channel or channel set is chosen.
     private var selectionControls: some View {
         HStack(spacing: 16) {
             Picker("Category", selection: $viewModel.selectedCategory) {
@@ -634,6 +669,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Changes display amplitude with the logarithmic Binding shared by both waveform plots.
     private var scaleControls: some View {
         HStack(spacing: 8) {
             Text("Trace Scale")
@@ -651,6 +687,7 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Window picker (drag-select on the butterfly trace)
 
+    /// Arranges butterfly and single-channel inspectors side by side or vertically by available width.
     private var trialInspectorRow: some View {
         GeometryReader { proxy in
             if proxy.size.width < 840 {
@@ -670,6 +707,8 @@ struct SingleTrialAnalysisSheet: View {
         .frame(height: 290)
     }
 
+    /// Shows averaged traces with editable analysis windows and export actions. Tapping
+    /// a trace selects a single channel; exported views receive constant window Bindings.
     @ViewBuilder
     private var windowPicker: some View {
         if let signal = averagedSignal, let segment = averagedSegment {
@@ -745,6 +784,8 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Shows raw trial traces and their average for a valid selected single channel.
+    /// Alignment overlays are supplied only when corresponding results match the selection.
     @ViewBuilder
     private var singleChannelInspector: some View {
         let selectedChannel = (viewModel.channelScope == .singleChannel) ? viewModel.selectedChannelIndex : nil
@@ -836,10 +877,12 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Returns category legend entries for the single-channel inspector.
     private func singleChannelLegendItems() -> [(String, Color)] {
         legendItems(for: averagedSegments)
     }
 
+    /// Shows Woody/RIDE overlay controls only when the active mode has a usable alignment.
     @ViewBuilder
     private var alignmentInspectorControls: some View {
         switch viewModel.analysisMode {
@@ -858,6 +901,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Controls Woody overlay visibility, alignment fraction, animation, looping, and reset.
     private var woodyInspectorControls: some View {
         HStack(spacing: 8) {
             Toggle("Woody overlay", isOn: $viewModel.showsWoodyAlignedOverlay)
@@ -887,6 +931,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Controls RIDE overlay visibility, alignment fraction, animation, looping, and reset.
     private var rideInspectorControls: some View {
         HStack(spacing: 8) {
             Toggle("RIDE overlay", isOn: $viewModel.showsRIDEAlignedOverlay)
@@ -915,6 +960,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Builds one legend entry per distinct category, preserving its first appearance.
     private func legendItems(for segments: [EpochSegment]) -> [(String, Color)] {
         var seen = Set<String>()
         return segments.compactMap { segment in
@@ -923,6 +969,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Names an exported butterfly figure, including the category when only one is shown.
     private func singleTrialButterflyTitle(segments: [EpochSegment]) -> String {
         if viewModel.showsAllConditionsInButterfly || segments.count > 1 {
             return "Single Trial Butterfly"
@@ -933,10 +980,12 @@ struct SingleTrialAnalysisSheet: View {
         return "Single Trial Butterfly"
     }
 
+    /// Names an exported single-channel figure using the channel’s display name.
     private func singleTrialChannelInspectorTitle(channel: Int) -> String {
         "Single Trial Channel Inspector \(channelName(channel))"
     }
 
+    /// Returns Woody shifts only when the channel selection and number of category trials match.
     private var currentWoodyLatencyShiftSamples: [Int]? {
         guard (viewModel.analysisMode == .woody || viewModel.woodyResult != nil),
               hasCurrentWoodyAlignment,
@@ -948,11 +997,14 @@ struct SingleTrialAnalysisSheet: View {
         return result.shifts.map(\.latencyShiftSamples)
     }
 
+    /// Whether a RIDE result is available for the current channel selection.
     private var hasCurrentRIDEAlignment: Bool {
         currentRIDEResult != nil
             && viewModel.rideResultChannelIndices == selectedChannelIndices
     }
 
+    /// Returns one RIDE shift per trial when counts match, preferring complete central
+    /// latencies and otherwise complete response latencies. Partial arrays return nil.
     private var currentRIDELatencyShiftSamples: [Int]? {
         guard viewModel.analysisMode == .ride,
               hasCurrentRIDEAlignment,
@@ -967,6 +1019,7 @@ struct SingleTrialAnalysisSheet: View {
         return response.count == result.trialLatencies.count ? response : nil
     }
 
+    /// Stops an active Woody animation or restarts it from unaligned positions.
     private func toggleWoodyAlignmentAnimation() {
         if viewModel.isWoodyAlignmentAnimating {
             viewModel.isWoodyAlignmentAnimating = false
@@ -976,6 +1029,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Clears Woody results/previews and returns measurements to original trial waveforms.
     private func resetWoodyAlignmentDisplay() {
         viewModel.woodyResult = nil
         viewModel.woodyResultCategory = nil
@@ -989,6 +1043,7 @@ struct SingleTrialAnalysisSheet: View {
         viewModel.statusMessage = nil
     }
 
+    /// Stops an active RIDE animation or restarts it from unaligned positions.
     private func toggleRIDEAlignmentAnimation() {
         if viewModel.isRIDEAlignmentAnimating {
             viewModel.isRIDEAlignmentAnimating = false
@@ -998,6 +1053,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Clears RIDE results and resets its preview/animation controls.
     private func resetRIDEAlignmentDisplay() {
         viewModel.rideResult = nil
         viewModel.rideResultCategory = nil
@@ -1010,6 +1066,8 @@ struct SingleTrialAnalysisSheet: View {
         viewModel.statusMessage = nil
     }
 
+    /// Advances Woody display alignment by 0.05 every 60 ms on MainActor.
+    /// Suspending sleep keeps the UI responsive; cancellation/stop exits the loop.
     @MainActor
     private func runWoodyAlignmentAnimationIfNeeded() async {
         guard viewModel.isWoodyAlignmentAnimating else { return }
@@ -1030,6 +1088,8 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Advances the RIDE overlay animation, either stopping at full alignment or looping.
+    /// This changes only the drawn alignment fraction, not the stored trial samples.
     @MainActor
     private func runRIDEAlignmentAnimationIfNeeded() async {
         guard viewModel.isRIDEAlignmentAnimating else { return }
@@ -1060,6 +1120,8 @@ struct SingleTrialAnalysisSheet: View {
         return Double(samples) / samplingRate
     }
 
+    /// Creates a figure-format menu around caller-supplied SwiftUI content. The generic
+    /// Figure type and ViewBuilder preserve the concrete view for the exporter to render.
     private func trialFigureSaveMenu<Figure: View>(
         title: String,
         legend: [(String, Color)],
@@ -1226,6 +1288,8 @@ struct SingleTrialAnalysisSheet: View {
         return parts.joined(separator: " · ")
     }
 
+    /// Builds settings for the selected analysis mode. RIDE uses component-specific
+    /// parameters; measurement/Woody/CWT/diagnostic modes expose their own window controls.
     private var parameterControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             switch viewModel.analysisMode {
@@ -1422,6 +1486,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Reusable picker for the allowed latency sources of a RIDE component.
     private func latencySourcePicker(
         _ label: String,
         selection: Binding<RIDEAnalyzer.LatencySource>,
@@ -1440,6 +1505,7 @@ struct SingleTrialAnalysisSheet: View {
         .help("\(label) source for RIDE component locking.")
     }
 
+    /// Reusable decimal text field whose Binding edits the caller’s numeric setting.
     private func labeledField(_ label: String, value: Binding<Double>, width: CGFloat, help: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.caption2).foregroundStyle(.secondary)
@@ -1450,6 +1516,7 @@ struct SingleTrialAnalysisSheet: View {
         .help(help ?? label)
     }
 
+    /// Reusable bounded integer stepper; wrappedValue is the Binding’s current stored value.
     private func labeledStepper(_ label: String, value: Binding<Int>, range: ClosedRange<Int>, help: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.caption2).foregroundStyle(.secondary)
@@ -1461,6 +1528,7 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Run
 
+    /// Shows the mode’s Run action, progress, and the first unmet prerequisite.
     private var runBar: some View {
         HStack(spacing: 12) {
             Button(runButtonTitle) { runCurrentMode() }
@@ -1492,6 +1560,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Action label matching the selected analysis mode.
     private var runButtonTitle: String {
         switch viewModel.analysisMode {
         case .measurements: "Run Analysis"
@@ -1503,6 +1572,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Dispatches Run to the mode-specific operation. Cluster statistics owns its own run control.
     private func runCurrentMode() {
         switch viewModel.analysisMode {
         case .measurements:
@@ -1520,6 +1590,9 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Measures selected raw/optionally Woody-aligned trials against the displayed average.
+    /// Named windows are analyzed separately; with none, the drag span produces one result.
+    /// This method computes synchronously and publishes the resulting tables/status.
     private func runAnalysis() {
         guard let category = viewModel.selectedCategory,
               let averageSignal = averagedSignal,
@@ -1717,6 +1790,9 @@ struct SingleTrialAnalysisSheet: View {
         withAnimation(.easeInOut(duration: 0.18)) { viewModel.setupIsExpanded = false }
     }
 
+    /// Joins similarity scores with amplitude/latency measurements by trial index.
+    /// Returns the category reference plus dashboard rows; missing optional measurements
+    /// currently use zero values in the row’s measure dictionary.
     private func diagnosticRows(
         input: TrialSimilarityAnalyzer.CategoryInput,
         scored: TrialSimilarityAnalyzer.CategoryResult,
@@ -1776,6 +1852,7 @@ struct SingleTrialAnalysisSheet: View {
         onCommitTrialExclusion != nil && !rawSegments.isEmpty
     }
 
+    /// Whether any committed trial record belongs to the selected category.
     private var isSelectedCategoryCommitted: Bool {
         guard let category = viewModel.selectedCategory, let step = committedTrialExclusion else { return false }
         return step.excludedTrials.contains { $0.category == category }
@@ -2043,6 +2120,9 @@ struct SingleTrialAnalysisSheet: View {
         return seen
     }
 
+    /// Snapshots a Woody job, replaces the owned run task, and computes alignment off MainActor.
+    /// ProgressBridge delivers worker updates to the UI; a cancelled owner does not publish
+    /// the output. Detached work is awaited explicitly and is not automatically cancelled.
     private func runWoodyAlignment() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
@@ -2108,6 +2188,8 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Snapshots a RIDE decomposition job and asynchronously publishes category results
+    /// and the all-channel preview after worker/progress completion, unless the owner was cancelled.
     private func runRIDE() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
@@ -2166,6 +2248,8 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Snapshots a CWT ridge/alignment job and publishes results plus the warped butterfly
+    /// preview after background work. The run task owns UI progress and completion flags.
     private func runCWTRidge() {
         guard let category = viewModel.selectedCategory,
               let rawSignal,
@@ -2222,6 +2306,8 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Translates CWT UI settings into engine configuration, preserving disjoint detection
+    /// windows and converting millisecond lag/prior widths into samples.
     private func cwtConfiguration(samplingRate: Double) -> CWTRidgePipeline.Configuration {
         var config = CWTRidgePipeline.Configuration()
         config.appliesDenoising = viewModel.cwtAppliesDenoising
@@ -2248,6 +2334,7 @@ struct SingleTrialAnalysisSheet: View {
         return config
     }
 
+    /// Chooses either the selected category or categories present in both raw and averaged segments.
     private func analysisCategories(runAll: Bool) -> [String] {
         if runAll {
             return categories.filter { category in
@@ -2258,6 +2345,7 @@ struct SingleTrialAnalysisSheet: View {
         return viewModel.selectedCategory.map { [$0] } ?? []
     }
 
+    /// Synchronously runs Woody for one category with the current dragged span/settings.
     private func woodyResult(category: String, rawSignal: MFFSignalData) -> WoodyAlignmentAnalyzer.Result? {
         WoodyAlignmentAnalyzer.align(
             trials: woodyTrials(category: category, rawSignal: rawSignal),
@@ -2272,6 +2360,7 @@ struct SingleTrialAnalysisSheet: View {
         )
     }
 
+    /// Synchronously decomposes one category’s selected-channel trials using current RIDE settings.
     private func rideResult(category: String, rawSignal: MFFSignalData) -> RIDEAnalyzer.Result? {
         RIDEAnalyzer.decompose(
             trials: rideTrials(category: category, rawSignal: rawSignal),
@@ -2280,6 +2369,7 @@ struct SingleTrialAnalysisSheet: View {
         )
     }
 
+    /// Copies enabled components, windows, latency sources, and convergence settings into a RIDE value.
     private func rideConfiguration() -> RIDEAnalyzer.Configuration {
         RIDEAnalyzer.Configuration(
             includesStimulusComponent: viewModel.rideIncludesStimulusComponent,
@@ -2310,6 +2400,8 @@ struct SingleTrialAnalysisSheet: View {
         )
     }
 
+    /// Builds measurement inputs in category-trial order. Uses Woody-aligned arrays only
+    /// when requested and when the channel selection and trial counts match; otherwise slices raw data.
     private func measurementTrials(category: String, rawSignal: MFFSignalData) -> [SingleTrialAnalyzer.TrialInput] {
         let segments = rawSegments.filter { $0.category == category }
         let aligned = (viewModel.usesWoodyAlignedTrialsForMeasurements
@@ -2331,6 +2423,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Builds Woody trial inputs from the selected channels, retaining source times and stimulus offsets.
     private func woodyTrials(category: String, rawSignal: MFFSignalData) -> [WoodyAlignmentAnalyzer.TrialInput] {
         rawSegments
             .filter { $0.category == category }
@@ -2348,6 +2441,7 @@ struct SingleTrialAnalysisSheet: View {
             }
     }
 
+    /// Builds RIDE trial inputs and supplies the configured default response latency when enabled.
     private func rideTrials(category: String, rawSignal: MFFSignalData) -> [RIDEAnalyzer.TrialInput] {
         rawSegments
             .filter { $0.category == category }
@@ -2366,21 +2460,25 @@ struct SingleTrialAnalysisSheet: View {
             }
     }
 
+    /// Whether a Woody result is available and its recorded channel indices match the selection.
     private var hasCurrentWoodyAlignment: Bool {
         currentWoodyResult != nil
             && viewModel.woodyResultChannelIndices == selectedChannelIndices
     }
 
+    /// Prefers the selected category’s Woody result, falling back to the last primary result.
     private var currentWoodyResult: WoodyAlignmentAnalyzer.Result? {
         guard let category = viewModel.selectedCategory else { return viewModel.woodyResult }
         return viewModel.woodyResultsByCategory[category] ?? viewModel.woodyResult
     }
 
+    /// Prefers the selected category’s RIDE result, falling back to the last primary result.
     private var currentRIDEResult: RIDEAnalyzer.Result? {
         guard let category = viewModel.selectedCategory else { return viewModel.rideResult }
         return viewModel.rideResultsByCategory[category] ?? viewModel.rideResult
     }
 
+    /// Prefers the selected category’s CWT result, falling back to the last primary result.
     private var currentCWTResult: CWTRidgePipeline.Result? {
         guard let category = viewModel.selectedCategory else { return viewModel.cwtResult }
         return viewModel.cwtResultsByCategory[category] ?? viewModel.cwtResult
@@ -2401,6 +2499,8 @@ struct SingleTrialAnalysisSheet: View {
                 result[i] += series[startSample + i]
             }
         }
+        // The divisor counts valid channel indices, including a channel skipped for
+        // insufficient samples. Callers normally provide equal-length signal channels.
         let divisor = Float(validChannels.count)
         for i in 0..<length { result[i] /= divisor }
         return result
@@ -2408,6 +2508,7 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Results
 
+    /// Adds a named-window result picker when multiple measurement results are available.
     @ViewBuilder
     private func measurementResultsSection(_ fallback: SingleTrialAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2433,6 +2534,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Shows measurement summary statistics and switches between trial, split, and distribution tabs.
     @ViewBuilder
     private func resultsSection(_ result: SingleTrialAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2465,6 +2567,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Builds a sortable per-trial measurement table; UI trial numbers are one-based.
     private func trialsTable(_ result: SingleTrialAnalyzer.Result) -> some View {
         Table(sortedTrials(result), sortOrder: $trialSortOrder) {
             TableColumn("#", value: \.trialIndex) { Text("\($0.trialIndex + 1)") }.width(42)
@@ -2492,11 +2595,13 @@ struct SingleTrialAnalysisSheet: View {
         .frame(height: 320)
     }
 
+    /// Sorts measurement rows using the table’s key-path comparators without changing stored results.
     private func sortedTrials(_ result: SingleTrialAnalyzer.Result) -> [SingleTrialAnalyzer.SingleTrialValue] {
         guard !trialSortOrder.isEmpty else { return result.trials }
         return result.trials.sorted(using: trialSortOrder)
     }
 
+    /// Displays the analyzer’s split-group counts and mean/standard-deviation summaries.
     private func splitsView(_ result: SingleTrialAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(result.splitGroups) { group in
@@ -2520,6 +2625,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Charts retained trial counts by acquisition-window chunk.
     private func distributionView(_ result: SingleTrialAnalyzer.Result) -> some View {
         Chart(result.distribution) { chunk in
             BarMark(
@@ -2530,6 +2636,7 @@ struct SingleTrialAnalysisSheet: View {
         .frame(height: 220)
     }
 
+    /// Presents Woody convergence/lag diagnostics, original-versus-aligned plots, and trial shifts.
     @ViewBuilder
     private func woodyResultsSection(_ result: WoodyAlignmentAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2581,6 +2688,7 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - CWT Ridge results
 
+    /// Presents CWT configuration/results, template peaks, trial shifts, and optional functional PCA.
     @ViewBuilder
     private func cwtResultsSection(_ result: CWTRidgePipeline.Result) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2630,6 +2738,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Overlays original and CWT-aligned averages on sample coordinates, with template-peak markers.
     private func cwtAverageChart(_ result: CWTRidgePipeline.Result) -> some View {
         Chart {
             ForEach(Array(result.unalignedAverage.enumerated()), id: \.offset) { index, value in
@@ -2659,6 +2768,7 @@ struct SingleTrialAnalysisSheet: View {
         .chartLegend(position: .bottom)
     }
 
+    /// Displays detected template peaks, their latency, width, polarity, amplitude, and SNR.
     private func cwtPeaksTable(_ result: CWTRidgePipeline.Result) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Template peaks").font(.caption.weight(.semibold))
@@ -2683,6 +2793,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Displays each CWT trial’s source time, net shift, correlation, and peak count.
     private func cwtTrialShiftTable(_ result: CWTRidgePipeline.Result) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Per-trial shifts").font(.caption.weight(.semibold))
@@ -2697,6 +2808,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Shows each functional principal component’s explained-variance fraction as a percentage/bar.
     private func cwtFunctionalPCAView(_ fpca: NonlinearAligner.FunctionalPCA) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Functional PCA — variance explained")
@@ -2715,6 +2827,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Overlays original and Woody-aligned average traces on sample coordinates.
     private func woodyAverageChart(_ result: WoodyAlignmentAnalyzer.Result) -> some View {
         Chart {
             ForEach(Array(result.unalignedAverage.enumerated()), id: \.offset) { index, value in
@@ -2739,6 +2852,7 @@ struct SingleTrialAnalysisSheet: View {
         .chartLegend(position: .bottom)
     }
 
+    /// Builds the sortable Woody shift/correlation table, including lag-limit indicators.
     private func woodyShiftTable(_ result: WoodyAlignmentAnalyzer.Result) -> some View {
         Table(sortedWoodyShifts(result), sortOrder: $woodySortOrder) {
             TableColumn("#", value: \.trialIndex) { Text("\($0.trialIndex + 1)") }.width(42)
@@ -2751,11 +2865,13 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Applies the user’s table sort to a copy of Woody shift rows.
     private func sortedWoodyShifts(_ result: WoodyAlignmentAnalyzer.Result) -> [WoodyAlignmentAnalyzer.TrialShift] {
         guard !woodySortOrder.isEmpty else { return result.shifts }
         return result.shifts.sorted(using: woodySortOrder)
     }
 
+    /// Displays per-iteration shift changes to explain Woody convergence.
     private func woodyIterationView(_ result: WoodyAlignmentAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Woody Convergence")
@@ -2778,6 +2894,7 @@ struct SingleTrialAnalysisSheet: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
     }
 
+    /// Presents RIDE component/fit diagnostics, warnings, aligned averages, and latency convergence.
     @ViewBuilder
     private func rideResultsSection(_ result: RIDEAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -2839,6 +2956,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Wraps caller-supplied chart content in a caption and clips drawing to its allotted bounds.
     private func labeledChart<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -2850,6 +2968,7 @@ struct SingleTrialAnalysisSheet: View {
         .clipped()
     }
 
+    /// Places selected-channel average comparisons beside an all-channel aligned butterfly.
     private func alignedAverageAndButterflyRow(
         alignedAverages: [String: [Float]],
         alignedLabel: String,
@@ -2868,6 +2987,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Draws a prepared aligned butterfly or an empty-state message if no preview is available.
     @ViewBuilder
     private func alignedButterflyChart(preview: SingleTrialAlignedButterflyPreview?, alignedLabel: String) -> some View {
         if let preview {
@@ -2891,6 +3011,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Compares original and aligned traces by category, using solid/dashed styles and a shared scale.
     private func alignedCategoryAverageChart(alignedAverages: [String: [Float]], alignedLabel: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 12) {
@@ -2932,6 +3053,7 @@ struct SingleTrialAnalysisSheet: View {
         .clipped()
     }
 
+    /// Draws a miniature line with the supplied stroke style for the comparison legend.
     private func lineLegendItem(label: String, color: Color, style: StrokeStyle) -> some View {
         HStack(spacing: 4) {
             Canvas { context, size in
@@ -2947,12 +3069,14 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Uses the supplied category order for available aligned averages, falling back to the selection.
     private func alignedComparisonCategories(alignedAverages: [String: [Float]]) -> [String] {
         let categorySet = Set(alignedAverages.keys)
         let ordered = categories.filter { categorySet.contains($0) }
         return ordered.isEmpty ? viewModel.selectedCategory.map { [$0] } ?? [] : ordered
     }
 
+    /// Extracts the selected-channel/ROI mean from a category’s displayed average; missing data returns nil.
     private func originalAverage(category: String) -> [Float]? {
         guard let averageSignal = averagedSignal,
               let segment = averagedSegments.first(where: { $0.category == category }) else { return nil }
@@ -2965,6 +3089,8 @@ struct SingleTrialAnalysisSheet: View {
         return samples.isEmpty ? nil : samples
     }
 
+    /// Orders edited component bounds and writes them back to RIDE settings. Response
+    /// bounds are converted from stimulus coordinates back to the response-relative frame.
     private func setRIDEComponentWindow(_ component: RIDEAnalyzer.Component, startMs: Double, endMs: Double) {
         let orderedStart = min(startMs, endMs)
         let orderedEnd = max(startMs, endMs)
@@ -2986,12 +3112,15 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Selects a display waveform per RIDE category: central-aligned, response-aligned,
+    /// then reconstruction when neither alignment is available.
     private func rideAlignedAveragesByCategory() -> [String: [Float]] {
         viewModel.rideResultsByCategory.compactMapValues { result in
             result.centralAlignedAverage ?? result.responseAlignedAverage ?? result.reconstructionAverage
         }
     }
 
+    /// Compares the original ERP with available central- and response-aligned averages.
     private func rideAlignedAverageChart(_ result: RIDEAnalyzer.Result) -> some View {
         Chart {
             ForEach(Array(result.erpAverage.enumerated()), id: \.offset) { index, value in
@@ -3030,6 +3159,8 @@ struct SingleTrialAnalysisSheet: View {
         .chartYScale(domain: -amplitudeScale...amplitudeScale)
     }
 
+    /// Overlays ERP, aligned averages, component contributions, reconstruction, and residual
+    /// using distinct styles so the decomposition can be inspected in one chart.
     private func rideMergedDiagnosticChart(_ result: RIDEAnalyzer.Result) -> some View {
         Chart {
             ForEach(Array(result.erpAverage.enumerated()), id: \.offset) { index, value in
@@ -3097,6 +3228,7 @@ struct SingleTrialAnalysisSheet: View {
         .chartYScale(domain: -amplitudeScale...amplitudeScale)
     }
 
+    /// Plots each RIDE component in the common stimulus-locked time frame.
     private func rideComponentChart(_ result: RIDEAnalyzer.Result) -> some View {
         Chart {
             ForEach(result.components) { component in
@@ -3115,6 +3247,7 @@ struct SingleTrialAnalysisSheet: View {
         .chartYScale(domain: -amplitudeScale...amplitudeScale)
     }
 
+    /// Compares original ERP, reconstructed average, and residual left unexplained by the model.
     private func rideReconstructionChart(_ result: RIDEAnalyzer.Result) -> some View {
         Chart {
             ForEach(Array(result.erpAverage.enumerated()), id: \.offset) { index, value in
@@ -3149,6 +3282,7 @@ struct SingleTrialAnalysisSheet: View {
         .chartYScale(domain: -amplitudeScale...amplitudeScale)
     }
 
+    /// Provides consistent colors for stimulus, central, and response components.
     private func color(forRIDEComponent component: RIDEAnalyzer.Component) -> Color {
         switch component {
         case .stimulus: .blue
@@ -3157,6 +3291,7 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Builds the sortable RIDE latency table; unavailable component values display an em dash.
     private func rideLatencyTable(_ result: RIDEAnalyzer.Result) -> some View {
         Table(sortedRIDELatencies(result), sortOrder: $rideSortOrder) {
             TableColumn("#", value: \.trialIndex) { Text("\($0.trialIndex + 1)") }.width(42)
@@ -3185,11 +3320,13 @@ struct SingleTrialAnalysisSheet: View {
         }
     }
 
+    /// Applies the selected key-path sort to a copy of RIDE latency rows.
     private func sortedRIDELatencies(_ result: RIDEAnalyzer.Result) -> [RIDEAnalyzer.TrialLatency] {
         guard !rideSortOrder.isEmpty else { return result.trialLatencies }
         return result.trialLatencies.sorted(using: rideSortOrder)
     }
 
+    /// Displays central-latency iteration changes or explains that no iteration was needed.
     private func rideIterationView(_ result: RIDEAnalyzer.Result) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("RIDE C Convergence")
@@ -3226,6 +3363,8 @@ struct SingleTrialAnalysisSheet: View {
 
     // MARK: - Export
 
+    /// Serializes the displayed measurement result as UTF-8 tab-separated text after a save dialog.
+    /// Trial identifiers are exported one-based; write failures are currently ignored by try?.
     private func exportTrialMatrix() {
         guard let result = displayedMeasurementResult else { return }
         var lines = [
@@ -3263,6 +3402,7 @@ struct SingleTrialAnalysisSheet: View {
         try? data.write(to: url)
     }
 
+    /// Exports the primary Woody result’s shifts/correlations as tab-separated text after a save dialog.
     private func exportWoodyShifts() {
         guard let result = viewModel.woodyResult else { return }
         var lines = ["Trial\tTimeSeconds\tLatencyShiftMs\tLatencyShiftSamples\tCorrelation\tCorrelationSamples\tAtLagLimit"]
@@ -3289,6 +3429,8 @@ struct SingleTrialAnalysisSheet: View {
         try? data.write(to: url)
     }
 
+    /// Exports the primary RIDE result’s component latencies as tab-separated text.
+    /// Absent optional latencies become empty fields rather than numerical zeroes.
     private func exportRIDELatencies() {
         guard let result = viewModel.rideResult else { return }
         var lines = ["Trial\tTimeSeconds\tStimulusLockMs\tStimulusLockSamples\tCentralLatencyMs\tCentralLatencySamples\tCentralAdjustmentMs\tCentralAdjustmentSamples\tCentralCorrelation\tResponseLatencyMs\tResponseLatencySamples"]
@@ -3330,10 +3472,12 @@ struct SingleTrialAnalysisSheet: View {
         try? data.write(to: url)
     }
 
+    /// Formats a whole-number display value without decimal places.
     private func format(_ value: Double) -> String {
         String(format: "%.0f", value)
     }
 
+    /// Clamps amplitude scale and rounds by units, tens, or hundreds depending on magnitude.
     private func roundedAmplitudeScale(_ value: Double) -> Double {
         let clamped = min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
         if clamped < 100 {
@@ -3345,6 +3489,7 @@ struct SingleTrialAnalysisSheet: View {
         return (clamped / 100).rounded() * 100
     }
 
+    /// Formats amplitude with the same magnitude-dependent rounding used by the scale control.
     private func formatAmplitudeScale(_ value: Double) -> String {
         if value < 100 {
             return String(Int(value.rounded()))
@@ -3380,10 +3525,13 @@ private struct SingleTrialWindowPicker: View {
     @State private var liveWindowEndMs: Double?
     @State private var componentDrag: ComponentWindowDrag?
 
+    /// Inclusive length of the selected epoch, floored at one for coordinate calculations.
     private var epochLength: Int {
         max(selectionSegment.endSample - selectionSegment.startSample + 1, 1)
     }
 
+    /// Layers draggable window highlights over the butterfly. A free drag keeps live bounds
+    /// locally until release; existing named windows are moved/resized through a callback.
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
@@ -3474,6 +3622,7 @@ private struct SingleTrialWindowPicker: View {
         }
     }
 
+    /// Maps live or committed millisecond bounds to a full-height selection rectangle.
     private func selectionRect(in size: CGSize) -> CGRect? {
         let displayStartMs = liveWindowStartMs ?? windowStartMs
         let displayEndMs = liveWindowEndMs ?? windowEndMs
@@ -3486,6 +3635,7 @@ private struct SingleTrialWindowPicker: View {
         return CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
     }
 
+    /// Maps one named window to its highlighted pixel rectangle.
     private func componentSelectionRect(_ window: TrialWindowSelection, in size: CGSize) -> CGRect? {
         guard size.width > 0 else { return nil }
         let startSample = relativeSample(forMs: window.startMs)
@@ -3496,15 +3646,18 @@ private struct SingleTrialWindowPicker: View {
         return CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)
     }
 
+    /// Converts stimulus-relative milliseconds to a clamped offset within the epoch.
     private func relativeSample(forMs ms: Double) -> Int {
         let sample = selectionSegment.stimulusOffsetSamples + Int((ms / 1000.0 * samplingRate).rounded())
         return min(max(sample, 0), epochLength - 1)
     }
 
+    /// Converts an epoch-relative sample offset back to milliseconds relative to stimulus onset.
     private func msFromRelativeSample(_ relativeSample: Int) -> Double {
         Double(relativeSample - selectionSegment.stimulusOffsetSamples) / samplingRate * 1000.0
     }
 
+    /// Updates temporary ordered window bounds from pointer pixels without committing the Binding yet.
     private func updateLiveWindow(width: CGFloat) {
         guard let dragStartX, let dragCurrentX, width > 0 else { return }
         let xScale = width / CGFloat(max(epochLength - 1, 1))
@@ -3514,10 +3667,13 @@ private struct SingleTrialWindowPicker: View {
         liveWindowEndMs = msFromRelativeSample(max(startSample, endSample))
     }
 
+    /// Formats a rounded millisecond label for window-edge annotations.
     private func timeLabel(_ milliseconds: Double) -> String {
         "\(Int(milliseconds.rounded())) ms"
     }
 
+    /// Moves or resizes the originally hit component window, clamping to the epoch
+    /// and enforcing a nominal 20 ms minimum width where bounds permit.
     private func updateComponentWindowDrag(value: DragGesture.Value, width: CGFloat) {
         guard width > 0 else { return }
         if componentDrag == nil {
@@ -3526,6 +3682,8 @@ private struct SingleTrialWindowPicker: View {
         guard let drag = componentDrag else { return }
         let xScale = width / CGFloat(max(epochLength - 1, 1))
         let deltaSamples = Int(((value.location.x - value.startLocation.x) / xScale).rounded())
+        // Window widths are specified in milliseconds, while movement/clamping uses
+        // integer samples. Convert once so the same minimum applies at any sampling rate.
         let minWidthSamples = max(Int((20.0 / 1000.0 * samplingRate).rounded()), 1)
         let epochMaxSample = epochLength - 1
         let originalStart = relativeSample(forMs: drag.startMs)
@@ -3554,6 +3712,8 @@ private struct SingleTrialWindowPicker: View {
         )
     }
 
+    /// Hit-tests window edges before their interiors. The eight-point edge tolerance
+    /// selects resizing; an interior hit selects moving the entire window.
     private func dragTarget(at x: CGFloat, width: CGFloat) -> ComponentWindowDrag? {
         let edgeSlop: CGFloat = 8
         let candidates = componentWindows.compactMap { window -> (window: TrialWindowSelection, rect: CGRect)? in
@@ -3672,6 +3832,8 @@ private struct SingleTrialRIDECategoryOutput: Sendable {
 }
 
 private nonisolated enum SingleTrialLatencyRunner {
+    /// Runs Woody separately by category, then builds an all-channel preview from the
+    /// estimated shifts. The Sendable job contains the UI snapshots needed off MainActor.
     static func runWoody(
         job: SingleTrialWoodyRunJob,
         progress: AsyncStream<SingleTrialRunProgress>.Continuation
@@ -3718,6 +3880,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         )
     }
 
+    /// Runs RIDE by category and constructs a preview using complete central latencies
+    /// or response latencies when central values are unavailable.
     static func runRIDE(
         job: SingleTrialRIDERunJob,
         progress: AsyncStream<SingleTrialRunProgress>.Continuation
@@ -3764,6 +3928,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         )
     }
 
+    /// Runs independent category CWT jobs in a task group, gathers successful results,
+    /// then applies their nonlinear warps to an all-channel display preview.
     static func runCWT(
         job: SingleTrialCWTRunJob,
         progress: AsyncStream<SingleTrialRunProgress>.Continuation
@@ -3835,6 +4001,7 @@ private nonisolated enum SingleTrialLatencyRunner {
         )
     }
 
+    /// Slices/averages selected channels into CWT trial inputs while retaining timing metadata.
     private static func cwtTrials(category: String, job: SingleTrialCWTRunJob) -> [CWTRidgePipeline.TrialInput] {
         job.rawSegments
             .filter { $0.category == category }
@@ -3852,6 +4019,8 @@ private nonisolated enum SingleTrialLatencyRunner {
             }
     }
 
+    /// Runs independent Woody category computations concurrently and reports completion
+    /// progress as each finishes. Results are keyed by category, not completion order.
     private static func runByCategory(
         categories: [String],
         modeTitle: String,
@@ -3890,6 +4059,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         )
     }
 
+    /// RIDE overload of the category task-group runner. Collects successful results
+    /// while leaving preview construction to the caller.
     private static func runByCategory(
         categories: [String],
         modeTitle: String,
@@ -3928,6 +4099,7 @@ private nonisolated enum SingleTrialLatencyRunner {
         )
     }
 
+    /// Prepares selected-channel Woody inputs and optionally denoises each trace before alignment.
     private static func woodyTrials(category: String, job: SingleTrialWoodyRunJob) -> [WoodyAlignmentAnalyzer.TrialInput] {
         job.rawSegments
             .filter { $0.category == category }
@@ -3946,6 +4118,7 @@ private nonisolated enum SingleTrialLatencyRunner {
             }
     }
 
+    /// Prepares selected-channel RIDE inputs, optional denoising, and the default response marker.
     private static func rideTrials(category: String, job: SingleTrialRIDERunJob) -> [RIDEAnalyzer.TrialInput] {
         job.rawSegments
             .filter { $0.category == category }
@@ -3965,6 +4138,8 @@ private nonisolated enum SingleTrialLatencyRunner {
             }
     }
 
+    /// Computes an ROI mean for an inclusive sample range. Invalid channel indices are
+    /// removed; channels too short for the interval contribute no sum but remain in the divisor.
     private static func channelResolvedSamples(
         signal: MFFSignalData,
         startSample: Int,
@@ -3988,6 +4163,9 @@ private nonisolated enum SingleTrialLatencyRunner {
         return result
     }
 
+    /// Concatenates category-wise aligned all-channel averages into a lightweight preview signal.
+    /// Uses a common display stride and adjusts sampling rate/stimulus offsets accordingly;
+    /// this display downsampling does not replace the raw analysis inputs.
     private static func alignedButterflyPreview(
         rawSignal: MFFSignalData,
         rawSegments: [EpochSegment],
@@ -4013,6 +4191,8 @@ private nonisolated enum SingleTrialLatencyRunner {
             return segment.endSample - segment.startSample + 1
         }
         let previewStride = max(previewRawLengths.map(displayStride(forEpochLength:)).max() ?? 1, 1)
+        // Drawing every nth raw sample stretches the interval between displayed samples
+        // by n. Lower the preview sampling rate so time labels retain the same physical meaning.
         let previewSamplingRate = rawSignal.samplingRate / Double(previewStride)
 
         for category in orderedCategories {
@@ -4072,6 +4252,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         return SingleTrialAlignedButterflyPreview(signal: signal, segments: outputSegments)
     }
 
+    /// Prepares reusable per-trial reference/warp information, then averages channel chunks
+    /// in a task group. Sorts completed chunks back into channel order before concatenation.
     private static func alignedAverageAllChannels(
         trials: [EpochSegment],
         shifts: [Int],
@@ -4127,10 +4309,15 @@ private nonisolated enum SingleTrialLatencyRunner {
             }
         }
 
+        // Task groups yield in completion order. Restore channel order before flattening
+        // to maintain the signal’s [channel][sample] layout.
         chunks.sort { $0.start < $1.start }
         return chunks.flatMap(\.data)
     }
 
+    /// Averages a chunk of channels at display-sample positions after shift/warp and optional
+    /// reference/baseline correction. Per-sample counts exclude shifted-out or nonfinite data
+    /// so missing edges do not dilute valid contributions; an empty position becomes zero.
     private static func alignedAverageChannels(
         channelRange: Range<Int>,
         preparedTrials: [PreparedPreviewTrial],
@@ -4163,6 +4350,8 @@ private nonisolated enum SingleTrialLatencyRunner {
                         guard source.isFinite, source >= 0, source <= Double(rawLength - 1) else { continue }
                         let i0 = Int(source.rounded(.down))
                         let i1 = min(i0 + 1, rawLength - 1)
+                        // A nonlinear warp points between source samples. Blend the two neighbors
+                        // with complementary weights to obtain a continuous interpolated amplitude.
                         let frac = source - Double(i0)
                         let base0 = trial.segment.startSample
                         let raw = Double(channelData[base0 + i0]) * (1 - frac) + Double(channelData[base0 + i1]) * frac
@@ -4181,6 +4370,8 @@ private nonisolated enum SingleTrialLatencyRunner {
                 }
             }
 
+            // Shifted trials cover different edges. Divide each output sample by its own
+            // valid contributor count rather than the total number of trials.
             return sum.indices.map { sample in
                 counts[sample] > 0 ? Float(sum[sample] / Double(counts[sample])) : 0
             }
@@ -4197,6 +4388,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         var warp: [Double]?
     }
 
+    /// Retains correctly sized trials and prepares their reference means and shift/warp mapping.
+    /// A missing or incorrectly sized nonlinear warp falls back to the rigid shift.
     private static func preparePreviewTrials(
         trials: [EpochSegment],
         shifts: [Int],
@@ -4221,6 +4414,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         }
     }
 
+    /// Computes a finite-sample common average from valid non-bad channels at each epoch offset.
+    /// Returns zero at positions with no usable donors.
     private static func referenceMeans(
         segment: EpochSegment,
         rawLength: Int,
@@ -4248,6 +4443,8 @@ private nonisolated enum SingleTrialLatencyRunner {
         return means
     }
 
+    /// Computes the finite prestimulus mean after reference subtraction in the original
+    /// trial frame. No valid baseline samples means zero correction.
     private static func channelBaseline(
         channel: Int,
         trial: PreparedPreviewTrial,
@@ -4271,10 +4468,12 @@ private nonisolated enum SingleTrialLatencyRunner {
         return count > 0 ? sum / Double(count) : 0
     }
 
+    /// Chooses a display-only subsampling stride for long epochs (roughly 1,200 points).
     private static func displayStride(forEpochLength length: Int) -> Int {
         max(length / 1_200, 1)
     }
 
+    /// Counts samples at offsets 0, stride, 2×stride… within the raw epoch length.
     private static func displayLength(rawLength: Int, displayStride: Int) -> Int {
         guard rawLength > 0 else { return 0 }
         return ((rawLength - 1) / max(displayStride, 1)) + 1
@@ -4286,6 +4485,7 @@ private final class SingleTrialChannelTraceCache: ObservableObject {
     @Published private(set) var bundles: [SingleTrialChannelTraceBundle] = []
     private var signature: String?
 
+    /// Rebuilds/publishes cached channel trace bundles only when the supplied signature changes.
     func prepare(
         averagedSignal: MFFSignalData,
         averagedSegments: [EpochSegment],
@@ -4312,6 +4512,8 @@ private final class SingleTrialChannelTraceCache: ObservableObject {
         bundles = nextBundles
     }
 
+    /// Pairs each valid category average with same-length raw trials for one channel,
+    /// applying display reference/baseline processing to the raw trial traces.
     static func buildBundles(
         averagedSignal: MFFSignalData,
         averagedSegments: [EpochSegment],
@@ -4354,6 +4556,8 @@ private final class SingleTrialChannelTraceCache: ObservableObject {
         }
     }
 
+    /// Extracts one trial’s display trace, optionally subtracting the common reference
+    /// and prestimulus baseline. An invalid interval or nonfinite resulting sample returns nil.
     private static func trialTrace(
         segment: EpochSegment,
         length: Int,
@@ -4458,6 +4662,8 @@ private struct SingleTrialChannelInspectorPlot: View {
     @StateObject private var traceCache = SingleTrialChannelTraceCache()
     @State private var hoverInfo: SingleTrialInspectorHoverInfo?
 
+    /// Cache identity built from file paths, rates, selected channel, processing settings,
+    /// and sampled segment identities. It is not a hash of every waveform sample.
     private var cacheSignature: String {
         [
             averagedSignal.signalURL.path,
@@ -4473,6 +4679,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         ].joined(separator: "::")
     }
 
+    /// Compact segment identity using count and first/middle/last IDs for cache invalidation.
     private func segmentSignature(_ segments: [EpochSegment]) -> String {
         let middle = segments.isEmpty ? nil : segments[segments.count / 2].id
         return [
@@ -4483,6 +4690,8 @@ private struct SingleTrialChannelInspectorPlot: View {
         ].joined(separator: "|")
     }
 
+    /// Draws cached original trials, optional animated alignment overlays, and averages.
+    /// Canvas uses one sampled path per trace; hover lookup and cache refresh stay outside drawing.
     var body: some View {
         GeometryReader { proxy in
             Canvas { context, size in
@@ -4609,6 +4818,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         }
     }
 
+    /// Updates the trace cache with current signals, selected channel, and display processing settings.
     private func prepareCache() {
         traceCache.prepare(
             averagedSignal: averagedSignal,
@@ -4623,6 +4833,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         )
     }
 
+    /// Uses existing bundles when nonempty; otherwise builds them synchronously for the first drawing.
     private func preparedBundles() -> [SingleTrialChannelTraceBundle] {
         let cached = traceCache.bundles
         if !cached.isEmpty { return cached }
@@ -4638,6 +4849,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         )
     }
 
+    /// Orders other categories first and the selected category last, so it draws on top.
     private func ordered(_ bundles: [SingleTrialChannelTraceBundle]) -> [SingleTrialChannelTraceBundle] {
         bundles.sorted { lhs, rhs in
             switch (lhs.category == selectedCategory, rhs.category == selectedCategory) {
@@ -4648,6 +4860,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         }
     }
 
+    /// Draws the zero-amplitude horizontal line and stimulus-onset vertical line.
     private func drawReferenceLines(
         first: EpochSegment,
         length: Int,
@@ -4667,6 +4880,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         context.stroke(stimulus, with: .color(.green.opacity(0.58)), lineWidth: 1)
     }
 
+    /// Converts the temporary analysis span to a tinted full-height band.
     private func drawWindowSelection(
         first: EpochSegment,
         length: Int,
@@ -4715,11 +4929,14 @@ private struct SingleTrialChannelInspectorPlot: View {
         }
     }
 
+    /// Maps stimulus-relative milliseconds into this plot’s clamped epoch sample coordinate.
     private func relativeSample(forMs ms: Double, segment: EpochSegment, length: Int) -> Int {
         let sample = segment.stimulusOffsetSamples + Int((ms / 1000.0 * averagedSignal.samplingRate).rounded())
         return min(max(sample, 0), length - 1)
     }
 
+    /// Finds the nearest original average/trial trace vertically at the pointer’s sample.
+    /// Returns hover information only within 14 points; aligned overlays are not separate candidates.
     private func nearestHoverInfo(at location: CGPoint, in size: CGSize) -> SingleTrialInspectorHoverInfo? {
         let bundles = preparedBundles()
         guard let first = bundles.first, first.length > 1, size.width > 0 else { return nil }
@@ -4766,6 +4983,8 @@ private struct SingleTrialChannelInspectorPlot: View {
         return SingleTrialInspectorHoverInfo(valueMicrovolts: best.value, detail: best.detail)
     }
 
+    /// Updates the inout nearest-hit accumulator when this trace lies closer to the pointer.
+    /// The y transform reverses screen coordinates so positive amplitudes draw upward.
     private func consider(
         trace: [Float],
         localSample: Int,
@@ -4791,6 +5010,8 @@ private struct SingleTrialChannelInspectorPlot: View {
         }
     }
 
+    /// Draws a subsampled trace path and explicitly includes its last point. Optional
+    /// horizontal shifts animate the display without modifying the underlying sample array.
     private func draw(
         _ trace: [Float],
         length: Int,
@@ -4842,6 +5063,7 @@ private struct SingleTrialChannelInspectorPlot: View {
         }
     }
 
+    /// Converts one waveform sample into plot pixels, then starts or extends the inout path.
     private func addPoint(
         _ localSample: Int,
         trace: [Float],

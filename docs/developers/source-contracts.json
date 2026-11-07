@@ -1,0 +1,14 @@
+[
+  {"file": "EVA/Core/SignalSelection.swift", "symbol": "static func mergeNearbyStarts("},
+  {"file": "EVA/App/RecordingStore.swift", "symbol": "var processingHistory = RecordingHistoryModel()"},
+  {"file": "EVA/Filtering/FilterViewModel.swift", "symbol": "nonisolated static func filteredChannels("},
+  {"file": "EVA/Filtering/FilteringViews.swift", "symbol": "func postFilterInvalidation()"},
+  {"file": "EVA/Pipeline/LatestOnlyRunner.swift", "symbol": "func invalidate()"},
+  {"file": "EVA/Pipeline/ProcessingCore.swift", "symbol": "func applyAutoSteps("},
+  {"file": "EVA/Waveform/WaveformHistoryRail.swift", "symbol": "func recordProcessingHistory()"},
+  {"file": "EVA/Waveform/WaveformView.swift", "symbol": "private func tearDownRecordingSessionForClose()"},
+  {"file": "EVA/Analysis/EEGAnalysisEngine.swift", "symbol": "static func exportResult("},
+  {"file": "EVA/IO/SignalImportReader.swift", "symbol": "static let supportedRecordingExtensions: Set<String>"},
+  {"file": "EVACore/IO/MFFReader.swift", "symbol": "func replacingSamples("},
+  {"file": "EVACore/Pipeline/EVAProcessingScript.swift", "symbol": "static func read(fromPackage packageURL: URL)"}
+]

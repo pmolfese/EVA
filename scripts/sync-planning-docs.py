@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
+# Developed by P. Molfese, National Institutes of Health (NIH).
+#
+# This software is a "work of the United States Government" prepared by a federal
+# employee as part of official duties. As such, it is not subject to copyright
+# protection within the United States (17 U.S.C. § 105). International copyrights
+# may apply.
 """Copy the root planning documents into the MkDocs tree before a site build.
 
-`ROADMAP.md`, `ROADMAP_COMPLETE.md` and `docs/design/` are authored at the
+`ROADMAP.md`, `ROADMAP_COMPLETE.md`, `docs/design/` and `docs/developers/` are authored at the
 repository root so GitHub renders them and so code comments can cite stable
 paths. MkDocs can only see files under `docs_dir` (`docs/manual`), so this
 script mirrors them into `docs/manual/development/` and rewrites the
@@ -20,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import os
+from urllib.parse import quote, unquote, urlsplit
 import shutil
 import sys
 from pathlib import Path
@@ -27,8 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEST = ROOT / "docs" / "manual" / "development"
 DESIGN_SRC = ROOT / "docs" / "design"
-
-GITHUB_BLOB = "https://github.com/pmolfese/EVA/blob/main/"
+DEVELOPER_SRC = ROOT / "docs" / "developers"
 
 # Banner added to each copied page so a reader on the published site knows the
 # page is generated and where to edit it.
@@ -43,7 +50,7 @@ BANNER = """!!! info "Generated page"
 def demote_headings(text: str) -> str:
     """Push every heading below the document title down one level.
 
-    The roadmap files use `# N. Section` for their twelve subsystems, which is
+    The roadmap files use `# N. Section` for their top-level sections, which is
     right for GitHub but collides with MkDocs' one-h1-per-page convention:
     Material builds the in-page table of contents from the first h1's subtree
     only, so every section and milestone would be missing from it. Demoting
@@ -70,47 +77,88 @@ def demote_headings(text: str) -> str:
     return "\n".join(out)
 
 
-def rewrite_roadmap(text: str) -> str:
-    """Links as written at the repository root -> links inside development/."""
-    text = text.replace("](docs/design/README.md)", "](design/index.md)")
-    text = re.sub(r"\]\(docs/design/([^)]+)\)", r"](design/\1)", text)
-    text = text.replace("](ROADMAP_COMPLETE.md)", "](roadmap-complete.md)")
-    text = text.replace("](ROADMAP.md)", "](roadmap.md)")
-    return demote_headings(text)
+def source_destinations() -> dict[Path, Path]:
+    """One authoring location per page; non-Markdown tutorial patches are copied too."""
+    mapping = {
+        ROOT / "ROADMAP.md": DEST / "roadmap.md",
+        ROOT / "ROADMAP_COMPLETE.md": DEST / "roadmap-complete.md",
+    }
+    for source in sorted(DESIGN_SRC.glob("*.md")):
+        mapping[source] = DEST / "design" / ("index.md" if source.name == "README.md" else source.name)
+    for source in sorted(DEVELOPER_SRC.rglob("*")):
+        if source.is_file() and source.suffix in {".md", ".patch"}:
+            relative = source.relative_to(DEVELOPER_SRC)
+            if source.name == "README.md":
+                relative = relative.with_name("index.md")
+            mapping[source] = DEST / "developers" / relative
+    return mapping
 
 
-def rewrite_design(text: str) -> str:
-    """Links as written inside docs/design/ -> links inside development/design/."""
-    text = text.replace("](README.md)", "](index.md)")
-    # Repository paths that only resolve on GitHub, not on the docs site.
-    text = re.sub(
-        r"\]\((EVA/[^)]*)\)",
-        lambda m: f"]({GITHUB_BLOB}{m.group(1)})",
-        text,
-    )
-    return text
+def rewrite_links(text: str, source: Path, destination: Path,
+                  mapping: dict[Path, Path]) -> str:
+    """Relocate local links; keep source-file links useful on the published site.
+
+    Existing manual pages remain inside docs_dir. Shared developer/design pages
+    use their mirrored locations. Other repository files link to GitHub. Fenced
+    commands/examples are preserved verbatim rather than having paths rewritten.
+    """
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(2)
+        parsed = urlsplit(raw)
+        if parsed.scheme or parsed.netloc or not parsed.path:
+            return match.group(0)
+        target = (source.parent / unquote(parsed.path)).resolve()
+        # Historical design pages contain repository-root EVA/ links.
+        if not target.exists() and parsed.path.startswith("EVA/"):
+            target = ROOT / parsed.path
+        if target.is_dir() and (target / "README.md").exists():
+            target = target / "README.md"
+        if target in mapping:
+            url = Path(os.path.relpath(mapping[target], destination.parent)).as_posix()
+        elif target.is_relative_to(ROOT / "docs/manual"):
+            url = Path(os.path.relpath(target, destination.parent)).as_posix()
+        elif target.is_relative_to(ROOT):
+            kind = "tree" if target.is_dir() else "blob"
+            url = "https://github.com/pmolfese/EVA/" + kind + "/main/" + quote(target.relative_to(ROOT).as_posix(), safe="/")
+        else:
+            raise ValueError(f"Link outside repository in {source}: {raw}")
+        if parsed.query:
+            url += "?" + parsed.query
+        if parsed.fragment:
+            url += "#" + parsed.fragment
+        return match.group(1) + "(" + url + ")"
+
+    output = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            output.append(line)
+        elif fence:
+            output.append(line)
+        else:
+            output.append(re.sub(r"(!?\[[^\]\n]*\])\(([^)\n]+)\)", replace, line))
+    return "".join(output)
 
 
 def planned_files() -> dict[Path, str]:
-    """Map destination path -> rendered content."""
-    out: dict[Path, str] = {}
-
-    for src_name, dest_name in [
-        ("ROADMAP.md", "roadmap.md"),
-        ("ROADMAP_COMPLETE.md", "roadmap-complete.md"),
-    ]:
-        src = ROOT / src_name
-        body = rewrite_roadmap(src.read_text(encoding="utf-8"))
-        out[DEST / dest_name] = BANNER.format(source=src_name) + body
-
-    for src in sorted(DESIGN_SRC.glob("*.md")):
-        dest_name = "index.md" if src.name == "README.md" else src.name
-        body = rewrite_design(src.read_text(encoding="utf-8"))
-        out[DEST / "design" / dest_name] = (
-            BANNER.format(source=f"docs/design/{src.name}") + body
-        )
-
-    return out
+    """Map every generated destination to its content; no filesystem mutation."""
+    mapping = source_destinations()
+    output = {}
+    for source, destination in mapping.items():
+        body = source.read_text(encoding="utf-8")
+        if source.suffix == ".md":
+            body = rewrite_links(body, source, destination, mapping)
+            if source.name in {"ROADMAP.md", "ROADMAP_COMPLETE.md"}:
+                body = demote_headings(body)
+            body = BANNER.format(source=source.relative_to(ROOT).as_posix()) + body
+        output[destination] = body
+    return output
 
 
 def main() -> int:
@@ -127,7 +175,7 @@ def main() -> int:
             if not p.exists() or p.read_text(encoding="utf-8") != content
         ]
         extra = [
-            p for p in DEST.rglob("*.md") if p not in files
+            p for p in DEST.rglob("*") if p.is_file() and p not in files
         ] if DEST.exists() else []
         if stale or extra:
             for p in stale:
@@ -136,7 +184,7 @@ def main() -> int:
                 print(f"orphaned: {p.relative_to(ROOT)}", file=sys.stderr)
             print("run: python3 scripts/sync-planning-docs.py", file=sys.stderr)
             return 1
-        print(f"{len(files)} planning pages are current")
+        print(f"{len(files)} planning/developer documents are current")
         return 0
 
     if DEST.exists():
@@ -145,7 +193,7 @@ def main() -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    print(f"synced {len(files)} planning pages into "
+    print(f"synced {len(files)} planning/developer documents into "
           f"{DEST.relative_to(ROOT)}/")
     return 0
 

@@ -96,6 +96,8 @@ nonisolated enum BCGSurrogateHeadModel: String, Codable, Sendable, CaseIterable,
 
     nonisolated var id: String { rawValue }
 
+    /// Maps the portable enum choice to the concrete shell geometry/conductivity model.
+    /// The enum value can be saved; the returned model is used for numerical fitting.
     nonisolated var forwardHeadModel: ForwardHeadModel {
         switch self {
         case .classicThreeShell:              return .classicThreeShell
@@ -106,6 +108,7 @@ nonisolated enum BCGSurrogateHeadModel: String, Codable, Sendable, CaseIterable,
         }
     }
 
+    /// Human-readable picker label, including the relevant skull-conductivity assumption.
     nonisolated var displayName: String {
         switch self {
         case .classicThreeShell:              return "Classic 3-shell (1:80)"
@@ -144,6 +147,7 @@ nonisolated enum BCGSurrogateInputSource: String, Codable, Sendable, CaseIterabl
 
     nonisolated var id: String { rawValue }
 
+    /// Describes which signal supplies the evidence for fitting the artifact model.
     nonisolated var label: String {
         switch self {
         case .currentFiltered: return "Current filtered data"
@@ -159,6 +163,7 @@ nonisolated enum BCGSurrogateBeatSource: String, Codable, Sendable, CaseIterable
 
     nonisolated var id: String { rawValue }
 
+    /// Describes which existing event family supplies beat-locked epoch anchors.
     nonisolated var label: String {
         switch self {
         case .artifactEvents: return "Defined BCG matches"
@@ -211,6 +216,9 @@ nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
 
     // MARK: eva.xml bridge
 
+    /// Serializes portable settings to the string dictionary stored with a processing step.
+    /// Numeric formatting is explicit so replay/export use a consistent precision.
+    /// This does not store fitted matrices or write the XML file itself.
     var parameters: [String: String] {
         [
             "surrogateHeadModel": headModel.rawValue,
@@ -232,11 +240,14 @@ nonisolated struct BCGSurrogateSettings: Codable, Sendable, Equatable {
         ]
     }
 
+    /// Creates the default settings using the stored-property initial values above.
     init() {}
 
     /// Restores settings from a recorded step. Absent keys keep their defaults,
     /// so a script written by an older build still replays with the values that
     /// build used.
+    /// Unrecognized enum strings and unparseable numbers leave the default in place.
+    /// Successful parsing restores values but does not validate their scientific range.
     init(parameters p: [String: String]) {
         self.init()
         if let value = p["surrogateHeadModel"].flatMap(BCGSurrogateHeadModel.init(rawValue:)) {
@@ -301,6 +312,9 @@ nonisolated struct BCGSurrogateReport: Codable, Sendable, Equatable {
     var removedVarianceFraction: Double
 
     /// One line per fact, for `log_eva_*.txt` and the export audit log.
+    /// Builds textual provenance from this fitted report without performing I/O.
+    /// Includes assumptions and run-specific counts so an export describes the
+    /// actual correction, not merely the current UI settings.
     var auditLogLines: [String] {
         var lines: [String] = [
             "bcgCorrection method: surrogate PCA-S (Berg-Scherg family)",
@@ -330,6 +344,8 @@ nonisolated struct BCGSurrogateReport: Codable, Sendable, Equatable {
     }
 
     /// Short status for the sheet and the history rail.
+    /// Formats the retained-component count, beat acceptance, and removed-energy
+    /// percentage as a compact status message.
     var summary: String {
         "\(artifactComponentCount) component\(artifactComponentCount == 1 ? "" : "s") · "
             + "\(acceptedBeatCount)/\(candidateBeatCount) beats · "
@@ -346,6 +362,8 @@ nonisolated enum BCGSurrogateError: LocalizedError, Equatable, Sendable {
     case incompatibleFittingSignal
     case operatorFailed(String)
 
+    /// Turns a correction failure into user-readable text. Missing channel numbers
+    /// are one-based and truncated for display; the error retains the complete list.
     var errorDescription: String? {
         switch self {
         case .missingGeometry(let missing):
@@ -405,14 +423,21 @@ nonisolated enum BCGSurrogateCorrection {
         var operatorMatrix: [[Double]]
     }
 
-    /// Corrects `data` in place over `correctedRows`, leaving every other row
-    /// untouched.
+    /// Returns a corrected copy of `data` over `correctedRows`, leaving every other
+    /// row untouched. The caller’s input array is not mutated.
     ///
     /// - Parameters:
     ///   - correctedRows: the good EEG subset, in signal row order.
     ///   - geometry: 3D coordinates for at least those rows. Missing geometry
     ///     throws; there is no standard-montage fallback.
     ///   - beatSeconds: detected beat times, from EVA's existing detectors.
+    /// Data arrays are channel-by-sample. Optional fittingData supplies matching
+    /// evidence for fitting while data remains the signal actually corrected.
+    /// Callers must provide the same sampling grid, unique corrected row indices,
+    /// and valid sampling/settings values; this function checks selected-row lengths,
+    /// geometry, beat availability, and the resulting model’s usability.
+    /// The progress callback runs in the computation’s context; UI callers use a bridge.
+    /// Returns full-width samples, a fitted report, and the spatial operator; failures throw.
     static func correct(
         data: [[Float]],
         fittingData: [[Float]]? = nil,
@@ -429,6 +454,9 @@ nonisolated enum BCGSurrogateCorrection {
         // is honored for tests and callers that need to pin a specific geometry.
         let head = headOverride ?? settings.headModel.forwardHeadModel
         let fittingData = fittingData ?? data
+        // Sort the selected rows once and reuse this exact order for electrodes,
+        // artifact maps, brain basis, and sample matrices. Mismatched orders would
+        // apply one channel’s spatial weights to another channel’s signal.
         let rows = correctedRows.filter {
             data.indices.contains($0) && fittingData.indices.contains($0)
         }.sorted()
@@ -467,6 +495,9 @@ nonisolated enum BCGSurrogateCorrection {
                 return geometry.channelNames[row] ?? "E\(row + 1)"
             },
             positionsMeters: rows.map { row in
+                // Geometry stores normalized coordinates. Scale and translate them onto
+                // the chosen model’s scalp sphere to provide physical positions in meters.
+                // The missing-coordinate check above makes this unwrap safe.
                 let direction = geometry.positions[row]!
                 return SIMD3<Double>(
                     direction.x * head.scalpRadiusMeters + head.centerMeters.x,
@@ -479,6 +510,8 @@ nonisolated enum BCGSurrogateCorrection {
         // Preserve the recording's native Float storage through template
         // filtering. Only the short beat epochs need Double precision; the old
         // full-scan Double→Float→Double round trip consumed gigabytes here.
+        // Fit evidence and correction input may differ (for example broadband
+        // evidence versus filtered data), but their rows and sample timing must agree.
         let fittingSubset = rows.map { fittingData[$0] }
         progress?(BCGSurrogateProgress(
             fraction: 0.03,
@@ -533,6 +566,9 @@ nonisolated enum BCGSurrogateCorrection {
                 fraction: 0.40,
                 detail: "Fitting the \(basis.columnCount)-column brain/artifact separation operator"
             ))
+            // Fit brain and artifact blocks together. The resulting electrode-by-electrode
+            // operator reconstructs the brain contribution; artifact directions are assigned
+            // to the unregularized artifact block rather than penalized brain coefficients.
             separation = try SourceInformedSeparation.makeOperator(
                 brainBasis: basis.matrix,
                 artifactTopographies: components.topographies,
@@ -551,8 +587,12 @@ nonisolated enum BCGSurrogateCorrection {
             detail: "Average-referencing \(rows.count) channels across \(sampleCount) samples"
         ))
         var averageReferenced = applicationSubset.map { $0.map(Double.init) }
+        // One mean per time sample, across only the corrected subset. This is not
+        // a temporal mean of each channel; reference consistency is a spatial constraint.
         var commonMode = [Double](repeating: 0, count: sampleCount)
         let vectorLength = vDSP_Length(sampleCount)
+        // Accelerate receives contiguous buffer pointers that are valid only inside
+        // these closures. Stride 1 means neighboring array elements are neighboring samples.
         commonMode.withUnsafeMutableBufferPointer { sum in
             for channel in averageReferenced.indices {
                 averageReferenced[channel].withUnsafeBufferPointer { source in
@@ -608,6 +648,8 @@ nonisolated enum BCGSurrogateCorrection {
                 to: averageReferenced
             ) { fraction in
                 progress?(BCGSurrogateProgress(
+                    // Map the application routine’s local 0…1 progress into this phase’s
+                    // allocated 56%…88% section of the overall progress bar.
                     fraction: 0.56 + 0.32 * fraction,
                     detail: "Reconstructing the full recording with Accelerate · "
                         + "\(Int((100 * fraction).rounded()))%"
@@ -623,10 +665,16 @@ nonisolated enum BCGSurrogateCorrection {
         var corrected = data
         var removedSquares = 0.0
         var originalSquares = 0.0
+        // index addresses the compact fitted subset; row addresses the original
+        // full-width recording. Keeping both prevents excluded rows from shifting
+        // the mapping when corrected samples are written back.
         for (index, row) in rows.enumerated() {
             var channel = data[row]
             for sample in 0..<sampleCount {
                 let removed = averageReferenced[index][sample] - reconstructed[index][sample]
+                // The reported removed fraction is a ratio of squared amplitudes in the
+                // average-referenced subset. It measures removal magnitude, not whether
+                // the removed activity was all artifact or how much brain signal survived.
                 removedSquares += removed * removed
                 let original = averageReferenced[index][sample]
                 originalSquares += original * original

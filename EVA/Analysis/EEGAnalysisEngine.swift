@@ -13,6 +13,9 @@
 import Accelerate
 import Foundation
 
+/// A value snapshot of the recording and analysis choices for one run.
+/// Sendable allows this request to cross concurrency boundaries; it does not
+/// make later changes to a separate UI model part of this request.
 nonisolated struct EEGAnalysisRequest: Sendable {
     var packageName: String
     var signal: MFFSignalData
@@ -32,7 +35,15 @@ nonisolated struct EEGAnalysisRequest: Sendable {
     var includesRegionConnectivity: Bool
 }
 
+/// Computes a report from temporary segments without changing recording samples.
+/// The pipeline is segment quality → retained data → spectral power/connectivity
+/// → exportable summaries. Channel and sample indices are zero-based internally.
 nonisolated enum EEGAnalysisEngine {
+    /// Builds the complete report from the request: assess segments, select usable
+    /// data, and compute the requested power and connectivity summaries. Progress
+    /// is a fraction of the whole run; each stage maps its own fraction into a slice.
+    /// Cancellation can leave optional analyses absent; this API returns a report
+    /// rather than throwing a cancellation error. The caller owns UI publication.
     static func analyze(
         request: EEGAnalysisRequest,
         progress: (@Sendable (Double) -> Void)? = nil
@@ -74,6 +85,8 @@ nonisolated enum EEGAnalysisEngine {
             keptGrades: request.keptGrades,
             artifactThreshold: request.artifactRejectionThreshold
         )
+        // Key paths (\.property) are shorthand for reading a property in each item.
+        // A Set makes membership checks independent of the order of health results.
         let keptSegmentIDs = Set(decisions.filter(\.isIncluded).map(\.segmentID))
         let keptSegments = segments.filter { keptSegmentIDs.contains($0.segmentID) }
         let includedChannels = includedChannelIndices(
@@ -145,6 +158,9 @@ nonisolated enum EEGAnalysisEngine {
         )
     }
 
+    /// Returns an export-sized copy, omitting detail arrays the user did not request.
+    /// Summary values and configuration remain intact; analysis is not recomputed.
+    /// Optional.map transforms an existing result while preserving nil when absent.
     static func exportResult(
         _ result: EEGAnalysisResult,
         options: EEGAnalysisExportOptions
@@ -178,6 +194,9 @@ nonisolated enum EEGAnalysisEngine {
         )
     }
 
+    /// Builds a rectangular table of text cells, including its header row.
+    /// This does not quote CSV text or write a file; the export layer does that.
+    /// Channel numbers in the table are one-based display labels, unlike array indices.
     static func csvRows(
         for result: EEGAnalysisResult,
         options: EEGAnalysisExportOptions
@@ -194,6 +213,8 @@ nonisolated enum EEGAnalysisEngine {
             "value"
         ]]
 
+        /// Appends one recording-level key/value row using the shared nine-column schema.
+        /// This nested function captures and mutates the enclosing rows array.
         func appendSummary(_ metric: String, _ value: CustomStringConvertible) {
             rows.append(["summary", "recording", "", "", "", "", "", metric, "\(value)"])
         }
@@ -268,6 +289,10 @@ nonisolated enum EEGAnalysisEngine {
 
     // MARK: - Segments
 
+    /// Partitions the recording into adjacent, nonoverlapping analysis windows.
+    /// Seconds are rounded to samples, with at least one sample per window. End
+    /// indices are inclusive, and the last window may be shorter. Invalid input
+    /// with no samples or a nonpositive sample rate produces no segments.
     private static func temporarySegments(
         for signal: MFFSignalData,
         lengthSeconds: Double
@@ -301,6 +326,9 @@ nonisolated enum EEGAnalysisEngine {
         return segments
     }
 
+    /// Joins health results to artifact features by stable segment ID. A segment
+    /// is retained only if its grade is allowed and measured overlap is within the
+    /// threshold. Missing artifact assessment is recorded as nil, not measured zero.
     private static func segmentDecisions(
         healthResults: [SegmentHealthResult],
         featuresBySegmentID: [String: SegmentHealthFeatures],
@@ -341,6 +369,8 @@ nonisolated enum EEGAnalysisEngine {
         }
     }
 
+    /// Counts inclusion/rejection outcomes and sums durations in seconds. Health
+    /// and artifact rejection counts may overlap: one segment can fail both checks.
     private static func segmentSummary(decisions: [EEGAnalysisSegmentDecision]) -> EEGAnalysisSegmentSummary {
         let included = decisions.filter(\.isIncluded)
         return EEGAnalysisSegmentSummary(
@@ -353,6 +383,9 @@ nonisolated enum EEGAnalysisEngine {
         )
     }
 
+    /// Converts selected detectors’ event-centered windows into inclusive sample
+    /// intervals. Starts round down, ends round up, and both are clamped to the
+    /// recording. The output is sorted by start; overlapping events remain separate.
     private static func artifactIntervals(
         for sources: [EEGArtifactRejectionSource],
         selectedSourceIDs: Set<String>,
@@ -392,6 +425,10 @@ nonisolated enum EEGAnalysisEngine {
 
     // MARK: - Spectral power
 
+    /// Computes each retained channel’s band powers concurrently, then averages
+    /// those values for the recording. Returns nil for missing inputs, cancellation
+    /// or no usable spectra. Topography arrays retain the recording’s full channel
+    /// index space, using zero at channels absent from this analysis.
     private static func spectralAnalysis(
         signal: MFFSignalData,
         segments: [SegmentHealthInputSegment],
@@ -479,6 +516,10 @@ nonisolated enum EEGAnalysisEngine {
         var binHz: Double
     }
 
+    /// Builds one channel’s averaged spectrum and integrates each requested band.
+    /// Relative power divides by the sum of requested band powers, not by all FFT
+    /// bins; overlapping bands can count the same frequency twice in that total.
+    /// Returns nil when cancelled or when no usable Fourier windows exist.
     private static func spectralChannelWork(
         signal: MFFSignalData,
         segments: [SegmentHealthInputSegment],
@@ -503,6 +544,8 @@ nonisolated enum EEGAnalysisEngine {
         let bandPowers = bands.map { band in
             bandPower(spectrum.power, binHz: spectrum.binHz, low: band.lowHz, high: band.highHz)
         }
+        // The floor protects division and logarithms from zero; it is not a measured
+        // noise floor and can make a zero-power result report a tiny positive total.
         let total = max(bandPowers.reduce(0, +), 1e-12)
         let values = zip(bands, bandPowers).map { band, power in
             EEGSpectralBandValue(
@@ -527,6 +570,10 @@ nonisolated enum EEGAnalysisEngine {
 
     // MARK: - Connectivity
 
+    /// Creates single-channel nodes and region nodes, then computes pairs within
+    /// each scope. A region’s trace is the sample-wise mean of its valid channels.
+    /// No channel-to-region pairs are produced. Returns nil when the requested
+    /// configuration or usable data yields no pairs.
     private static func connectivityAnalysis(
         signal: MFFSignalData,
         segments: [SegmentHealthInputSegment],
@@ -606,6 +653,9 @@ nonisolated enum EEGAnalysisEngine {
         var spectra: [BandWindowSpectrum]
     }
 
+    /// Computes band-limited complex Fourier windows for every node in parallel.
+    /// Optional work slots let failed/cancelled nodes be omitted. Stored offsets
+    /// restore input order regardless of the order workers finish.
     private static func spectra(
         for nodes: [EEGConnectivityNode],
         signal: MFFSignalData,
@@ -646,6 +696,10 @@ nonisolated enum EEGAnalysisEngine {
             .map { (node: $0.node, spectra: $0.spectra) }
     }
 
+    /// Evaluates each unordered pair once (A–B, never A–A or a second B–A).
+    /// Workers fill separate slots; the final sort preserves predictable pair order.
+    /// Progress is scaled into the caller’s stage interval. Cancelled work may leave
+    /// slots empty, so callers must account for cancellation before publication.
     private static func pairResults(
         from spectra: [(node: EEGConnectivityNode, spectra: [BandWindowSpectrum])],
         metrics: [EEGConnectivityMetric],
@@ -663,6 +717,8 @@ nonisolated enum EEGAnalysisEngine {
                 pairIndex += 1
             }
         }
+        // Freeze the pair list before concurrent closures capture it. Each tuple
+        // records the destination slot as well as the two source nodes.
         let finalizedPairIndices = pairIndices
 
         let pairCount = max(finalizedPairIndices.count, 1)
@@ -715,6 +771,10 @@ nonisolated enum EEGAnalysisEngine {
         var result: EEGConnectivityPairResult?
     }
 
+    /// Reduces corresponding complex windows into the requested connectivity metrics.
+    /// Inputs must describe matching windows and frequency bins; unequal lengths
+    /// are truncated to their common prefix, not aligned by time metadata. Small
+    /// denominators are guarded, and undefined numeric outputs are converted to zero.
     private static func connectivityMetrics(
         spectraA: [BandWindowSpectrum],
         spectraB: [BandWindowSpectrum],
@@ -755,6 +815,8 @@ nonisolated enum EEGAnalysisEngine {
                 let bi = b.imag[bin]
                 let pxx = ar * ar + ai * ai
                 let pyy = br * br + bi * bi
+                // Multiply A by the complex conjugate of B. Its magnitude reflects joint
+                // amplitude; its angle is their phase difference at this frequency.
                 let re = ar * br + ai * bi
                 let im = ai * br - ar * bi
                 sumPxx += pxx
@@ -771,6 +833,8 @@ nonisolated enum EEGAnalysisEngine {
                         plvBinIm.append(contentsOf: repeatElement(0, count: bin - plvBinIm.count + 1))
                         plvBinCounts.append(contentsOf: repeatElement(0, count: bin - plvBinCounts.count + 1))
                     }
+                    // Normalize to a unit vector so PLV measures phase agreement rather than
+                    // signal amplitude. Repeated windows add vectors pointing in that phase.
                     plvBinRe[bin] += re / magnitude
                     plvBinIm[bin] += im / magnitude
                     plvBinCounts[bin] += 1
@@ -799,6 +863,8 @@ nonisolated enum EEGAnalysisEngine {
                     contributingBins += 1
                 }
                 value = contributingBins > 0 ? bandPLV / Double(contributingBins) : 0
+            // Opposite imaginary signs cancel in the numerator, while the denominator
+            // keeps their absolute weights; consistent nonzero lag approaches one.
             case .weightedPhaseLagIndex:
                 value = absImagCross > 1e-12 ? abs(crossIm) / absImagCross : 0
             case .amplitudeEnvelopeCorrelation:
@@ -814,6 +880,10 @@ nonisolated enum EEGAnalysisEngine {
         var imag: [Double]
     }
 
+    /// Returns complex coefficients for the selected frequency band in every full
+    /// window. Windows overlap by 50%, stay inside each segment, are demeaned and
+    /// Hann-tapered. DC and Nyquist bins are excluded. nil means invalid setup; an
+    /// empty array means setup succeeded but no complete window fit.
     private static func bandWindowSpectra(
         signal: MFFSignalData,
         segments: [SegmentHealthInputSegment],
@@ -879,6 +949,11 @@ nonisolated enum EEGAnalysisEngine {
 
     // MARK: - FFT helpers
 
+    /// Averages squared Fourier magnitudes over full, half-overlapping windows.
+    /// The provider returns one sample or nil; missing/nonfinite samples become zero,
+    /// and windows with fewer than half their samples valid are skipped. The output
+    /// is raw averaged squared magnitude, not a power spectral density normalized
+    /// by sample rate or window energy. Returns nil if no usable window remains.
     private static func averagedPowerSpectrum(
         samplesProvider: (Int) -> Float?,
         samplingRate: Double,
@@ -925,6 +1000,9 @@ nonisolated enum EEGAnalysisEngine {
                     start += step
                     continue
                 }
+                // Subtract the mean to reduce DC; taper the edges to reduce leakage caused
+                // by treating each finite window as a periodically repeating signal.
+                // The zero imaginary input embeds real EEG samples in a complex transform.
                 let mean = vDSP.mean(realInput)
                 realInput = vDSP.multiply(vDSP.add(-mean, realInput), window)
                 let transformed = dft.transform(real: realInput, imaginary: imaginaryInput)
@@ -945,6 +1023,9 @@ nonisolated enum EEGAnalysisEngine {
         return (averagePower, samplingRate / Double(fftLength))
     }
 
+    /// Chooses a power-of-two transform length near two seconds, limited by the
+    /// longest segment and a 4096-sample cap. The minimum is 16 even when segments
+    /// are shorter; the window loops then produce no complete windows.
     private static func analysisFFTLength(
         samplingRate: Double,
         segments: [SegmentHealthInputSegment]
@@ -961,6 +1042,9 @@ nonisolated enum EEGAnalysisEngine {
         return length
     }
 
+    /// Sums positive-frequency bins spanning the requested Hz interval. Bounds
+    /// round outward to include neighboring bins; DC is excluded. An empty or
+    /// nonoverlapping range returns zero. This is a bin sum, not an integral times Hz.
     private static func bandPower(_ spectrum: [Double], binHz: Double, low: Double, high: Double) -> Double {
         guard binHz > 0, !spectrum.isEmpty else { return 0 }
         let lowBin = max(Int((low / binHz).rounded(.down)), 1)
@@ -975,12 +1059,15 @@ nonisolated enum EEGAnalysisEngine {
 
     // MARK: - Common helpers
 
+    /// Keeps nonempty signal rows that are not explicitly excluded. This selects
+    /// channels only; it does not check equal row lengths or finite sample values.
     private static func includedChannelIndices(in signal: MFFSignalData, excluding excluded: Set<Int>) -> [Int] {
         signal.data.indices
             .filter { !excluded.contains($0) && !signal.data[$0].isEmpty }
             .sorted()
     }
 
+    /// Uses recorded channel metadata when available, otherwise a one-based Ch label.
     private static func channelName(for channelIndex: Int, in signal: MFFSignalData) -> String {
         if let names = signal.channelNames,
            names.indices.contains(channelIndex),
@@ -990,6 +1077,9 @@ nonisolated enum EEGAnalysisEngine {
         return "Ch \(channelIndex + 1)"
     }
 
+    /// Averages finite, in-bounds samples across a node’s channels at one time.
+    /// A channel node has one member; a region has several. If none contributes,
+    /// returns zero so the Fourier input still has a value at this time point.
     private static func nodeValue(signal: MFFSignalData, node: EEGConnectivityNode, sample: Int) -> Float {
         var sum = 0.0
         var count = 0
@@ -1006,11 +1096,16 @@ nonisolated enum EEGAnalysisEngine {
         return count > 0 ? Float(sum / Double(count)) : 0
     }
 
+    /// Returns the arithmetic mean, using zero for empty or nonfinite results.
+    /// Nonfinite elements are not removed before summing.
     private static func mean(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         return clean(values.reduce(0, +) / Double(values.count))
     }
 
+    /// Computes Pearson correlation on the common prefix of two arrays. Subtracting
+    /// each mean removes offsets; dividing by both centered vector lengths removes
+    /// scale. Returns nil for fewer than two pairs or effectively constant data.
     private static func pearson(_ a: [Double], _ b: [Double]) -> Double? {
         let count = min(a.count, b.count)
         guard count > 1 else { return nil }
@@ -1031,6 +1126,7 @@ nonisolated enum EEGAnalysisEngine {
         return clean(numerator / denominator)
     }
 
+    /// Replaces NaN and infinity with zero before values enter report/export models.
     private static func clean(_ value: Double) -> Double {
         value.isFinite ? value : 0
     }

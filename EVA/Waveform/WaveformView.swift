@@ -69,8 +69,10 @@ enum MRIGradientCategory: String, CaseIterable, Identifiable {
     // Keep the persisted raw value stable; `label` is the user-facing name.
     case fastr = "FASTR"
 
+    /// Stable category identity for SwiftUI pickers.
     var id: String { rawValue }
 
+    /// User-facing name of the gradient-correction family.
     var label: String {
         switch self {
         case .template: return "Template"
@@ -124,6 +126,7 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
     /// Weighted average artifact regression — wAAS plus a least-squares fit.
     case waar = "wAAR"
 
+    /// Persisted method identity, also used by SwiftUI lists.
     var id: String { rawValue }
 
     /// Display name. Kept separate from `rawValue`, which is the persistence key
@@ -142,6 +145,7 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Group the method by its user-facing family; this is distinct from its execution engine.
     var category: MRIGradientCategory {
         switch self {
         case .aas, .allenIAR, .mas, .mar, .waas, .waar: return .template
@@ -164,6 +168,7 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Choose the implementation engine that will execute this method.
     var engine: MRIGradientEngine {
         switch self {
         case .aas, .allenIAR: return .averageTemplate
@@ -199,6 +204,11 @@ enum MRIGradientMethod: String, CaseIterable, Identifiable {
     var usesDonorWindow: Bool { self != .allenIAR }
 }
 
+/// Composition point for a single recording window. Read RecordingStore for shared
+/// per-recording state and WaveformUIModels for transient presentation state.
+/// Feature models own processing settings/results; the extensions in this subsystem
+/// connect them to actions, sheets and history. A view refresh is not a processing
+/// commit. Follow WaveformHistoryRail when tracing how changed results become history.
 struct WaveformView: View {
     var recording: MFFRecording
     /// Non-nil only when this window was created by "Fork to New Window" —
@@ -231,23 +241,31 @@ struct WaveformView: View {
     var traceOverflowHeightPreference = EVAGeneralPreferences.defaultTraceOverflowHeight
     @AppStorage(EVAGeneralPreferences.traceClipIndicatorsKey) var showsTraceClipIndicators = false
 
+    // @State keeps the observable reference stable across SwiftUI view reconstruction.
+    // The forwarding properties below mutate that reference, so their setters are
+    // nonmutating even though WaveformView itself is a value-type struct.
     @State var recordingStore = RecordingStore()
+    /// Amplitude represented by half of a channel row, in microvolts.
     var amplitudeScale: Double {
         get { recordingStore.amplitudeScale }
         nonmutating set { recordingStore.amplitudeScale = newValue }
     }
+    /// Horizontal magnification applied to the plotted sample positions.
     var timeScale: Double {
         get { recordingStore.timeScale }
         nonmutating set { recordingStore.timeScale = newValue }
     }
+    /// Whether rows fit the viewport or maintain a requested visible channel count.
     var waveformDensityMode: WaveformDensityMode {
         get { recordingStore.waveformDensityMode }
         nonmutating set { recordingStore.waveformDensityMode = newValue }
     }
+    /// Selected display-only channel subset; nil means all channels.
     var displayedChannelSetID: ChannelSet.ID? {
         get { recordingStore.displayedChannelSetID }
         nonmutating set { recordingStore.displayedChannelSetID = newValue }
     }
+    /// Measured height available to the vertical channel viewport.
     var verticalWaveformViewportHeight: CGFloat {
         get { recordingStore.verticalWaveformViewportHeight }
         nonmutating set { recordingStore.verticalWaveformViewportHeight = newValue }
@@ -258,17 +276,21 @@ struct WaveformView: View {
     var waveformTimeMarkerStyle: WaveformTimeMarkerStyle {
         WaveformTimeMarkerStyleCache.style(for: waveformTimeMarkerStyleData)
     }
+    /// Decode the saved zero-line style through a cache shared by repeated row rendering.
     var waveformZeroLineColor: WaveformZeroLineColor {
         WaveformZeroLineColorCache.color(for: waveformZeroLineColorData)
     }
+    /// Horizontal scroll offset in plot-content points.
     var horizontalOffset: CGFloat {
         get { recordingStore.horizontalOffset }
         nonmutating set { recordingStore.horizontalOffset = newValue }
     }
+    /// Measured visible width of the horizontal plot viewport.
     var horizontalViewportWidth: CGFloat {
         get { recordingStore.horizontalViewportWidth }
         nonmutating set { recordingStore.horizontalViewportWidth = newValue }
     }
+    /// Shared SwiftUI scroll-position handle used for programmatic jumps.
     var horizontalScrollPosition: ScrollPosition {
         get { recordingStore.horizontalScrollPosition }
         nonmutating set { recordingStore.horizontalScrollPosition = newValue }
@@ -281,10 +303,12 @@ struct WaveformView: View {
     // `recordingStore.selection`. These forwarders keep every existing call site
     // in the ~20 `extension WaveformView` files working unchanged; they come out
     // as children start reading the store directly.
+    /// Visibility of the events side panel.
     var showsEventsPanel: Bool {
         get { recordingStore.events.showsEventsPanel }
         nonmutating set { recordingStore.events.showsEventsPanel = newValue }
     }
+    /// Selected event identity shared by the track and events list.
     var selectedEventID: MFFEvent.ID? {
         get { recordingStore.events.selectedEventID }
         nonmutating set { recordingStore.events.selectedEventID = newValue }
@@ -294,42 +318,52 @@ struct WaveformView: View {
         get { recordingStore.selection.highlightedArtifactEvent }
         nonmutating set { recordingStore.selection.highlightedArtifactEvent = newValue }
     }
+    /// Tint for the currently highlighted event span.
     var highlightedArtifactColor: Color {
         get { recordingStore.selection.highlightedArtifactColor }
         nonmutating set { recordingStore.selection.highlightedArtifactColor = newValue }
     }
+    /// Event codes selected for category/group operations.
     var selectedEventCodes: Set<String> {
         get { recordingStore.events.selectedEventCodes }
         nonmutating set { recordingStore.events.selectedEventCodes = newValue }
     }
+    /// Cached merge of recording events and generated overlays for the current display.
     private var displayedEventsCache: WaveformDisplayedEventsCache {
         get { recordingStore.events.displayedEventsCache }
         nonmutating set { recordingStore.events.displayedEventsCache = newValue }
     }
+    /// Cached event-source summary used to determine the marker lane count.
     private var eventTrackSourceSummary: EventTrackSourceSummary {
         get { recordingStore.events.eventTrackSourceSummary }
         nonmutating set { recordingStore.events.eventTrackSourceSummary = newValue }
     }
+    /// Sample index driving the topography cursor; nil hides it.
     var topomapSample: Int? {
         get { recordingStore.selection.topomapSample }
         nonmutating set { recordingStore.selection.topomapSample = newValue }
     }
+    /// Inclusive selected sample interval, or nil when no interval is selected.
     var selectedSampleRange: ClosedRange<Int>? {
         get { recordingStore.selection.selectedSampleRange }
         nonmutating set { recordingStore.selection.selectedSampleRange = newValue }
     }
+    /// Drag anchor in sample coordinates while selecting a waveform interval.
     var dragSelectionStartSample: Int? {
         get { recordingStore.selection.dragSelectionStartSample }
         nonmutating set { recordingStore.selection.dragSelectionStartSample = newValue }
     }
+    /// Current drag endpoint in sample coordinates.
     var dragSelectionEndSample: Int? {
         get { recordingStore.selection.dragSelectionEndSample }
         nonmutating set { recordingStore.selection.dragSelectionEndSample = newValue }
     }
+    /// Sample under the most recent event-track context click.
     var eventTrackContextSample: Int? {
         get { recordingStore.selection.eventTrackContextSample }
         nonmutating set { recordingStore.selection.eventTrackContextSample = newValue }
     }
+    /// Current per-sample hover information, cleared when hovering ends.
     var waveformHoverInfo: WaveformHoverInfo? {
         get { recordingStore.selection.waveformHoverInfo }
         nonmutating set { recordingStore.selection.waveformHoverInfo = newValue }
@@ -394,10 +428,12 @@ struct WaveformView: View {
     @State var epoching: EpochingViewModel
     // Moved to `EpochingViewModel` so the shared invalidation cascade can reach
     // them headlessly; forwarders keep existing call sites unchanged.
+    /// Concatenated unaveraged epochs retained by the epoching model.
     var segmentedEpochSignal: MFFSignalData? {
         get { epoching.segmentedEpochSignal }
         nonmutating set { epoching.segmentedEpochSignal = newValue }
     }
+    /// Metadata describing each interval in the concatenated unaveraged epoch signal.
     var segmentedEpochSegments: [EpochSegment] {
         get { epoching.segmentedEpochSegments }
         nonmutating set { epoching.segmentedEpochSegments = newValue }
@@ -424,37 +460,45 @@ struct WaveformView: View {
     @State var wica: WICAViewModel
     // B4: status and physio display state now live on `recordingStore.status` /
     // `recordingStore.physio`.
+    /// Whether the current channel-operation status should be styled as an error.
     var channelStatusIsError: Bool {
         get { recordingStore.status.channelStatusIsError }
         nonmutating set { recordingStore.status.channelStatusIsError = newValue }
     }
     // Scrollable status history (newest first), shown when the status area is clicked.
+    /// Shared bounded history of status messages.
     private var statusHistory: [StatusHistoryEntry] {
         get { recordingStore.status.statusHistory }
         nonmutating set { recordingStore.status.statusHistory = newValue }
     }
+    /// Last recorded text per source, used to avoid logging unchanged messages repeatedly.
     private var lastRecordedStatusBySource: [String: String] {
         get { recordingStore.status.lastRecordedStatusBySource }
         nonmutating set { recordingStore.status.lastRecordedStatusBySource = newValue }
     }
     // Physio (PNS) channel display. Shown by default when present; pinned below
     // the EEG channels and synced to the EEG time axis.
+    /// Visibility of the pinned physiological-channel pane.
     var showsPhysioChannels: Bool {
         get { recordingStore.physio.showsPhysioChannels }
         nonmutating set { recordingStore.physio.showsPhysioChannels = newValue }
     }
+    /// Amplitude ranges used to scale physiological traces.
     var physioRanges: [ClosedRange<Float>] {
         get { recordingStore.physio.ranges }
         nonmutating set { recordingStore.physio.ranges = newValue }
     }
+    /// Per-channel physiological display magnification overrides.
     var physioScaleFactors: [Int: Double] {
         get { recordingStore.physio.scaleFactors }
         nonmutating set { recordingStore.physio.scaleFactors = newValue }
     }
+    /// Physiological channels using the maximum-scale display option.
     var physioMaxScaledChannels: Set<Int> {
         get { recordingStore.physio.maxScaledChannels }
         nonmutating set { recordingStore.physio.maxScaledChannels = newValue }
     }
+    /// Indices of physiological traces whose display polarity is inverted.
     var physioFlippedPolarity: Set<Int> {
         get { recordingStore.physio.flippedPolarity }
         nonmutating set { recordingStore.physio.flippedPolarity = newValue }
@@ -482,6 +526,7 @@ struct WaveformView: View {
     @State var replay = ReplayController()
 
     // Per-channel state, shared with the menu-bar Channels commands.
+    /// Shared channel visibility, bad-channel, interpolation and health state.
     var channels: ChannelModel { recordingStore.channels }
     /// Serializes major processing operations (filter, gradient, ICA, wavelet
     /// reduction, artifact cleaning, channel/segment health, PSA, BCG, EEG
@@ -490,6 +535,7 @@ struct WaveformView: View {
     /// that only hold `store` can reach it too.
     var processingQueue: ProcessingQueue { recordingStore.processingQueue }
     @State var electrodeGeometry: ElectrodeGeometry?
+    /// Latest channel-operation status text.
     var channelStatusMessage: String? {
         get { recordingStore.status.channelStatusMessage }
         nonmutating set { recordingStore.status.channelStatusMessage = newValue }
@@ -537,42 +583,52 @@ struct WaveformView: View {
         KeyPathComparator(\AverageSNRRow.category, order: .forward)
     ]
     // B4: category-group popover state now lives on `recordingStore.events`.
+    /// Event codes selected while composing a category group.
     var categoryGroupSelectedCodes: Set<String> {
         get { recordingStore.events.categoryGroupSelectedCodes }
         nonmutating set { recordingStore.events.categoryGroupSelectedCodes = newValue }
     }
+    /// Visibility of the category-group editor.
     var showsCategoryGroupPopover: Bool {
         get { recordingStore.events.showsCategoryGroupPopover }
         nonmutating set { recordingStore.events.showsCategoryGroupPopover = newValue }
     }
+    /// Current category grouping strategy.
     var categoryGroupMode: CategoryGroupMode {
         get { recordingStore.events.categoryGroupMode }
         nonmutating set { recordingStore.events.categoryGroupMode = newValue }
     }
+    /// Editable name for the category group being created.
     var categoryGroupName: String {
         get { recordingStore.events.categoryGroupName }
         nonmutating set { recordingStore.events.categoryGroupName = newValue }
     }
+    /// Source event code used by the regular-expression grouping editor.
     var categoryRegexSourceCode: String {
         get { recordingStore.events.categoryRegexSourceCode }
         nonmutating set { recordingStore.events.categoryRegexSourceCode = newValue }
     }
+    /// Editable regular expression used to derive category groups.
     var categoryRegexPattern: String {
         get { recordingStore.events.categoryRegexPattern }
         nonmutating set { recordingStore.events.categoryRegexPattern = newValue }
     }
+    /// Event metadata field tested by the category regular expression.
     var categoryRegexMatchField: CategoryRegexMatchField {
         get { recordingStore.events.categoryRegexMatchField }
         nonmutating set { recordingStore.events.categoryRegexMatchField = newValue }
     }
+    /// Draft text in the physiological-channel rename editor.
     var physioRenameText: String {
         get { recordingStore.physio.renameText }
         nonmutating set { recordingStore.physio.renameText = newValue }
     }
+    /// Visibility of the full status-history presentation.
     var showsStatusHistory: Bool {
         get { recordingStore.status.showsStatusHistory }
         nonmutating set { recordingStore.status.showsStatusHistory = newValue }
     }
+    /// Visibility of the recent processing-history presentation.
     var showsRecentProcessingHistory: Bool {
         get { recordingStore.status.showsRecentProcessingHistory }
         nonmutating set { recordingStore.status.showsRecentProcessingHistory = newValue }
@@ -612,6 +668,7 @@ struct WaveformView: View {
     /// fixed stride of 5 samples at 1000 Hz displayed about 200 plotted points/s.
     private let referenceDisplaySampleRate = 1_000.0
     private let referenceDisplaySampleStride = 5
+    /// Derive row geometry from the viewport height, visible channel count and density mode.
     var waveformDensityGeometry: WaveformDensityGeometry {
         WaveformDensityLayout.geometry(
             mode: WaveformDensityLayout.effectiveMode(
@@ -621,6 +678,7 @@ struct WaveformView: View {
             viewportHeight: verticalWaveformViewportHeight
         )
     }
+    /// Height of the drawable trace area within one channel row.
     var channelRowHeight: CGFloat { waveformDensityGeometry.rowHeight }
     /// Headroom a trace may travel past its row before the canvas clips it.
     ///
@@ -635,6 +693,7 @@ struct WaveformView: View {
         return max(CGFloat(traceOverflowHeightPreference), 0) * channelRowHeight / baseline
     }
     private let eventTrackHeight: CGFloat = 64
+    /// Vertical gap separating adjacent channel rows.
     var rowSpacing: CGFloat { waveformDensityGeometry.rowSpacing }
     let labelColumnWidth: CGFloat = 120
     private let geometryUpdateQuantum: CGFloat = 0.5
@@ -648,6 +707,7 @@ struct WaveformView: View {
     let physioScaleOptions: [Double] = [8, 16, 32, 64]
     let physioScaleBounds: ClosedRange<Double> = 1...64
 
+    /// Intersect allowed sensitivity with the range reachable at the current row height.
     private var sensitivitySliderBounds: ClosedRange<Double> {
         let physicallyReachableLower = WaveformScaleUnits.microvoltsPerMillimeter(
             amplitudeScale: amplitudeScaleBounds.lowerBound,
@@ -662,10 +722,12 @@ struct WaveformView: View {
         return lower...upper
     }
 
+    /// Express sensitivity limits in logarithmic slider coordinates.
     private var amplitudeScaleSliderBounds: ClosedRange<Double> {
         log10(sensitivitySliderBounds.lowerBound)...log10(sensitivitySliderBounds.upperBound)
     }
 
+    /// Bridge the logarithmic slider to physical sensitivity: read log10, write 10 to that power.
     private var amplitudeScaleSliderBinding: Binding<Double> {
         Binding(
             get: {
@@ -680,6 +742,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Expose artifact commands as bindings and availability for the focused window’s menus.
     private var artifactMenuControls: ArtifactMenuControls {
         ArtifactMenuControls(
             artifacts: template.definedArtifacts,
@@ -693,6 +756,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Expose the display-channel selection and compatible layout context to menu commands.
     private var displayChannelsControls: DisplayChannelsControls {
         DisplayChannelsControls(
             selectedSetID: displayChannelSetBinding,
@@ -701,6 +765,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Expose epoch display toggles and the current averaged-data mode to menu commands.
     private var psaControls: PSAViewControls {
         PSAViewControls(
             showButterfly: $epoching.showsButterflyPlot,
@@ -710,6 +775,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Expose segment-health visibility, refresh requests and progress to menu commands.
     private var segmentHealthControls: SegmentHealthViewControls {
         SegmentHealthViewControls(
             showsHealth: $segHealth.shows,
@@ -722,12 +788,14 @@ struct WaveformView: View {
         )
     }
 
+    /// Disable segment-health controls when either the active result or loaded file is averaged.
     private var segmentHealthIsAvailable: Bool {
         !epoching.isAveraged
             && epoching.epochedSignal?.isAveraged != true
             && recording.signal?.isAveraged != true
     }
 
+    /// Expose physiological-channel visibility and the combined real/synthetic channel count.
     private var physioViewControls: PhysioViewControls {
         let realCount = recording.pnsSignal?.numberOfChannels ?? 0
         let total = realCount + syntheticPNSChannels.count
@@ -738,6 +806,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Expose channel-health actions through bindings to the shared channel store.
     private var channelHealthControls: ChannelHealthViewControls {
         ChannelHealthViewControls(
             showsHealth: Binding(
@@ -794,10 +863,12 @@ struct WaveformView: View {
         _waveletExplorer = State(wrappedValue: WaveletArtifactExplorerViewModel(store: store))
     }
 
+    /// Build the recording window and attach its request and lifecycle handlers.
     var body: some View {
         installEventHandlers(on: bodyChrome)
     }
 
+    /// Choose loading/error/data content and publish focused-window controls to the menu system.
     private var bodyChrome: some View {
         Group {
             if recording.isLoading {
@@ -828,8 +899,9 @@ struct WaveformView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let rawSignal = recording.signal {
-                // Processing pipeline: raw → gradient-corrected → ICA-cleaned →
-                // band-pass → artifact-cleaned → interpolated-channel overlay.
+                // Processing pipeline: raw → gradient → BCG → ICA → filtering →
+                // artifact cleaning → W-ICA → wavelet reduction → interpolation.
+                // Missing or disabled optional results fall back to the prior stage.
                 // `base` is what filtering builds on; `preArtifact` is the
                 // reversible source used by Clean Artifacts.
                 let base = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? rawSignal
@@ -951,6 +1023,7 @@ struct WaveformView: View {
         DispatchQueue.main.async(execute: action)
     }
 
+    /// Translate request-counter changes into actions and reset interpolation caches when repairs are removed.
     private func installRequestHandlers(on content: some View) -> some View {
         content
         .onChange(of: resetToOriginalRequest) { _, _ in
@@ -995,6 +1068,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Attach epoch-display updates, initial loading and teardown to the view’s lifecycle.
     private func installEpochAndLifecycleHandlers(on content: some View) -> some View {
         content
         .onChange(of: template.deletionRequest) { _, artifactID in
@@ -1035,6 +1109,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Load the recording, initialize display/history context and then apply any fork or batch request.
     private func loadRecordingIfNeeded() async {
         await recording.loadIfNeeded()
         if electrodeGeometry == nil {
@@ -1052,7 +1127,7 @@ struct WaveformView: View {
     /// Publishes this window's electrode layout to `ChannelSetStore`, the
     /// single-instance Channel Sets editor's data source.
     ///
-    /// Two call sites, both direct writes rather than routed through
+    /// The call sites write directly rather than routing through
     /// `@FocusedValue`/`.commands` — a `ChannelSetFocusMirror` living inside
     /// `.commands` was tried first (2026-08-15) and found broken by manual
     /// test: the editor read "no sensor layout available" even with a
@@ -1209,8 +1284,8 @@ struct WaveformView: View {
     /// call folds in ahead of whatever this session does. See that method for
     /// why the nodes it creates are shown but not navigable.
     ///
-    /// Only reads an ICA payload digest, matching what the *live* path
-    /// disambiguates (`currentPayloadDigests()`) — artifact cleaning's step
+    /// Reads ICA and trial-exclusion payload digests to distinguish histories
+    /// whose step parameters match but whose payloads differ. Artifact cleaning’s step
     /// parameters are already sufficient on their own, live or on disk.
     private func seedProcessingHistoryFromDisk() {
         guard let script = EVAProcessingScriptXML.read(fromPackage: recording.packageURL),
@@ -1294,10 +1369,9 @@ struct WaveformView: View {
 
     /// Honor each PNS sensor's own `<positiveUp>` convention as the initial
     /// polarity (channels marked negative-up start flipped), instead of
-    /// drawing every physio trace positive-up like EEG. Only seeds channels
-    /// the user hasn't already touched via the per-channel "Flip Polarity"
-    /// control, and only runs once per load (`physioFlippedPolarity` starts
-    /// empty right before this on a fresh recording).
+    /// drawing every physio trace positive-up like EEG. Seeding is skipped if
+    /// any channel is already flipped; an empty set is the only guard here,
+    /// not a separate record of which controls the user has touched.
     private func seedPhysioPolarityDefaultsIfNeeded() {
         guard physioFlippedPolarity.isEmpty,
               let flags = recording.pnsSignal?.positiveUpFlags else { return }
@@ -1330,7 +1404,7 @@ struct WaveformView: View {
     }
 
     /// When the opened file was segmented or category-averaged by other software,
-    /// the reader already supplies `epoching.epochSegments`. Surface them through the same
+    /// the reader supplies segment metadata on the loaded signal. Surface it through the same
     /// state the in-app PSA pipeline uses, so the recording displays as discrete
     /// epochs (with stimulus-locked markers) instead of a misleading continuous
     /// strip with out-of-place events.
@@ -1421,6 +1495,8 @@ struct WaveformView: View {
         return (signal.events + overlays).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
+    /// Describe event-display inputs with a lightweight cache key, including overlay revisions.
+    /// Some collections use count and selected IDs rather than hashing every item.
     private func displayedEventsCacheKey(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool,
@@ -1454,6 +1530,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Rebuild the displayed-event cache only when its input key changes.
     private func refreshDisplayedEventsCache(
         for signal: MFFSignalData,
         includeContinuousOverlays: Bool,
@@ -1473,6 +1550,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Collect continuous-time user markers and optional artifact overlays, removing repeated IDs.
     private func continuousOverlayEventsForDisplay(includeArtifactOverlays: Bool = true) -> [MFFEvent] {
         var events = userMarkerEvents
         var seenIDs = Set(events.map(\.id))
@@ -1495,6 +1573,7 @@ struct WaveformView: View {
         return events
     }
 
+    /// Project continuous overlay events into each displayed epoch using the shared event mapper.
     private func epochedContinuousOverlayEvents(
         for signal: MFFSignalData,
         includeArtifactOverlays: Bool = true
@@ -1547,6 +1626,7 @@ struct WaveformView: View {
     }
 
     @ViewBuilder
+    /// Compose the toolbar and workspace, then attach sheets, analysis refreshes and history updates.
     private func content(
         for signal: MFFSignalData,
         base: MFFSignalData,
@@ -1685,6 +1765,7 @@ struct WaveformView: View {
     }
 
     @ViewBuilder
+    /// Arrange waveform, events and optional analysis panels for the current signal.
     private func waveformWorkspace(
         for signal: MFFSignalData,
         events: [MFFEvent],
@@ -1756,10 +1837,12 @@ struct WaveformView: View {
 
     // MARK: - Controls
 
+    /// Return toolbar text only when the user’s toolbar-label preference is enabled.
     private func toolbarButtonLabel(_ label: String) -> String? {
         showsToolbarButtonLabels ? label : nil
     }
 
+    /// Format amplitude with precision appropriate to its magnitude.
     private func formatAmplitudeScale(_ value: Double) -> String {
         if value < 100 {
             return String(Int(value.rounded()))
@@ -1770,6 +1853,7 @@ struct WaveformView: View {
         return String(Int((value / 100).rounded() * 100))
     }
 
+    /// Build processing menus and display controls, passing each operation its intended pipeline input.
     private func controls(for signal: MFFSignalData, base: MFFSignalData, wicaInput: MFFSignalData, waveletInput: MFFSignalData, continuousSignal: MFFSignalData) -> some View {
         HStack(spacing: 16) {
             toolbarScaleControls()
@@ -2088,6 +2172,7 @@ struct WaveformView: View {
     }
 
     @ViewBuilder
+    /// Build amplitude and optional time sliders plus the shared physical-units popover.
     func toolbarScaleControls(showsTimeScale: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -2149,6 +2234,7 @@ struct WaveformView: View {
     /// so neither truncates and both share one left edge.
     private var scaleReadoutWidth: CGFloat { 80 }
 
+    /// Convert the current half-row amplitude to nominal microvolts per millimeter.
     private var currentSensitivity: Double {
         WaveformScaleUnits.microvoltsPerMillimeter(
             amplitudeScale: amplitudeScale,
@@ -2156,18 +2242,22 @@ struct WaveformView: View {
         )
     }
 
+    /// Use the processed continuous signal for channel-set compatibility, falling back to loaded data.
     private var displayChannelSignal: MFFSignalData? {
         continuousProcessedSignal ?? recording.signal
     }
 
+    /// Number of channels available to the display-channel selector.
     private var displayChannelTotalCount: Int {
         displayChannelSignal?.numberOfChannels ?? 0
     }
 
+    /// Sensor-net identifier used to find compatible saved channel sets.
     private var displayChannelNetType: String? {
         recording.sensorLayout?.name
     }
 
+    /// Find saved channel sets compatible with this recording’s channel count and net type.
     private var compatibleDisplayChannelSets: [ChannelSet] {
         DisplayChannelsResolver.compatibleSets(
             from: ChannelSetStore.shared.allSets,
@@ -2176,6 +2266,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Resolve the selected saved set only if it is still compatible with the recording.
     private var activeDisplayChannelSet: ChannelSet? {
         DisplayChannelsResolver.resolvedSet(
             id: displayedChannelSetID,
@@ -2185,12 +2276,14 @@ struct WaveformView: View {
         )
     }
 
+    /// Count unique valid selected channels, otherwise use the full count with a minimum of one.
     var displayedChannelCount: Int {
         activeDisplayChannelSet?.channelIndices.reduce(into: Set<Int>()) { result, index in
             if (0..<displayChannelTotalCount).contains(index) { result.insert(index) }
         }.count ?? max(displayChannelTotalCount, 1)
     }
 
+    /// Route channel-set selection writes through the sensitivity-preserving setter.
     private var displayChannelSetBinding: Binding<ChannelSet.ID?> {
         Binding(
             get: { activeDisplayChannelSet?.id },
@@ -2198,10 +2291,12 @@ struct WaveformView: View {
         )
     }
 
+    /// Human-readable name of the active display subset, or the all-channel default.
     private var displayChannelSetSummary: String {
         "\(min(displayedChannelCount, displayChannelTotalCount)) of \(displayChannelTotalCount)"
     }
 
+    /// Validate a display-set selection and preserve physical sensitivity while row geometry changes.
     private func setDisplayedChannelSetID(_ id: ChannelSet.ID?) {
         let resolvedID = DisplayChannelsResolver.resolvedSet(
             id: id,
@@ -2217,15 +2312,18 @@ struct WaveformView: View {
         syncScaleUnitEntries()
     }
 
+    /// Present the shared channel-set utility and open its editor window.
     private func manageChannelSets() {
         ChannelsWindowModel.shared.present(tab: .channelSets)
         openWindow(id: EVAApp.channelSetsWindowID)
     }
 
+    /// Maximum selectable fixed density, constrained by available channels and the layout limit.
     private var densityMaximumCount: Int {
         min(max(displayChannelTotalCount, 1), WaveformDensityLayout.maximumChannelsPerScreen)
     }
 
+    /// Describe fit mode or the requested fixed count relative to available channels.
     private var densitySummary: String {
         switch waveformDensityMode {
         case .fit:
@@ -2237,6 +2335,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Route density-picker writes through the sensitivity-preserving setter.
     private var densityModeBinding: Binding<WaveformDensityMode> {
         Binding(
             get: { waveformDensityMode },
@@ -2244,6 +2343,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Map a numeric density slider onto a clamped fixed channel count.
     private var densityCountBinding: Binding<Double> {
         Binding(
             get: {
@@ -2260,6 +2360,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Change density while preserving physical sensitivity and refreshing the editable unit fields.
     private func setDensityMode(_ mode: WaveformDensityMode) {
         let bounded: WaveformDensityMode
         switch mode {
@@ -2276,6 +2377,7 @@ struct WaveformView: View {
         syncScaleUnitEntries()
     }
 
+    /// Accept meaningful viewport-height changes and preserve sensitivity as rows resize.
     private func updateVerticalWaveformViewportHeight(_ height: CGFloat) {
         let bounded = max(height, 1)
         guard abs(bounded - verticalWaveformViewportHeight) >= geometryUpdateQuantum else { return }
@@ -2290,6 +2392,7 @@ struct WaveformView: View {
         syncScaleUnitEntries()
     }
 
+    /// Clamp physical sensitivity, convert it into half-row amplitude and refresh the displayed value.
     private func setSensitivity(_ value: Double) {
         let bounded = min(
             max(value, sensitivitySliderBounds.lowerBound),
@@ -2303,6 +2406,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Format row pitch with one decimal for small rows and whole points for larger rows.
     private func formatRowPitch(_ value: CGFloat) -> String {
         value >= 20 ? String(format: "%.0f", value) : String(format: "%.1f", value)
     }
@@ -2466,6 +2570,7 @@ struct WaveformView: View {
         return rate > 0 ? rate : referenceDisplaySampleRate
     }
 
+    /// Refresh editable sensitivity/sweep text from the current numeric display settings.
     private func syncScaleUnitEntries() {
         sensitivityEntry = WaveformScaleUnits.format(
             WaveformScaleUnits.microvoltsPerMillimeter(
@@ -2479,6 +2584,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Apply positive numeric sensitivity text; restore the current value when input is invalid.
     private func applySensitivityEntry() {
         guard let value = Double(sensitivityEntry), value > 0 else {
             syncScaleUnitEntries()
@@ -2488,6 +2594,7 @@ struct WaveformView: View {
         syncScaleUnitEntries()
     }
 
+    /// Convert positive sweep-speed text into a clamped horizontal time scale.
     private func applySweepEntry() {
         guard let value = Double(sweepEntry), value > 0 else {
             syncScaleUnitEntries()
@@ -2508,10 +2615,12 @@ struct WaveformView: View {
         min(max(value, amplitudeScaleBounds.lowerBound), amplitudeScaleBounds.upperBound)
     }
 
+    /// Restrict horizontal zoom to the supported 0.2–8 range.
     private func clampedTimeScale(_ value: Double) -> Double {
         min(max(value, 0.2), 8)
     }
 
+    /// Build a compact two-column selector for averaged-data workspaces.
     func averagedModePicker() -> some View {
         // A 2×2 grid of buttons rather than one long segmented control: the
         // "Time-Frequency" label no longer truncates, and the control is far
@@ -2531,6 +2640,7 @@ struct WaveformView: View {
     }
 
     @ViewBuilder
+    /// Draw one workspace-mode button and distinguish the active mode.
     private func averagedModeButton(_ mode: EpochingViewModel.AveragedDisplayMode) -> some View {
         let selected = epoching.averagedDisplayMode == mode
         let label = Label(mode.rawValue, systemImage: mode.systemImage)
@@ -2548,6 +2658,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Combine recording identification, status reporting and optional averaged-data mode selection.
     func toolbarStatusAndModeControls(for signal: MFFSignalData) -> some View {
         HStack(alignment: .center, spacing: 10) {
             EVAWordmark()
@@ -2572,6 +2683,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Format the recording’s sensor net, channel count, rate, duration and display polarity.
     private func recordingToolbarSummary(for signal: MFFSignalData) -> String {
         var parts = [String]()
         if let netName = recording.sensorLayout?.name.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -2751,6 +2863,8 @@ struct WaveformView: View {
     // MARK: - Waveform area
 
     @ViewBuilder
+    /// Build aligned labels, marker lanes and scrolling traces, with pinned physiological channels.
+    /// All overlays use the same plot coordinates so selections and cursors track the signal.
     private func waveformArea(for signal: MFFSignalData, events: [MFFEvent], isShowingEpochs: Bool) -> some View {
         let plotWidth = plotWidth(for: signal)
         let displayStride = displaySampleStride(for: signal)
@@ -3002,12 +3116,14 @@ struct WaveformView: View {
         }
     }
 
+    /// Recompute event-source lane metadata only when its signature changes.
     private func refreshEventTrackSourceSummary(events: [MFFEvent], signature: EventTrackEventSignature) {
         guard eventTrackSourceSummary.signature != signature else { return }
         eventTrackSourceSummary = EventTrackSourceSummary(events: events, signature: signature)
     }
 
     @ViewBuilder
+    /// Select averages, single-trial, time-frequency or waveform content for the active workspace mode.
     private func workspaceContent(
         displayMode: EpochingViewModel.AveragedDisplayMode,
         signal: MFFSignalData,
@@ -3237,6 +3353,7 @@ struct WaveformView: View {
         )
     }
 
+    /// Invalidate the recording session, request task cancellation and release recording-specific state.
     private func tearDownRecordingSessionForClose() {
         recordingSessionID = UUID()
         cancelInFlightRecordingTasks()
@@ -3244,6 +3361,8 @@ struct WaveformView: View {
         recording.tearDownForClose()
     }
 
+    /// Request cancellation of outstanding work and invalidate history rebuild ownership.
+    /// Task cancellation is cooperative; clearing a handle does not itself wait for its worker to exit.
     private func cancelInFlightRecordingTasks() {
         wica.cancel()
         waveletExplorerTask?.cancel()
@@ -3298,6 +3417,7 @@ struct WaveformView: View {
         rhythmicityExplorer.resetForClose()
     }
 
+    /// Release model results, selections, caches and window registrations when closing a recording.
     private func clearRecordingStateForClose() {
         removeOptionKeyMonitor()
         // Another window's compare sheet must not be able to reach a signal
@@ -3378,10 +3498,6 @@ struct WaveformView: View {
         isExportingMFF = false
     }
 
-    /// Clears every derived buffer (filters, re-reference, MRI correction, ICA,
-    /// artifact detections, epochs, interpolations) so the view falls back to the
-    /// original recording — without needing to close and reopen the file.
-    /// Analysis parameters (cutoffs, ICA settings, template names) are preserved.
     /// Shown while `reDeriveHistory` rebuilds an evicted node — a slow
     /// re-derivation on a large recording should read as work, not a hang.
     @ViewBuilder
@@ -3401,6 +3517,8 @@ struct WaveformView: View {
         }
     }
 
+    /// Clear the listed derived results, detections and dependent epoch/interpolation state.
+    /// Keep analysis settings so the user can run the operations again.
     func resetToOriginalData() {
         // Derived signals.
         filter.output = nil
@@ -3491,6 +3609,7 @@ struct WaveformView: View {
 
     // MARK: - SwiftData markers
 
+    /// Insert a user marker in SwiftData using the selected sample’s time in this recording.
     private func addMarker(atSample sample: Int, in signal: MFFSignalData) {
         let time = signal.samplingRate > 0 ? Double(sample) / signal.samplingRate : 0
         modelContext.insert(UserMarker(packageName: recording.packageName, timeSeconds: time))
@@ -3516,6 +3635,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Remove the Option-key observer and clear modifier-dependent hover state.
     private func removeOptionKeyMonitor() {
         if let optionKeyMonitor {
             NSEvent.removeMonitor(optionKeyMonitor)
@@ -3527,16 +3647,19 @@ struct WaveformView: View {
 
     // MARK: - Geometry helpers
 
+    /// Calculate plot width from sample count, drawing stride and zoom, with a 600-point minimum.
     func plotWidth(for signal: MFFSignalData) -> CGFloat {
         let sampleCount = signal.data.first?.count ?? 0
         let displayedPoints = max(sampleCount / displaySampleStride(for: signal), 1)
         return max(CGFloat(displayedPoints) * CGFloat(timeScale), 600)
     }
 
+    /// Target plotted samples per second implied by the reference drawing stride and rate.
     private var targetDisplaySamplesPerSecond: Double {
         referenceDisplaySampleRate / Double(referenceDisplaySampleStride)
     }
 
+    /// Choose a display stride from this signal’s sampling rate.
     func displaySampleStride(for signal: MFFSignalData) -> Int {
         displaySampleStride(for: signal.samplingRate)
     }
@@ -3550,17 +3673,20 @@ struct WaveformView: View {
         return WaveformScaleUnits.displaySampleStride(samplingRate: samplingRate)
     }
 
+    /// Round finite geometry measurements to a fixed quantum to suppress tiny layout updates.
     private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
         guard value.isFinite else { return 0 }
         return (value / geometryUpdateQuantum).rounded() * geometryUpdateQuantum
     }
 
+    /// Update the global plot origin only after it moves by at least one geometry quantum.
     private func updateWaveformContentMinX(_ newValue: CGFloat) {
         let nextValue = quantizedGeometryValue(newValue)
         guard abs(waveformContentMinX - nextValue) >= geometryUpdateQuantum else { return }
         waveformContentMinX = nextValue
     }
 
+    /// Accept meaningful viewport changes and synchronize the jump slider with the resulting scroll fraction.
     private func updateHorizontalViewport(_ viewport: HorizontalViewport, plotWidth: CGFloat) {
         let nextOffset = max(viewport.offsetX, 0)
         let nextWidth = max(viewport.width, 1)
@@ -3582,6 +3708,7 @@ struct WaveformView: View {
         updateHorizontalJumpValueFromScroll(nextJumpValue)
     }
 
+    /// Maximum horizontal scroll distance, floored at zero when the plot fits.
     private func horizontalMaximumOffset(
         for plotWidth: CGFloat,
         viewportWidth: CGFloat? = nil
@@ -3614,15 +3741,19 @@ struct WaveformView: View {
         )
     }
 
+    /// Update the jump slider from scrolling while guarding against slider-to-scroll feedback.
     private func updateHorizontalJumpValueFromScroll(_ newValue: Double) {
         guard newValue.isFinite else { return }
         let clamped = min(max(newValue, 0), 1)
         guard abs(horizontalJumpValue - clamped) >= jumpSliderUpdateQuantum else { return }
+        // The same position has two editors: scrolling and the jump slider. Mark this
+        // as a scroll-originated update so the binding does not send it back as a new scroll.
         isSyncingSliderFromScroll = true
         horizontalJumpValue = clamped
         isSyncingSliderFromScroll = false
     }
 
+    /// Visible content range plus a 15% viewport buffer on either side for rendering.
     var visibleHorizontalRange: ClosedRange<CGFloat> {
         let buffer = horizontalViewportWidth * 0.15
         let lower = max(horizontalOffset - buffer, 0)
@@ -3630,6 +3761,7 @@ struct WaveformView: View {
         return lower...upper
     }
 
+    /// Convert plot x to the nearest original sample and clamp it to the signal’s bounds.
     func sampleIndex(forContentX x: CGFloat, in signal: MFFSignalData) -> Int {
         let sampleCount = signal.data.first?.count ?? 1
         let plottedIndex = x / max(CGFloat(timeScale), 0.001)
@@ -3637,16 +3769,19 @@ struct WaveformView: View {
         return min(max(sample, 0), max(sampleCount - 1, 0))
     }
 
+    /// Convert an original sample index into zoomed plot-content x coordinates.
     func contentX(forSample sample: Int, in signal: MFFSignalData) -> CGFloat {
         (CGFloat(sample) / CGFloat(displaySampleStride(for: signal))) * CGFloat(timeScale)
     }
 
+    /// Read one value per channel for a nonnegative sample; short channels contribute zero.
     func topomapValues(at sample: Int, in signal: MFFSignalData) -> [Double] {
         signal.data.map { channel in
             sample < channel.count ? Double(channel[sample]) : 0
         }
     }
 
+    /// Select an event and scroll its onset toward the viewport center, clamped to plot bounds.
     func jumpToEvent(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventID = event.id
         let plotWidth = plotWidth(for: signal)
@@ -3665,6 +3800,7 @@ struct WaveformView: View {
         horizontalScrollPosition.scrollTo(x: clampedOffset)
     }
 
+    /// Select an on-screen marker without scrolling and toggle its duration highlight.
     private func selectEventFromTrack(_ event: MFFEvent, color: Color, in signal: MFFSignalData) {
         // Marks the row selected in the events list (line 2101) without
         // scrolling the waveform — the flag being clicked is on-screen by
@@ -3687,6 +3823,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Select a health-result interval and center that interval within the horizontal viewport.
     func jumpToSegment(_ result: SegmentHealthResult) {
         guard let signal = currentSegmentHealthSignal(),
               let sampleCount = signal.data.first?.count,
@@ -3720,6 +3857,8 @@ struct WaveformView: View {
         EventsPanelView.formattedEventTime(seconds)
     }
 
+    /// Group events by the current PSA field and build searchable summaries ordered by count.
+    /// The artifact rate label uses event count divided by the last event’s recording time.
     func groupedPSAEventSummaries(_ events: [MFFEvent]) -> [EventSummary] {
         Dictionary(grouping: events, by: psaSegmentValue(for:))
             .map { value, groupedEvents in
@@ -3753,6 +3892,7 @@ struct WaveformView: View {
             }
     }
 
+    /// Keep summaries matching every search term; an empty query preserves all summaries.
     func filteredPSAEventSummaries(_ summaries: [EventSummary]) -> [EventSummary] {
         let filters = psaSearchFilters(from: epoching.eventSearchText)
         guard !filters.isEmpty else { return summaries }
@@ -3764,6 +3904,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Match a search term case-insensitively against one named field or the combined search text.
     private func psaSummary(_ summary: EventSummary, matches filter: PSAEventSearchFilter) -> Bool {
         let needle = filter.value.lowercased()
         guard !needle.isEmpty else { return true }
@@ -3773,6 +3914,8 @@ struct WaveformView: View {
         return summary.searchText.lowercased().contains(needle)
     }
 
+    /// Parse whitespace-separated terms, consuming additional tokens for field/value expressions.
+    /// Plain terms search all fields; this parser does not implement quoted multiword phrases.
     private func psaSearchFilters(from query: String) -> [PSAEventSearchFilter] {
         let tokens = query
             .split(whereSeparator: \.isWhitespace)
@@ -3798,6 +3941,7 @@ struct WaveformView: View {
         return filters.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
+    /// Recognize field:value and spaced colon variants, returning how many tokens were consumed.
     private func psaFieldFilter(
         from token: String,
         nextToken: String?,
@@ -3827,6 +3971,7 @@ struct WaveformView: View {
         return (PSAEventSearchFilter(field: field, value: followingToken), 3)
     }
 
+    /// Collect searchable event metadata by field, including the group’s selected segment value.
     private func psaSearchFields(for segmentValue: String, events: [MFFEvent]) -> [PSAEventSearchField: String] {
         var values: [PSAEventSearchField: [String]] = [
             .code: [],
@@ -3853,6 +3998,7 @@ struct WaveformView: View {
         return values.mapValues { $0.joined(separator: " ") }
     }
 
+    /// Combine nonempty search fields in enum order, prefixing each with its field name.
     private func psaSearchText(fields: [PSAEventSearchField: String]) -> String {
         var values: [String] = []
         for field in PSAEventSearchField.allCases {
@@ -3862,6 +4008,7 @@ struct WaveformView: View {
         return values.joined(separator: " ")
     }
 
+    /// Choose the PSA grouping value, falling back from a missing event label to its code.
     func psaSegmentValue(for event: MFFEvent) -> String {
         switch epoching.segmentField {
         case .code:
@@ -3873,6 +4020,7 @@ struct WaveformView: View {
         }
     }
 
+    /// Toggle membership of one event code in the selected-code set.
     private func toggleEventCode(_ code: String) {
         if selectedEventCodes.contains(code) {
             selectedEventCodes.remove(code)
@@ -3896,12 +4044,14 @@ private extension View {
 }
 
 extension Array {
+    /// Return nil for an out-of-bounds array index instead of trapping.
     nonisolated subscript(safe index: Int) -> Element? {
         indices.contains(index) ? self[index] : nil
     }
 }
 
 extension String {
+    /// Treat an empty string as absent; whitespace-only strings remain unchanged.
     var nilIfEmpty: String? {
         isEmpty ? nil : self
     }

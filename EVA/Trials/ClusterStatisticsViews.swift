@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  ClusterStatisticsViews.swift
 //  EVA
@@ -47,6 +54,8 @@ struct ClusterStatisticsPane: View {
         let repeatedMeasures: Bool
     }
 
+    /// Collect input/configuration values whose changes make the current statistical result obsolete.
+    /// Display-only choices such as alpha and standard-error visibility are excluded.
     private var invalidationSignature: InvalidationSignature {
         InvalidationSignature(
             categories: categories,
@@ -71,6 +80,8 @@ struct ClusterStatisticsPane: View {
         )
     }
 
+    /// Check basic signal, trial-count and control validity before enabling Run.
+    /// The runner still performs deeper input and design validation.
     private var canRun: Bool {
         guard rawSignal != nil else { return false }
         let requiredCount = viewModel.clusterStatistic == .t ? 2 : 3
@@ -90,6 +101,7 @@ struct ClusterStatisticsPane: View {
             && viewModel.clusterSampleStride > 0
     }
 
+    /// Resolve condition names in display order for a two-condition t or multi-condition F test.
     private var selectedConditionNames: [String] {
         switch viewModel.clusterStatistic {
         case .t:
@@ -99,10 +111,12 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Read the separately retained t or F statistic threshold for the selected test.
     private var activeClusterThreshold: Double {
         viewModel.clusterStatistic == .t ? viewModel.clusterThreshold : viewModel.clusterFThreshold
     }
 
+    /// Route one numeric editor to the t or F threshold through custom get/set closures.
     private var activeThresholdBinding: Binding<Double> {
         Binding(
             get: { activeClusterThreshold },
@@ -174,6 +188,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Find the event-relative time interval shared by all selected epochs, or nil if unavailable.
     private var availableWindowMs: ClosedRange<Double>? {
         guard let samplingRate = rawSignal?.samplingRate,
               !selectedConditionNames.isEmpty else { return nil }
@@ -185,6 +200,8 @@ struct ClusterStatisticsPane: View {
         )
     }
 
+    /// Assemble design controls and results/empty states. Appearance seeds usable defaults;
+    /// context changes invalidate idle results and leaving the pane cancels active work.
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             designCard
@@ -231,6 +248,7 @@ struct ClusterStatisticsPane: View {
         .onDisappear { cancelAnalysis(clearStatus: false) }
     }
 
+    /// Present analysis settings, eligibility guidance and run/cancel/progress controls.
     private var designCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -398,6 +416,7 @@ struct ClusterStatisticsPane: View {
 
     // MARK: - Design, inference and adjacency controls
 
+    /// Describe the selected observation design, statistic and multiple-comparison correction.
     private var designSubtitle: String {
         let unit = viewModel.clusterRepeatedMeasures ? "Matched units" : "Independent single trials"
         let statistic = viewModel.clusterStatistic == .t
@@ -409,6 +428,7 @@ struct ClusterStatisticsPane: View {
         return "\(unit) · \(statistic) · \(correction)"
     }
 
+    /// Edit exchangeability, inference mode and the sensor-neighbor rule; disable edits during a run.
     private var designAndAdjacencyRow: some View {
         HStack(alignment: .bottom, spacing: 14) {
             VStack(alignment: .leading, spacing: 2) {
@@ -484,6 +504,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Edit an uncorrected cluster-forming probability or raw statistic and preview its conversion.
     private var thresholdControl: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
@@ -530,6 +551,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Edit TFCE extent/height exponents and integration resolution instead of a fixed threshold.
     private var tfceControls: some View {
         HStack(alignment: .bottom, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
@@ -566,6 +588,8 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Switch probability/statistic entry, converting the current value when degrees of freedom
+    /// are available. Rounded field values approximate, rather than exactly preserve, the cutoff.
     private func toggleThresholdMode() {
         // Carry the current threshold across so the switch does not silently
         // change what the run will do.
@@ -618,6 +642,7 @@ struct ClusterStatisticsPane: View {
         )
     }
 
+    /// Explain neighbor counts and flag isolated or overly connected sensors in a tooltip.
     private func adjacencyHelpText(_ summary: ClusterAdjacencySummary) -> String {
         var parts = [
             "Range \(summary.minimumNeighborCount)–\(summary.maximumNeighborCount) neighbors, \(summary.componentCount) connected group\(summary.componentCount == 1 ? "" : "s").",
@@ -641,6 +666,7 @@ struct ClusterStatisticsPane: View {
         return segments.allSatisfy { $0.subject?.isEmpty == false } ? .subject : .trialOrder
     }
 
+    /// Build a labeled optional-condition picker; nil represents the Choose placeholder.
     private func conditionPicker(_ title: String, selection: Binding<String?>) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption2).foregroundStyle(.secondary)
@@ -656,6 +682,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Select multiple F-test conditions by toggling membership in a set.
     private var fConditionMenu: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Conditions").font(.caption2).foregroundStyle(.secondary)
@@ -688,6 +715,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Create a labeled Double editor with shared formatting and running-state disabling.
     private func numericField(_ title: String, value: Binding<Double>, width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.caption2).foregroundStyle(.secondary)
@@ -698,6 +726,8 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Show the observed statistic map, corrected-cluster list and selected cluster detail.
+    /// The display alpha filters the existing result without rerunning permutations.
     @ViewBuilder
     private func results(_ output: ClusterStatisticsOutput) -> some View {
         let significant = output.analysis.clusters.filter { $0.pValue <= viewModel.clusterAlpha }
@@ -759,6 +789,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// List the supplied significant clusters and update selection when a row is clicked.
     private func clusterList(
         _ output: ClusterStatisticsOutput,
         clusters: [ClusterPermutationAnalyzer.Cluster]
@@ -815,6 +846,8 @@ struct ClusterStatisticsPane: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Show the selected cluster’s direction, interval, condition traces and sensor map.
+    /// Translate local analysis channel indices back to recording channels for names/highlights.
     private func clusterDetail(
         _ cluster: ClusterPermutationAnalyzer.Cluster,
         output: ClusterStatisticsOutput
@@ -887,6 +920,7 @@ struct ClusterStatisticsPane: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
     }
 
+    /// Keep the selected cluster if it passes display alpha; otherwise choose the first passing cluster.
     private func selectedCluster(in output: ClusterStatisticsOutput) -> ClusterPermutationAnalyzer.Cluster? {
         let significant = output.analysis.clusters.filter { $0.pValue <= viewModel.clusterAlpha }
         if let selectedClusterID,
@@ -896,6 +930,8 @@ struct ClusterStatisticsPane: View {
         return significant.first
     }
 
+    /// Average each analyzed channel’s statistic over the cluster’s start-to-end time span.
+    /// The map includes all analyzed channels, not only member points; unrepresented channels stay zero.
     private func statisticTopomap(
         cluster: ClusterPermutationAnalyzer.Cluster,
         output: ClusterStatisticsOutput,
@@ -903,6 +939,8 @@ struct ClusterStatisticsPane: View {
     ) -> [Double] {
         var values = [Double](repeating: 0, count: channelCount)
         let samples = cluster.startSample...cluster.endSample
+        // Analysis rows may omit bad/unavailable channels. The mapping restores each
+        // row to its original sensor index for topographic display.
         for (localChannel, globalChannel) in output.channelIndices.enumerated() where values.indices.contains(globalChannel) {
             var sum = 0.0
             for sample in samples {
@@ -913,20 +951,24 @@ struct ClusterStatisticsPane: View {
         return values
     }
 
+    /// Convert a local analysis sample through the saved relative offsets to rounded milliseconds.
     private func latencyText(_ localSample: Int, output: ClusterStatisticsOutput) -> String {
         guard output.relativeSampleOffsets.indices.contains(localSample) else { return "?" }
         return String(Int((Double(output.relativeSampleOffsets[localSample]) / output.samplingRate * 1_000).rounded()))
     }
 
+    /// Format display probabilities to three decimals, with a special label below .001.
     private func formatP(_ value: Double) -> String {
         if value < 0.001 { return "<.001" }
         return String(format: "%.3f", value).replacingOccurrences(of: "0.", with: ".")
     }
 
+    /// Format one decimal place and remove a trailing-looking .0 for compact time labels.
     private func formatMilliseconds(_ value: Double) -> String {
         String(format: "%.1f", value).replacingOccurrences(of: ".0", with: "")
     }
 
+    /// Join displayed condition names and sample counts using t/F-appropriate separators.
     private func conditionSummary(_ analysis: ClusterStatisticsAnalysis) -> String {
         zip(analysis.conditionNames, analysis.conditionCounts)
             .map { "\(displayCategory($0.0)) (n=\($0.1))" }
@@ -955,6 +997,7 @@ struct ClusterStatisticsPane: View {
         return parts.joined(separator: " · ")
     }
 
+    /// Summarize the neighbor configuration and measured average neighbor count used in this result.
     private func adjacencyDescription(_ output: ClusterStatisticsOutput) -> String {
         switch output.adjacencyConfiguration.method {
         case .temporalOnly:
@@ -966,6 +1009,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Format t’s denominator degrees of freedom or F’s numerator/denominator pair.
     private func degreesOfFreedomText(_ analysis: ClusterStatisticsAnalysis) -> String {
         if let numerator = analysis.numeratorDegreesOfFreedom,
            let denominator = analysis.denominatorDegreesOfFreedom {
@@ -977,6 +1021,7 @@ struct ClusterStatisticsPane: View {
         return ""
     }
 
+    /// Choose valid, distinct initial t-test conditions while preserving existing valid choices.
     private func seedConditionsIfNeeded() {
         if viewModel.clusterConditionA == nil || !categories.contains(viewModel.clusterConditionA ?? "") {
             viewModel.clusterConditionA = categories.first
@@ -988,6 +1033,8 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Drop unavailable F-test categories and, when starting empty, greedily choose categories
+    /// whose source-trial times do not overlap. Times are compared at microsecond resolution.
     private func seedFConditionsIfNeeded() {
         let needsInitialSelection = viewModel.clusterFConditions.isEmpty
         viewModel.clusterFConditions.formIntersection(categories)
@@ -1025,12 +1072,15 @@ struct ClusterStatisticsPane: View {
         viewModel.clusterAdjacencyDistanceInitialized = true
     }
 
+    /// Clear idle result/selection state. Active runs are left alone by this helper.
     private func invalidateResult() {
         guard !viewModel.isRunning else { return }
         viewModel.clusterOutput = nil
         selectedClusterID = nil
     }
 
+    /// Intersect the requested time window with available epochs, or use the whole common window
+    /// if the intersection has no positive duration.
     private func clampWindowToAvailableEpochs() {
         guard let availableWindowMs else { return }
         let clippedStart = max(viewModel.clusterWindowStartMs, availableWindowMs.lowerBound)
@@ -1044,6 +1094,8 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Freeze controls into a job, compute on a detached task and publish its response through UI state.
+    /// Forward cancellation to the worker and finish progress delivery before accepting the result.
     private func runAnalysis() {
         clampWindowToAvailableEpochs()
         guard canRun, let rawSignal else { return }
@@ -1055,6 +1107,8 @@ struct ClusterStatisticsPane: View {
         viewModel.isRunning = true
         viewModel.runProgress = .init(fraction: 0, title: "Cluster Statistics", detail: "Starting…")
 
+        // Capture value inputs before asynchronous work so the runner reads one consistent
+        // configuration rather than live SwiftUI controls.
         let job = ClusterStatisticsJob(
             signal: rawSignal,
             segments: rawSegments,
@@ -1102,6 +1156,7 @@ struct ClusterStatisticsPane: View {
         }
     }
 
+    /// Cancel the owning task and clear run/progress state, optionally setting a cancellation message.
     private func cancelAnalysis(clearStatus: Bool) {
         analysisTask?.cancel()
         analysisTask = nil
@@ -1117,6 +1172,8 @@ private struct ClusterStatisticHeatmap: View {
     let selectedClusterID: Int?
     let onSelectCluster: (Int?) -> Void
 
+    /// Draw a channel-by-time statistic grid on a Canvas and map taps back to cluster membership.
+    /// Fade cells outside displayed clusters and outline the selected cluster in yellow.
     var body: some View {
         GeometryReader { proxy in
             Canvas { context, size in
@@ -1151,6 +1208,7 @@ private struct ClusterStatisticHeatmap: View {
                 SpatialTapGesture().onEnded { value in
                     let sample = min(max(Int(value.location.x / max(proxy.size.width, 1) * CGFloat(result.sampleCount)), 0), result.sampleCount - 1)
                     let channel = min(max(Int(value.location.y / max(proxy.size.height, 1) * CGFloat(result.channelCount)), 0), result.channelCount - 1)
+                    // Use the same channel-major flattening as the analyzer to locate the tapped point.
                     let point = channel * result.sampleCount + sample
                     onSelectCluster(result.clusters.first(where: {
                         $0.pValue <= alpha && $0.pointIndices.contains(point)
@@ -1163,6 +1221,7 @@ private struct ClusterStatisticHeatmap: View {
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
     }
 
+    /// Map F values to a positive sequential palette or signed t values to red/blue around zero.
     private func color(_ value: Double, scale: Double) -> Color {
         if result.statistic == .f {
             let normalized = min(max(value / max(scale, 1e-12), 0), 1)
@@ -1187,8 +1246,11 @@ private struct ClusterTracePoint: Identifiable {
     let latencyMs: Double
     let mean: Double
     let standardError: Double
+    /// Lower edge of the mean ± one standard-error shading.
     var lowerBound: Double { mean - standardError }
+    /// Upper edge of the mean ± one standard-error shading.
     var upperBound: Double { mean + standardError }
+    /// Identify a plotted point by condition and local sample index.
     var id: String { "\(category)-\(sample)" }
 }
 
@@ -1199,6 +1261,7 @@ private struct ClusterConditionTraceChart: View {
     let displayCategory: (String) -> String
     let categoryColor: (String) -> Color
 
+    /// Label the selected cluster’s condition waveforms and optional standard-error shading.
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(showsStandardError ? "Condition mean waveforms ± SEM" : "Condition mean waveforms")
@@ -1207,6 +1270,7 @@ private struct ClusterConditionTraceChart: View {
         }
     }
 
+    /// Draw condition means, optional error ribbons and dashed cluster-time boundaries.
     private var chart: some View {
         Chart {
             if showsStandardError {
@@ -1253,6 +1317,7 @@ private struct ClusterConditionTraceChart: View {
         }
     }
 
+    /// Expand validated per-condition waveform summaries into chart points across the full analysis window.
     private var points: [ClusterTracePoint] {
         output.analysis.conditionNames.flatMap { category -> [ClusterTracePoint] in
             guard let summary = output.clusterWaveforms[cluster.id]?[category],
@@ -1270,6 +1335,7 @@ private struct ClusterConditionTraceChart: View {
         }
     }
 
+    /// Convert a valid local sample index to event-relative milliseconds using the result’s saved offsets.
     private func latencyMs(_ sample: Int) -> Double {
         Double(output.relativeSampleOffsets[sample]) / output.samplingRate * 1_000
     }

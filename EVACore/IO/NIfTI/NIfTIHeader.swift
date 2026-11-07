@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  NIfTIHeader.swift
 //  EVAPreviewKit
@@ -10,13 +17,19 @@
 
 import Foundation
 
+/// Header fields describe storage and a voxel-to-world transform; they do not
+/// contain the image voxels themselves. decodeV1/decodeV2 read fixed byte offsets
+/// from their respective format versions, then share affine/unit interpretation.
+/// Byte offsets are format constants, not Swift struct-layout assumptions.
 nonisolated struct NIfTIHeader: Sendable {
 
     enum Version: Int, Sendable {
         case one = 1
         case two = 2
 
+        /// Human-readable name of the detected NIfTI format version.
         var displayName: String { "NIfTI-\(rawValue)" }
+        /// Fixed header size in bytes, excluding extensions and voxel payload.
         var byteCount: Int { self == .one ? 348 : 540 }
     }
 
@@ -24,6 +37,7 @@ nonisolated struct NIfTIHeader: Sendable {
         case littleEndian
         case bigEndian
 
+        /// Label the order in which multibyte scalar fields are stored.
         var displayName: String {
             self == .littleEndian ? "Little-endian" : "Big-endian"
         }
@@ -47,6 +61,7 @@ nonisolated struct NIfTIHeader: Sendable {
         case complex256 = 2048
         case rgba32 = 2304
 
+        /// Name of the on-disk voxel datatype, including types not supported for scalar previews.
         var displayName: String {
             switch self {
             case .uint8: return "UInt8"
@@ -68,6 +83,7 @@ nonisolated struct NIfTIHeader: Sendable {
             }
         }
 
+        /// Bit width for scalar voxel types supported by the preview reader; nil for complex/color/extended types.
         var supportedScalarBitCount: Int? {
             switch self {
             case .uint8, .int8: return 8
@@ -84,6 +100,7 @@ nonisolated struct NIfTIHeader: Sendable {
             let worldAxis: Int
             let isPositive: Bool
 
+            /// Anatomical direction reached by increasing the corresponding voxel-axis coordinate.
             var positiveLabel: String {
                 switch (worldAxis, isPositive) {
                 case (0, true): return "R"
@@ -101,7 +118,11 @@ nonisolated struct NIfTIHeader: Sendable {
         let rows: [[Double]]
         let source: String
 
+        /// Assign each voxel axis to a distinct world axis using the strongest affine components.
+        /// This provides dominant-axis labels for oblique images, not a resampling or full rotation description.
         var axisOrientations: [AxisOrientation] {
+            // Six permutations cover all unique pairings of three voxel axes with three
+            // world axes. Choosing jointly avoids assigning two voxel axes the same label.
             let permutations = [
                 [0, 1, 2], [0, 2, 1], [1, 0, 2],
                 [1, 2, 0], [2, 0, 1], [2, 1, 0]
@@ -116,11 +137,13 @@ nonisolated struct NIfTIHeader: Sendable {
             }
         }
 
+        /// Return the anatomical direction label for a valid zero-based voxel axis.
         func directionLabel(forVoxelAxis axis: Int) -> String? {
             guard axisOrientations.indices.contains(axis) else { return nil }
             return axisOrientations[axis].positiveLabel
         }
 
+        /// Score a proposed one-to-one axis assignment by the sum of absolute affine components.
         private func orientationScore(_ permutation: [Int]) -> Double {
             (0..<3).reduce(0) { score, voxelAxis in
                 let worldAxis = permutation[voxelAxis]
@@ -150,25 +173,36 @@ nonisolated struct NIfTIHeader: Sendable {
     let affine: Affine?
     let magic: String
 
+    /// Number of declared image dimensions, stored in dim[0].
     var dimensionCount: Int { Int(dimensions.first ?? 0) }
+    /// First spatial dimension from dim[1], defaulting to one when absent.
     var width: Int { Int(dimensions[safe: 1] ?? 1) }
+    /// Second spatial dimension from dim[2], defaulting to one when absent.
     var height: Int { Int(dimensions[safe: 2] ?? 1) }
+    /// Third spatial dimension from dim[3], defaulting to one when absent.
     var depth: Int { Int(dimensions[safe: 3] ?? 1) }
+    /// Fourth-dimension length when declared, otherwise one volume.
     var volumeCount: Int { dimensionCount >= 4 ? Int(dimensions[safe: 4] ?? 1) : 1 }
+    /// Convert the stored bits-per-voxel field to bytes; datatype consistency is validated by the reader.
     var bytesPerVoxel: Int { bitpix / 8 }
 
+    /// Use the stored finite nonzero scaling slope, otherwise an identity multiplier.
     var effectiveSlope: Double {
         scaleSlope.isFinite && scaleSlope != 0 ? scaleSlope : 1
     }
 
+    /// Use a finite stored scaling intercept, otherwise zero.
     var effectiveIntercept: Double {
         scaleIntercept.isFinite ? scaleIntercept : 0
     }
 
+    /// Whether the magic identifies a combined header/voxel .nii file rather than a paired dataset.
     var isSingleFile: Bool {
         magic.hasPrefix("n+1") || magic.hasPrefix("n+2")
     }
 
+    /// Recognize header size 348 or 540 in either byte order from exactly four bytes.
+    /// Throw for truncated input or an unrecognized size.
     static func versionAndByteOrder(from firstFourBytes: Data) throws -> (Version, ByteOrder) {
         guard firstFourBytes.count == 4 else { throw NIfTIReadError.truncatedHeader }
         let bytes = [UInt8](firstFourBytes)
@@ -186,6 +220,8 @@ nonisolated struct NIfTIHeader: Sendable {
         }
     }
 
+    /// Check the complete fixed header length and dispatch to the chosen version decoder.
+    /// The image reader performs additional semantic validation before accessing voxel data.
     static func decode(_ data: Data, version: Version, byteOrder: ByteOrder) throws -> NIfTIHeader {
         guard data.count >= version.byteCount else { throw NIfTIReadError.truncatedHeader }
         let bytes = [UInt8](data.prefix(version.byteCount))
@@ -195,6 +231,10 @@ nonisolated struct NIfTIHeader: Sendable {
         }
     }
 
+    // These are NIfTI-1 field offsets in bytes: dim at 40, datatype at 70,
+    // bitpix at 72, pixdim at 76, qform/sform codes at 252/254. The decoder
+    // applies byte order to each scalar; array strides below are bytes per element.
+    /// Read NIfTI-1 fields from fixed byte offsets using 16-bit dimensions and mostly Float32 metadata.
     private static func decodeV1(_ bytes: [UInt8], byteOrder: ByteOrder) throws -> NIfTIHeader {
         let dimensions = stride(from: 40, to: 56, by: 2).map {
             Int64(ByteDecoder.int16(bytes, at: $0, order: byteOrder))
@@ -249,6 +289,7 @@ nonisolated struct NIfTIHeader: Sendable {
         )
     }
 
+    /// Read NIfTI-2’s wider dimensions/offsets and Float64 geometry from its separate fixed layout.
     private static func decodeV2(_ bytes: [UInt8], byteOrder: ByteOrder) throws -> NIfTIHeader {
         let dimensions = stride(from: 16, to: 80, by: 8).map {
             ByteDecoder.int64(bytes, at: $0, order: byteOrder)
@@ -303,6 +344,8 @@ nonisolated struct NIfTIHeader: Sendable {
         )
     }
 
+    /// Prefer a declared finite, nonzero sform; otherwise derive an affine from a valid declared qform.
+    /// Return nil when neither representation qualifies for construction.
     private static func makeAffine(
         qformCode: Int,
         sformCode: Int,
@@ -325,6 +368,8 @@ nonisolated struct NIfTIHeader: Sendable {
               pixdim.count >= 4 else { return nil }
 
         let b = quaternB, c = quaternC, d = quaternD
+        // NIfTI stores only b, c and d of a unit quaternion. Recover a from the
+        // remaining squared length, or normalize b/c/d with a=0 when their norm exceeds one.
         let sum = b * b + c * c + d * d
         let a: Double
         if sum <= 1 { a = sqrt(max(0, 1 - sum)) }
@@ -338,6 +383,8 @@ nonisolated struct NIfTIHeader: Sendable {
         return quaternionAffine(a: a, b: b, c: c, d: d, offsets: offsets, pixdim: pixdim)
     }
 
+    /// Combine quaternion rotation, voxel spacing and translation into a 3×4 voxel-to-world matrix.
+    /// pixdim[0] supplies the handedness sign for the third axis; zero spacing falls back to one.
     private static func quaternionAffine(
         a: Double, b: Double, c: Double, d: Double,
         offsets: [Double], pixdim: [Double]
@@ -352,12 +399,15 @@ nonisolated struct NIfTIHeader: Sendable {
             [2*b*d-2*a*c, 2*c*d+2*a*b, a*a+d*d-c*c-b*b]
         ]
         let scales = [dx, dy, dz]
+        // Scale each rotation column by its voxel spacing, then append translation.
+        // Multiplying a row by [i, j, k, 1] gives one world coordinate.
         let rows = (0..<3).map { row in
             (0..<3).map { rotation[row][$0] * scales[$0] } + [offsets[row]]
         }
         return Affine(rows: rows, source: "qform")
     }
 
+    /// Decode spatial and temporal unit codes from separate bit fields in the same integer.
     private static func decodeUnits(_ raw: Int) -> (spatial: String?, temporal: String?) {
         let spatial: String?
         switch raw & 0x07 {
@@ -379,6 +429,7 @@ nonisolated struct NIfTIHeader: Sendable {
         return (spatial, temporal)
     }
 
+    /// Represent a nonfinite calibration value as absent metadata.
     private static func finiteOrNil(_ value: Double) -> Double? {
         value.isFinite ? value : nil
     }
@@ -400,6 +451,7 @@ nonisolated enum NIfTIReadError: LocalizedError, Sendable {
     case truncatedVoxelData
     case invalidGzip(String)
 
+    /// Provide a readable message for unsupported formats, malformed headers or truncated voxel streams.
     var errorDescription: String? {
         switch self {
         case .unsupportedFile(let url): return "\(url.lastPathComponent) is not a supported NIfTI file."
@@ -420,50 +472,63 @@ nonisolated enum NIfTIReadError: LocalizedError, Sendable {
     }
 }
 
+// The version decoders validate the whole header before using these fixed
+// offsets. These low-level integer readers assume their byte spans are in bounds;
+// manual assembly avoids unsafe aligned loads or dependence on Swift struct layout.
 private nonisolated enum ByteDecoder {
+    /// Assemble two bytes without requiring aligned memory, then apply the declared byte order.
     static func uint16(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> UInt16 {
         let value = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
         return order == .littleEndian ? value : value.byteSwapped
     }
 
+    /// Interpret a decoded 16-bit word as signed two’s-complement bits.
     static func int16(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> Int16 {
         Int16(bitPattern: uint16(bytes, at: offset, order: order))
     }
 
+    /// Assemble four bytes into a 32-bit word and apply the declared byte order.
     static func uint32(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> UInt32 {
         var value: UInt32 = 0
         for index in 0..<4 { value |= UInt32(bytes[offset + index]) << UInt32(index * 8) }
         return order == .littleEndian ? value : value.byteSwapped
     }
 
+    /// Interpret a decoded 32-bit word as signed two’s-complement bits.
     static func int32(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> Int32 {
         Int32(bitPattern: uint32(bytes, at: offset, order: order))
     }
 
+    /// Assemble eight bytes into a 64-bit word and apply the declared byte order.
     static func uint64(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> UInt64 {
         var value: UInt64 = 0
         for index in 0..<8 { value |= UInt64(bytes[offset + index]) << UInt64(index * 8) }
         return order == .littleEndian ? value : value.byteSwapped
     }
 
+    /// Interpret a decoded 64-bit word as signed two’s-complement bits.
     static func int64(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> Int64 {
         Int64(bitPattern: uint64(bytes, at: offset, order: order))
     }
 
+    /// Interpret decoded 32-bit bits as an IEEE floating-point value, not a numeric integer conversion.
     static func float32(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> Float {
         Float(bitPattern: uint32(bytes, at: offset, order: order))
     }
 
+    /// Interpret decoded 64-bit bits as an IEEE double-precision value.
     static func float64(_ bytes: [UInt8], at offset: Int, order: NIfTIHeader.ByteOrder) -> Double {
         Double(bitPattern: uint64(bytes, at: offset, order: order))
     }
 
+    /// Decode a bounded fixed-width field up to its first NUL byte as UTF-8.
     static func string(_ bytes: [UInt8], at offset: Int, count: Int) -> String {
         let field = bytes[offset..<min(offset + count, bytes.count)]
         let prefix = field.prefix { $0 != 0 }
         return String(decoding: prefix, as: UTF8.self)
     }
 
+    /// Trim a fixed-width string field and return nil if its content is empty.
     static func optionalString(_ bytes: [UInt8], at offset: Int, count: Int) -> String? {
         let value = string(bytes, at: offset, count: count)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -472,6 +537,7 @@ private nonisolated enum ByteDecoder {
 }
 
 private extension Collection {
+    /// Return nil for an index outside this collection instead of trapping.
     subscript(safe index: Index) -> Element? {
         indices.contains(index) ? self[index] : nil
     }

@@ -33,8 +33,10 @@ nonisolated enum ClusterPermutationAnalyzer {
         case independent = "Independent"
         case repeatedMeasures = "Paired"
 
+        /// Use the design label as stable identity for SwiftUI selection.
         var id: String { rawValue }
 
+        /// Explain which observational units may be exchanged under this design.
         var explanation: String {
             switch self {
             case .independent:
@@ -61,6 +63,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         let spatialAdjacency: [[Int]]
         let design: Design
 
+        /// Store flattened trials, grid dimensions, adjacency and the chosen exchangeability design.
+        /// Validation occurs when analyze is called, not during construction.
         init(
             conditionA: Condition,
             conditionB: Condition,
@@ -86,6 +90,7 @@ nonisolated enum ClusterPermutationAnalyzer {
         var tfce = TFCEParameters.default
         var seed: UInt64 = 0xE7A_C1A5_7E57
 
+        /// Store permutation count, inference mode, thresholds and deterministic random seed.
         init(
             permutationCount: Int = 1_000,
             threshold: ClusterFormingThreshold = .statistic(2.0),
@@ -135,11 +140,16 @@ nonisolated enum ClusterPermutationAnalyzer {
     // MARK: - Entry point
 
     /// Returns `nil` when the surrounding task is cancelled.
+    /// Validate the two-condition input and dispatch to independent-label or paired-sign permutations.
+    /// Each trial is a channel-major vector of channelCount × sampleCount features.
+    /// Invalid dimensions/settings throw; cancellation returns nil rather than a partial result.
     static func analyze(
         input: Input,
         configuration: Configuration,
         progress: (@Sendable (Double) -> Void)? = nil
     ) throws -> Result? {
+        // Flattening uses feature = localChannel × sampleCount + sample, matching
+        // the grid’s spatial neighbors and adjacent time samples.
         let featureCount = input.channelCount * input.sampleCount
         guard input.channelCount > 0,
               input.sampleCount > 0,
@@ -202,6 +212,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         }
     }
 
+    /// Resolve a positive absolute t threshold or a two-tailed probability cutoff using the design’s
+    /// degrees of freedom. Return nil when the threshold is invalid.
     static func resolveThreshold(
         _ threshold: ClusterFormingThreshold,
         degreesOfFreedom: Double
@@ -221,6 +233,8 @@ nonisolated enum ClusterPermutationAnalyzer {
 
     // MARK: - Independent samples
 
+    /// Compute observed A-minus-B t values, then shuffle labels while preserving group sizes.
+    /// Reuse total sums and squared sums because moving labels does not change pooled data.
     private static func analyzeIndependent(
         input: Input,
         configuration: Configuration,
@@ -320,6 +334,8 @@ nonisolated enum ClusterPermutationAnalyzer {
 
         for feature in result.indices {
             let sumA = groupASums[feature]
+            // Once group A is chosen, group B is its complement; its sum needs no second
+            // pass through trials.
             let sumB = totalSums[feature] - sumA
             let meanDifference = (sumA / a) - (sumB / b)
             // Within-group SS derived from invariant total sum-of-squares.
@@ -335,6 +351,8 @@ nonisolated enum ClusterPermutationAnalyzer {
 
     // MARK: - Repeated measures (paired)
 
+    /// Subtract paired trials by their array positions and test the resulting differences.
+    /// Permutations flip whole difference vectors, preserving the within-trial spatial/time structure.
     private static func analyzePaired(
         input: Input,
         configuration: Configuration,
@@ -438,6 +456,8 @@ nonisolated enum ClusterPermutationAnalyzer {
             let sum = sums[feature]
             let mean = sum / n
             let deviationSS = max(sumSquares[feature] - (sum * sum / n), 0)
+            // Studentize the mean difference by its estimated uncertainty. Features with
+            // zero, tiny or nonfinite standard error retain the initialized statistic of zero.
             let standardError = sqrt((deviationSS / degreesOfFreedom) / n)
             if standardError > 1e-15, standardError.isFinite {
                 let value = mean / standardError
@@ -499,6 +519,8 @@ nonisolated enum ClusterPermutationAnalyzer {
             evaConcurrentPerform(iterations: batchCount) { batchOffset in
                 let permutation = batchStart + batchOffset
                 var rng = SeededGenerator(seed: permutationSeeds[permutation])
+                // Each permutation gets its own scratch workspace and output slot. Shared
+                // trial arrays remain immutable across workers.
                 let workspace = grid.makeWorkspace()
                 let statistics = statisticsForPermutation(permutation, &rng, workspace)
                 switch inference {
@@ -521,6 +543,8 @@ nonisolated enum ClusterPermutationAnalyzer {
             completed += batchCount
             progress?(Double(completed) / Double(configuration.permutationCount))
         }
+        // One maximum per permutation accounts for searching the entire grid. Compare
+        // observed masses/scores against these maxima, not against individual null points.
         let nullMaxima = nullStorage.values
 
         let workspace = grid.makeWorkspace()
@@ -563,6 +587,8 @@ nonisolated enum ClusterPermutationAnalyzer {
                 workspace: workspace
             )
             let clusters = candidates.map { candidate -> Cluster in
+                // For TFCE, corrected probabilities belong to points. This displayed component
+                // stores its best point probability; it is not a cluster-mass probability.
                 let best = candidate.points.map { pointPValues[$0] }.min() ?? 1
                 return Cluster(
                     id: 0,
@@ -586,6 +612,8 @@ nonisolated enum ClusterPermutationAnalyzer {
 
     // MARK: - Vector helpers
 
+    /// Add source into an equally sized destination in place using Accelerate vector arithmetic.
+    /// The pointer closures limit the lifetime of direct array storage access.
     static func add(_ source: [Double], to destination: inout [Double]) {
         source.withUnsafeBufferPointer { sourceBuffer in
             destination.withUnsafeMutableBufferPointer { destinationBuffer in
@@ -596,6 +624,8 @@ nonisolated enum ClusterPermutationAnalyzer {
         }
     }
 
+    /// Subtract source from an equally sized destination in place.
+    /// vDSP subtraction uses its second input minus its first, matching destination − source.
     static func subtract(_ source: [Double], from destination: inout [Double]) {
         source.withUnsafeBufferPointer { sourceBuffer in
             destination.withUnsafeMutableBufferPointer { destinationBuffer in
@@ -606,6 +636,7 @@ nonisolated enum ClusterPermutationAnalyzer {
         }
     }
 
+    /// Accumulate elementwise squared values into an equally sized sum-of-squares buffer.
     static func addSquares(_ source: [Double], to destination: inout [Double]) {
         for index in source.indices {
             destination[index] += source[index] * source[index]

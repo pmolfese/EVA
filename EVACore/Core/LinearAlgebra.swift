@@ -13,7 +13,11 @@
 import Accelerate
 import Foundation
 
+/// Matrix primitives shared by interpolation, source fitting and decomposition.
+/// Nested arrays use matrix[row][column]. Flat-buffer entry points document their
+/// own layout because Swift callers and LAPACK use different conventions.
 nonisolated enum LinearAlgebra {
+    /// Sum of pairwise products. Mismatched lengths return 0, not an error.
     static func dot(_ lhs: [Double], _ rhs: [Double]) -> Double {
         guard lhs.count == rhs.count else { return 0 }
         var total = 0.0
@@ -36,6 +40,9 @@ nonisolated enum LinearAlgebra {
         }
     }
 
+    /// Solves square A·x = b by pivoted Gauss–Jordan elimination on local copies.
+    /// Returns nil for empty/mismatched shapes or a pivot at/below 1e-12.
+    /// That absolute cutoff is the existing numerical guard, not a condition-number estimate.
     static func solveLinearSystem(_ matrix: [[Double]], _ rhs: [Double]) -> [Double]? {
         let n = matrix.count
         guard n > 0, rhs.count == n, matrix.allSatisfy({ $0.count == n }) else { return nil }
@@ -103,6 +110,8 @@ nonisolated enum LinearAlgebra {
     /// electrode set (shared across all of them), only the right-hand side
     /// (which depends on the target electrode) differs.
     final class LUFactorization: @unchecked Sendable {
+        // LAPACK stores element (row, column) at column * size + row.
+        // The cached factors are immutable; each solve makes its own working copies.
         private let columnMajorLU: [Double]
         private let ipiv: [LAPACKInt]
         private let size: Int

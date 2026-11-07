@@ -28,6 +28,7 @@ nonisolated enum CWLCorrectorEngine {
         case failedToCreateBuffer(String)
         case commandFailed(String)
 
+        /// Explain invalid CWL input or a failed numerical/Metal preparation stage.
         var errorDescription: String? {
             switch self {
             case .noReferenceChannels:
@@ -115,6 +116,9 @@ nonisolated enum CWLCorrectorEngine {
     private static let maxColumns = 256
     private static let correctionProgressStart = 0.24
 
+    /// Prepare lagged CWL regressors once, then run the selected CPU, Metal or comparison backend.
+    /// Comparison returns the Metal result and reports its difference from CPU relative to correction size.
+    /// Explicit Metal failures throw; this helper does not silently switch its requested backend.
     static func correct(
         eeg: [[Float]],
         references: [[Float]],
@@ -245,6 +249,7 @@ nonisolated enum CWLCorrectorEngine {
         }
     }
 
+    /// Map backend correction progress into a subinterval so sequential comparison runs share one progress bar.
     private static func remapCorrectionProgress(
         _ progress: ((ProgressUpdate) -> Void)?,
         start: Double,
@@ -299,6 +304,8 @@ nonisolated enum CWLCorrectorEngine {
         var padding: UInt32
     }
 
+    /// Validate matching channel lengths and build reusable lagged regressors, window inverses and weights.
+    /// Window geometry is expressed in samples after converting the configured seconds/milliseconds.
     private static func prepare(
         eeg: [[Float]],
         references: [[Float]],
@@ -343,6 +350,8 @@ nonisolated enum CWLCorrectorEngine {
 
         let lagSamples = stride(from: config.lagRangeMs.lowerBound, through: config.lagRangeMs.upperBound, by: max(config.lagStepMs, 1))
             .map { Int(($0 / 1000.0 * samplingRate).rounded()) }
+        // Different millisecond lags may round to the same sample at this rate.
+        // Deduplicate them before building columns to avoid redundant regressors.
         let uniqueLags = Array(Set(lagSamples)).sorted()
         let designStartedAt = DispatchTime.now().uptimeNanoseconds
         let design = buildLaggedDesign(references: references, lags: uniqueLags)
@@ -434,6 +443,8 @@ nonisolated enum CWLCorrectorEngine {
         )
     }
 
+    /// Create one regressor per reference/lag pair, stored as [regressor][sample].
+    /// Workers fill distinct array slots while the borrowed output buffer remains alive.
     private static func buildLaggedDesign(references: [[Float]], lags: [Int]) -> [[Float]] {
         let columnCount = references.count * lags.count
         guard columnCount > 0 else { return [] }
@@ -449,6 +460,8 @@ nonisolated enum CWLCorrectorEngine {
         return design
     }
 
+    /// Enumerate overlapping windows with enough samples for the regressors and prepare them in parallel.
+    /// Omit windows whose regularized solve fails; retain the original order of successful windows.
     private static func prepareWindows(
         design: [[Float]],
         sampleCount: Int,
@@ -493,6 +506,8 @@ nonisolated enum CWLCorrectorEngine {
         return windows.compactMap { $0 }
     }
 
+    /// Compute EEG means for every window/channel using per-channel prefix sums.
+    /// Store results as [window × channelCount + channel] to match the Metal kernels.
     private static func buildWindowChannelMeans(
         channels: [[Float]],
         windows: [PreparedWindow],
@@ -540,6 +555,8 @@ nonisolated enum CWLCorrectorEngine {
         return means
     }
 
+    /// Center regressors, form their Gram matrix and invert its ridge-regularized form once per window.
+    /// Return nil on a failed factorization/solve; cache a Float row-major inverse for both backends.
     private static func prepareWindow(design: [[Float]], range: Range<Int>) -> PreparedWindow? {
         let columnCount = design.count
         let means = design.map { mean(of: $0, in: range) }
@@ -558,6 +575,8 @@ nonisolated enum CWLCorrectorEngine {
             }
         }
 
+        // A small scale-dependent diagonal ridge stabilizes nearly collinear lagged
+        // references. Solving against the identity produces an inverse reusable for all EEG channels.
         let diagonalMean = (0..<columnCount).reduce(0.0) { $0 + xtx[$1 * columnCount + $1] } / Double(columnCount)
         let ridge = 1e-6 * diagonalMean + 1e-12
         for index in 0..<columnCount {
@@ -575,6 +594,8 @@ nonisolated enum CWLCorrectorEngine {
             return nil
         }
 
+        // LAPACK’s multiple-right-hand-side solve returns column-major storage.
+        // Transpose indexing, not the mathematical matrix, into the kernels’ row-major layout.
         var inverseRowMajor = [Float](repeating: 0, count: columnCount * columnCount)
         for row in 0..<columnCount {
             for column in 0..<columnCount {
@@ -584,6 +605,8 @@ nonisolated enum CWLCorrectorEngine {
         return PreparedWindow(range: range, designMeans: means, inverseXtXRowMajor: inverseRowMajor)
     }
 
+    /// Correct EEG channels independently using shared prepared regressors and cached window matrices.
+    /// The window-completion callback serializes progress reporting under a lock.
     private static func runCPU(
         prepared: Prepared,
         progress: ((ProgressUpdate) -> Void)?,
@@ -641,6 +664,8 @@ nonisolated enum CWLCorrectorEngine {
         return result
     }
 
+    /// Fit centered EEG against centered lagged references within each window.
+    /// Subtract each fitted artifact using normalized overlap weights so overlapping fits blend smoothly.
     private static func correctCPUChannel(
         channel: [Float],
         channelIndex: Int,
@@ -693,6 +718,8 @@ nonisolated enum CWLCorrectorEngine {
                     let x = Float(Double(prepared.design[column][sample]) - window.designMeans[column])
                     fitted = fitted.addingProduct(x, beta[column])
                 }
+                // Each window estimates the artifact from the original EEG, not from already
+                // corrected samples. Normalized taper weights blend those independent estimates.
                 corrected[sample] -= fitted * weight / prepared.weightSum[sample]
             }
         }
@@ -700,6 +727,8 @@ nonisolated enum CWLCorrectorEngine {
         return corrected
     }
 
+    /// Compile the embedded shader, upload prepared data and execute windows in bounded command batches.
+    /// Wait for each batch before reading results or advancing progress; throw on GPU setup/command failure.
     private static func runMetal(
         prepared: Prepared,
         config: Config,
@@ -773,6 +802,8 @@ nonisolated enum CWLCorrectorEngine {
             guard let commandBuffer = queue.makeCommandBuffer() else {
                 throw Error.commandFailed("unable to create command buffer")
             }
+            // Keep window-specific design/inverse/beta storage alive through GPU completion.
+            // The corrected output is shared across windows, so their encoders execute in order.
             var retainedBuffers: [MTLBuffer] = []
             for index in windowIndex..<batchEnd {
                 let window = prepared.windows[index]
@@ -859,6 +890,8 @@ nonisolated enum CWLCorrectorEngine {
         }
 
         let totalCount = prepared.channelCount * prepared.sampleCount
+        // All commands have completed. Copy shared GPU memory into owned Swift arrays
+        // before the local Metal buffers go out of scope.
         let pointer = correctedBuffer.contents().bindMemory(to: Float.self, capacity: totalCount)
         let output = Array(UnsafeBufferPointer(start: pointer, count: totalCount))
         verbose?(String(format: "CWL Metal: finished, elapsed=%.3fs", seconds(from: startedAt)))
@@ -868,6 +901,7 @@ nonisolated enum CWLCorrectorEngine {
         )
     }
 
+    /// Find a named shader function and compile its reusable compute pipeline, wrapping failures.
     private static func makePipeline(name: String, library: MTLLibrary, device: MTLDevice) throws -> MTLComputePipelineState {
         guard let function = library.makeFunction(name: name) else {
             throw Error.failedToCreatePipeline("kernel \(name) was not found")
@@ -879,6 +913,7 @@ nonisolated enum CWLCorrectorEngine {
         }
     }
 
+    /// Encode one GPU thread per EEG channel, with that thread solving and subtracting a full window.
     private static func encodeSerial(
         commandBuffer: MTLCommandBuffer,
         pipeline: MTLComputePipelineState,
@@ -912,6 +947,8 @@ nonisolated enum CWLCorrectorEngine {
         encoder.endEncoding()
     }
 
+    /// Encode a channel-wise coefficient solve followed by sample/channel-wise subtraction.
+    /// Use the supplied fence to make beta writes visible before the subtraction stage reads them.
     private static func encodeSampleParallel(
         commandBuffer: MTLCommandBuffer,
         solvePipeline: MTLComputePipelineState,
@@ -969,6 +1006,7 @@ nonisolated enum CWLCorrectorEngine {
         subtractEncoder.endEncoding()
     }
 
+    /// Sum taper contributions at each sample for overlap normalization; partial windows use unit weights.
     private static func overlapWeightSum(
         sampleCount: Int,
         windows: [PreparedWindow],
@@ -989,6 +1027,7 @@ nonisolated enum CWLCorrectorEngine {
         return weightSum
     }
 
+    /// Transpose a selected regressor window into [sample][regressor] order and subtract its column means.
     private static func centeredDesignRowMajor(
         design: [[Float]],
         range: Range<Int>,
@@ -1005,6 +1044,7 @@ nonisolated enum CWLCorrectorEngine {
         return matrix
     }
 
+    /// Compute the arithmetic mean over a valid half-open sample range, returning zero for an empty range.
     private static func mean(of values: [Float], in range: Range<Int>) -> Double {
         guard !range.isEmpty else { return 0 }
         var total = 0.0
@@ -1014,6 +1054,7 @@ nonisolated enum CWLCorrectorEngine {
         return total / Double(range.count)
     }
 
+    /// Delay positive lags and advance negative lags, extending endpoint values beyond the recording edges.
     private static func shifted(_ signal: [Float], by lag: Int) -> [Float] {
         guard lag != 0 else { return signal }
         let sampleCount = signal.count
@@ -1027,16 +1068,19 @@ nonisolated enum CWLCorrectorEngine {
         return output
     }
 
+    /// Create a symmetric triangular taper with positive endpoints so boundary samples retain overlap weight.
     private static func triangularWindow(_ length: Int) -> [Float] {
         guard length > 1 else { return [Float](repeating: 1, count: max(length, 0)) }
         let mid = Double(length - 1) / 2.0
         return (0..<length).map { Float(1.0 - abs(Double($0) - mid) / (mid + 1)) }
     }
 
+    /// Concatenate channel arrays in channel-major order for GPU storage.
     private static func flatten(_ channels: [[Float]]) -> [Float] {
         channels.flatMap { $0 }
     }
 
+    /// Split an appropriately sized flat buffer back into equal-length channel arrays.
     private static func unflatten(_ values: [Float], channelCount: Int, sampleCount: Int) -> [[Float]] {
         (0..<channelCount).map { channel in
             let start = channel * sampleCount
@@ -1044,6 +1088,7 @@ nonisolated enum CWLCorrectorEngine {
         }
     }
 
+    /// Copy nonempty Float values into labeled shared CPU/GPU storage, returning nil if allocation fails.
     private static func makeBuffer(device: MTLDevice, values: [Float], name: String) -> MTLBuffer? {
         let byteCount = values.count * MemoryLayout<Float>.stride
         guard byteCount > 0 else { return nil }
@@ -1054,6 +1099,8 @@ nonisolated enum CWLCorrectorEngine {
         return buffer
     }
 
+    /// Measure max/RMS difference over common channel/sample extents and record the worst location.
+    /// Unequal tails are ignored; relative differences are filled later by the comparison workflow.
     static func compare(_ lhs: [[Float]], _ rhs: [[Float]]) -> Comparison {
         var maxAbsoluteDifference = 0.0
         var squaredDifferenceSum = 0.0
@@ -1089,11 +1136,17 @@ nonisolated enum CWLCorrectorEngine {
         )
     }
 
+    /// Convert elapsed monotonic nanoseconds into seconds for timing reports.
     private static func seconds(from startedAt: UInt64) -> Double {
         let now = DispatchTime.now().uptimeNanoseconds
         return Double(now - startedAt) / 1_000_000_000
     }
 
+    /// Embedded Metal functions compiled at runtime by runMetal.
+    /// cwl_correct_window solves Xᵀy, multiplies by the cached inverse and subtracts one whole window per channel.
+    /// cwl_solve_window performs just that solve and writes [channel][regressor] beta values.
+    /// cwl_subtract_window evaluates the fit for one (channel, sample) and applies its overlap-normalized weight.
+    /// Kernel buffer slots and CWLParams field order must agree with the Swift encoding methods above.
     private static let metalSource = """
 #include <metal_stdlib>
 using namespace metal;

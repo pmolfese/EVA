@@ -128,6 +128,7 @@ enum ArtifactTemplateMergeBehavior: String, CaseIterable, Identifiable, Codable,
 
     var id: String { rawValue }
 
+    /// Explains how the selected polarity interprets a positive or negative correlation.
     var help: String {
         switch self {
         case .extend:
@@ -155,6 +156,7 @@ enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendab
     /// Whether topography scanning is requested.
     nonisolated var isEnabled: Bool { self != .off }
 
+    /// Short label used in the reference-map picker.
     var displayName: String {
         switch self {
         case .off: return "Off"
@@ -165,6 +167,7 @@ enum ArtifactTopographyMode: String, CaseIterable, Identifiable, Codable, Sendab
         }
     }
 
+    /// Explains which sample, average, or sequence supplies the spatial reference.
     var description: String {
         switch self {
         case .off:
@@ -196,6 +199,7 @@ enum ArtifactTopographyScanStyle: String, CaseIterable, Identifiable, Codable, S
 
     var id: String { rawValue }
 
+    /// Explains how a similarity trace becomes event boundaries in this scan mode.
     var description: String {
         switch self {
         case .windowed:
@@ -218,6 +222,8 @@ struct ArtifactTemplateDetectionResult: Sendable {
     /// The reference scalp map and its scanning metrics (nil when off).
     var topographyReference: ArtifactTemplateTopography? = nil
 
+    /// Reports how many more matches the comparison scan found than the selected-channel
+    /// scan, floored at zero. This is a count difference, not a set difference of events.
     var additionalComparisonCount: Int {
         max(comparisonEvents.count - selectedEvents.count, 0)
     }
@@ -362,6 +368,10 @@ nonisolated enum ArtifactTemplateDetector {
     /// main actor before updating UI state.
     typealias ProgressHandler = @Sendable (Int, Int) -> Void
 
+    /// Finds waveform matches to the chosen exemplar, then optionally finds matching
+    /// scalp maps. Returns events, comparison counts, an average, and a savable template.
+    /// The input signal is read only; detection does not clean or change its samples.
+    /// Invalid or empty recordings return an empty result with template metadata.
     static func detect(
         in signal: MFFSignalData,
         configuration: ArtifactTemplateConfiguration,
@@ -403,6 +413,9 @@ nonisolated enum ArtifactTemplateDetector {
         let compareWeight   = topoEnabled ? 0.25 : 0.40
         let topoWeight      = topoEnabled ? 0.25 : 0.00
 
+        /// Wraps a phase-local progress callback in its allotted part of overall progress.
+        /// The reported sample count is a scaled progress estimate, not a count of unique
+        /// samples visited: several scans may revisit the same recording.
         func phaseProgress(phase offset: Double, weight: Double) -> ProgressHandler? {
             guard let progress else { return nil }
             return { completed, total in
@@ -538,6 +551,10 @@ nonisolated enum ArtifactTemplateDetector {
 
     /// Builds the reference scalp map (or trajectory) from the exemplar window
     /// and scans the recording for matching candidates.
+    /// The caller supplies valid channel indices and a half-open exemplar range
+    /// (`exemplarStart..<exemplarEnd`). At least three channels are required.
+    /// The returned reference retains all channels for drawing, even when scoring
+    /// uses only a subset. An unusable reference produces no matches.
     static func detectTopography(
         signal: MFFSignalData,
         channelIndices: [Int],
@@ -883,6 +900,8 @@ nonisolated enum ArtifactTemplateDetector {
         guard w > 1, x.count > w else { return x }
         let n = x.count
         let half = w / 2
+        // prefix[k] holds the sum before index k. Subtracting two prefix values
+        // gives a window sum in constant time, including clipped edge windows.
         var prefix = [Float](repeating: 0, count: n + 1)
         for i in 0..<n { prefix[i + 1] = prefix[i] + x[i] }
         var out = [Float](repeating: 0, count: n)
@@ -1151,11 +1170,16 @@ nonisolated enum ArtifactTemplateDetector {
                             let targetD = candidateStartD + mappedT
                             guard targetD >= 0, targetD < totalDecimatedSamples,
                                   validTarget[targetD], validReference[t] else { continue }
+                            // A row-major matrix stores rows consecutively. This index selects
+                            // the target-time row and reference-frame column without
+                            // recalculating a channel-by-channel correlation.
                             let r = corrT[targetD * actualLength + t]
                             let w = refWeights[t]
                             weightedR  += r * w
                             usedWeight += w
                         }
+                        // Skipped frames contribute neither score nor weight; divide by
+                        // the weight actually used, not by the full reference weight.
                         if usedWeight > 0 {
                             let score = weightedR / usedWeight
                             if score > bestScore { bestScore = score }
@@ -1282,6 +1306,10 @@ nonisolated enum ArtifactTemplateDetector {
         return values
     }
 
+    /// Measures how much the selected channels differ at one sample: the population
+    /// standard deviation across channels, in the signal’s amplitude units. This is
+    /// a spatial measurement at one instant, not variance over time. Returns zero
+    /// when fewer than two channels have a value at that sample.
     private static func globalFieldPower(
         signal: MFFSignalData,
         sample: Int,
@@ -1376,6 +1404,9 @@ nonisolated enum ArtifactTemplateDetector {
         }
     }
 
+    /// Repeats waveform matching independently for each distinct channel and returns
+    /// channel-index → match-count entries for the comparison summary. Uses the same
+    /// exemplar bounds and settings as the main scan, without averaging channels.
     private static func singleChannelCounts(
         signal: MFFSignalData,
         channelIndices: [Int],
@@ -1397,6 +1428,11 @@ nonisolated enum ArtifactTemplateDetector {
         return counts
     }
 
+    /// Searches for the exemplar’s waveform shape across the requested channels.
+    /// Downsamples with an anti-aliasing filter, tries candidate windows and allowed
+    /// duration changes, then merges nearby hits. Events use center-based times
+    /// in seconds; internal candidate positions are in downsampled samples.
+    /// Returns no matches if there are no channels or no usable template window.
     private static func scan(
         signal: MFFSignalData,
         channelIndices: [Int],
@@ -1424,6 +1460,8 @@ nonisolated enum ArtifactTemplateDetector {
             return []
         }
 
+        // Normalization removes each channel’s offset and overall scale so the
+        // dot product compares shape. Original amplitudes still supply weights.
         let templatePairs = downsampledChannels.map { channel in
             normalized(Array(channel[templateStart..<min(templateEnd, channel.count)]))
         }
@@ -1432,6 +1470,8 @@ nonisolated enum ArtifactTemplateDetector {
         }
 
         let templates = templatePairs.map(\.normalized)
+        // Stronger exemplar channels contribute more. A small floor avoids zero
+        // total weight, but a flat template is still rejected by the checks above.
         let weights = templatePairs.map { max(rms($0.original), 0.0001) }
         let totalWeight = max(weights.reduce(0, +), 0.0001)
         let searchLengths = waveformStretchLengths(
@@ -1472,6 +1512,8 @@ nonisolated enum ArtifactTemplateDetector {
 
             for candidateIdx in startIdx..<endIdx {
                 let start = candidates[candidateIdx]
+                // Swift’s defer runs whenever this loop iteration exits, including continue.
+                // Each attempted candidate therefore advances progress once.
                 defer {
                     lock.lock()
                     globalCompleted += 1
@@ -1498,6 +1540,8 @@ nonisolated enum ArtifactTemplateDetector {
                         if windowLength == templateLength {
                             comparableWindow = rawWindow
                         } else {
+                            // Put a stretched window back onto the template’s sample grid before
+                            // comparing shapes; retain its original duration for the event.
                             comparableWindow = resampled(rawWindow, to: templateLength)
                         }
                         let window = normalized(comparableWindow).normalized
@@ -1525,6 +1569,8 @@ nonisolated enum ArtifactTemplateDetector {
                 }
 
                 if let bestScore, Double(bestScore) >= matchThreshold {
+                    // Tuple field `start` below stores this center, not the left edge.
+                    // Merging and event creation rely on that convention.
                     localHits.append((center, bestScore, bestWindowLength))
                 }
             }
@@ -1553,6 +1599,10 @@ nonisolated enum ArtifactTemplateDetector {
         }
     }
 
+    /// Combines nearby waveform hits using the configured discard/extend policy.
+    /// Despite its name, each tuple’s `start` is a window CENTER, in downsampled
+    /// samples. Discard keeps a stronger nearby hit; extend spans the full run and
+    /// returns its new center and duration. Does not convert positions to seconds.
     private static func mergeTemplateHits(
         _ hits: [(start: Int, score: Float, durationSamples: Int)],
         mergeSamples: Int,
@@ -1611,6 +1661,10 @@ nonisolated enum ArtifactTemplateDetector {
         }
     }
 
+    /// Proposes sorted, unique window onsets in downsampled sample coordinates.
+    /// Combines peaks in the weighted absolute-amplitude trace with a regular grid,
+    /// so quieter shape matches are still examined. Requires equally sized channel
+    /// rows and one weight per channel; returns empty if the template cannot fit.
     private static func candidateStarts(
         channels: [[Float]],
         weights: [Float],
@@ -1663,6 +1717,9 @@ nonisolated enum ArtifactTemplateDetector {
         return Array(Set(candidates)).sorted()
     }
 
+    /// Builds a small search grid of shorter, unchanged, and longer window lengths.
+    /// Clamps the requested fractional stretch to 0…0.75, rounds to whole samples,
+    /// and removes duplicates. The scan calls this only when at least three samples fit.
     private static func waveformStretchLengths(baseLength: Int, stretchRange: Double, maxLength: Int) -> [Int] {
         let base = min(max(baseLength, 3), max(maxLength, 3))
         let boundedRange = min(max(stretchRange, 0), 0.75)
@@ -1691,6 +1748,8 @@ nonisolated enum ArtifactTemplateDetector {
             return [Float](repeating: samples[0], count: outputCount)
         }
 
+        // Align the first and last input/output samples. Interior outputs blend
+        // their two neighboring input samples rather than selecting just one.
         let scale = Double(samples.count - 1) / Double(outputCount - 1)
         return (0..<outputCount).map { index in
             let position = Double(index) * scale
@@ -1726,6 +1785,11 @@ nonisolated enum ArtifactTemplateDetector {
         )
     }
 
+    /// Averages complete event-centered windows for every channel, returning nil
+    /// when none fit. Window placement deliberately uses `beginTimeSeconds` to
+    /// preserve stored-template replay behavior (see the note inside the loop).
+    /// The selected channels are metadata; the returned sample matrix includes
+    /// all channels and amplitude summaries ranked by peak magnitude.
     private static func average(
         signal: MFFSignalData,
         events: [MFFEvent],
@@ -1802,6 +1866,10 @@ nonisolated enum ArtifactTemplateDetector {
         )
     }
 
+    /// Packages detector settings, selected-channel exemplars, and optional averages
+    /// into the versioned value used for saving a template. This constructs data;
+    /// it does not write a file. Summary amplitudes come from the average when
+    /// available, otherwise from the original exemplar samples.
     private static func savedTemplate(
         signal: MFFSignalData,
         configuration: ArtifactTemplateConfiguration,
@@ -1851,6 +1919,8 @@ nonisolated enum ArtifactTemplateDetector {
         )
     }
 
+    /// Extracts only selected rows from an all-channel average, preserving selection
+    /// order and skipping invalid indices. Returns nil when there is no average.
     private static func selectedAverageSamples(from average: ArtifactTemplateAverage?) -> [[Float]]? {
         guard let average else { return nil }
         return average.selectedChannelIndices.compactMap { index in
@@ -1859,6 +1929,8 @@ nonisolated enum ArtifactTemplateDetector {
         }
     }
 
+    /// Clips an inclusive sample range to 0…upperBound while keeping its ends ordered.
+    /// The caller must supply a nonnegative upper bound (normally sampleCount − 1).
     private static func clamped(_ range: ClosedRange<Int>, upperBound: Int) -> ClosedRange<Int> {
         let lower = min(max(range.lowerBound, 0), upperBound)
         let upper = min(max(range.upperBound, lower), upperBound)
@@ -1866,6 +1938,9 @@ nonisolated enum ArtifactTemplateDetector {
     }
 
 
+    /// Keeps the original samples and returns a mean-centered, unit-length copy.
+    /// A dot product of two such copies measures Pearson waveform correlation.
+    /// Empty or constant windows have no usable normalized shape and return [].
     private static func normalized(_ samples: [Float]) -> (original: [Float], normalized: [Float]) {
         guard !samples.isEmpty else { return (samples, []) }
         let mean = samples.reduce(Float(0), +) / Float(samples.count)
@@ -1878,6 +1953,8 @@ nonisolated enum ArtifactTemplateDetector {
         return (samples, centered)
     }
 
+    /// Returns root-mean-square amplitude: square the samples, average, then take
+    /// the square root. The result has the original amplitude units; empty input is zero.
     private static func rms(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         let meanSquare = samples.reduce(Float(0)) { $0 + ($1 * $1) } / Float(samples.count)

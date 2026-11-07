@@ -33,3 +33,13 @@ replay-critical, any change to how the unmixing matrix is stored must go through
 `ICAReplayPayload` (and keep `PayloadConsistency` in [pipeline.md](pipeline.md)
 happy). Evaluate new labelling against the simulator's component truth rather
 than by eye.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [ICARunGrade.swift](../../../EVA/ICA/ICARunGrade.swift) | Measures and classifies ICA-run quality. |

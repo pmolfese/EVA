@@ -31,11 +31,17 @@ import Foundation
 
 // MARK: - Argument parsing
 
+/// Small token parser shared by the command handlers. Stores the last value per key
+/// and all repeated values, because experiment definitions may repeat an option.
+/// `nonisolated` keeps this data type independent of the app's main-actor defaults.
 nonisolated struct Arguments {
     private var values: [String: String] = [:]
     private var repeatedValues: [String: [String]] = [:]
     private(set) var positional: [String] = []
 
+    /// Consumes option/value pairs and positional arguments. A --key followed by another
+    /// --option (or the end) is stored as "true"; otherwise the next token is its value.
+    /// Parsing does not validate option names or types; each command does that afterward.
     init(_ tokens: [String]) {
         var index = 0
         while index < tokens.count {
@@ -45,6 +51,8 @@ nonisolated struct Arguments {
                 if index + 1 < tokens.count, !tokens[index + 1].hasPrefix("--") {
                     values[key] = tokens[index + 1]
                     repeatedValues[key, default: []].append(tokens[index + 1])
+                    // Consume both the option and its value; a negative number is a value because
+                    // only the double-hyphen prefix starts another option.
                     index += 2
                 } else {
                     values[key] = "true"
@@ -68,9 +76,13 @@ nonisolated struct Arguments {
         }
     }
 
+    /// Returns the last raw value supplied for an option, or nil when absent.
     func string(_ key: String) -> String? { values[key] }
+    /// Returns all occurrences of an option in input order, or an empty array.
     func strings(_ key: String) -> [String] { repeatedValues[key] ?? [] }
 
+    /// Parses an optional floating-point value; throws a usage error for malformed text.
+    /// Range and finiteness requirements belong to the setting's later validation.
     func double(_ key: String) throws -> Double? {
         guard let raw = values[key] else { return nil }
         guard let value = Double(raw) else {
@@ -79,6 +91,7 @@ nonisolated struct Arguments {
         return value
     }
 
+    /// Parses an optional signed integer, distinguishing absence from malformed input.
     func int(_ key: String) throws -> Int? {
         guard let raw = values[key] else { return nil }
         guard let value = Int(raw) else {
@@ -87,6 +100,7 @@ nonisolated struct Arguments {
         return value
     }
 
+    /// Parses an optional unsigned 64-bit integer, used for reproducible random seeds.
     func uint64(_ key: String) throws -> UInt64? {
         guard let raw = values[key] else { return nil }
         guard let value = UInt64(raw) else {
@@ -95,9 +109,12 @@ nonisolated struct Arguments {
         return value
     }
 
+    /// Reports whether the stored value is exactly "true", including a bare --flag.
     func flag(_ key: String) -> Bool { values[key] == "true" }
 }
 
+/// Returns the command reference printed by help and missing/unknown-command handling.
+/// This multiline string is user-facing text; command execution starts at the bottom.
 func usage() -> String {
     """
     Usage:
@@ -759,6 +776,8 @@ func importedMontage(
     }
 }
 
+/// Parses comma-separated veog/heog[:defect] entries into an auxiliary-channel map.
+/// A missing defect means noisy; later entries for the same channel replace earlier ones.
 func parseEOGDefects(_ spec: String) throws -> [EOGChannel: ChannelDefect] {
     var result: [EOGChannel: ChannelDefect] = [:]
     for entry in spec.split(separator: ",") {
@@ -787,6 +806,8 @@ func parseEOGDefects(_ spec: String) throws -> [EOGChannel: ChannelDefect] {
     return result
 }
 
+/// Parses comma-separated 1-based channel[:defect] entries; a bare number means noisy.
+/// Checks syntax/positivity here; makeConfig checks channel numbers against the montage.
 func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
     var result: [Int: ChannelDefect] = [:]
     for entry in spec.split(separator: ",") {
@@ -814,6 +835,8 @@ func parseBadChannels(_ spec: String) throws -> [Int: ChannelDefect] {
     return result
 }
 
+/// Parses comma-separated pairs such as 3:4 into 1-based bridged-channel records.
+/// Rejects equal/nonpositive endpoints; montage bounds and overlapping pairs are checked later.
 func parseChannelBridges(_ spec: String) throws -> [ChannelBridge] {
     try spec.split(separator: ",").map { entry in
         let parts = entry.split(separator: ":", maxSplits: 1)
@@ -829,6 +852,11 @@ func parseChannelBridges(_ spec: String) throws -> [ChannelBridge] {
     }
 }
 
+/// Resolves a scenario/default configuration, then the demo preset, then explicit flags.
+/// Optional model settings use local copies so changing one field preserves other loaded
+/// values. Validation below checks the combined result before expensive generation.
+/// `fitExperimentDuration` lets sweeps extend the recording to contain experiment tails.
+/// This reads scenario/geometry assets but does not generate or write signal samples.
 func makeConfig(_ arguments: Arguments, fitExperimentDuration: Bool = false) throws -> SimulationConfig {
     var config: SimulationConfig
     if let path = arguments.string("config") {
@@ -1005,6 +1033,8 @@ func makeConfig(_ arguments: Arguments, fitExperimentDuration: Bool = false) thr
         config.spatialModel = model
     }
 
+    // A nil optional disables a model. Local default values are only written back
+    // when flags request a change, preserving disabled models in a loaded scenario.
     var nonstationarity = config.neuralNonstationarity ?? NeuralNonstationarityConfig()
     var nonstationarityChanged = arguments.flag("with-nonstationarity")
 
@@ -1246,6 +1276,8 @@ func makeConfig(_ arguments: Arguments, fitExperimentDuration: Bool = false) thr
     if let value = try arguments.double("erp-template-rate") {
         erp.measuredTemplateRateHz = value; erpChanged = true
     }
+    // Repeated condition/peak definitions must survive parsing; the last-value
+    // dictionary alone would lose all but the final definition for each option.
     let experimentOptions = ERPExperimentOptions.keys.reduce(into: [String: [String]]()) { result, key in
         let supplied = arguments.strings(key)
         if !supplied.isEmpty { result[key] = supplied }
@@ -1349,6 +1381,8 @@ func makeConfig(_ arguments: Arguments, fitExperimentDuration: Bool = false) thr
         config.motionSensorSigmoidGain = value
     }
 
+    // Validate the resolved configuration, including values inherited from JSON.
+    // These checks run after all overrides so related settings can be checked together.
     guard config.channelCount > 0 else { throw SimulateError.usage("--channels must be positive") }
     if let path = config.coordinatesPath {
         _ = try importedMontage(path: path, channelCount: config.channelCount)
@@ -1655,6 +1689,11 @@ func makeConfig(_ arguments: Arguments, fitExperimentDuration: Bool = false) thr
 
 // MARK: - generate
 
+/// Generates and writes clean/noisy MFF twins, truth metadata, and requested extra outputs.
+/// The order matters: neural signals and ERPs form clean truth; artifacts enter its copy;
+/// reference conversion precedes recording defects such as bridging and clipping.
+/// The optional throwing callback scores the in-memory twins after files are written.
+/// Returns the uncorrected baseline score; callers may intentionally discard it.
 @discardableResult
 func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory: URL,
                  evaluate: (([[Double]], [[Double]], [ERPTrialTruth]) throws -> Void)? = nil) throws -> CorrectionScore {
@@ -1724,17 +1763,9 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
     }
 
     var leadFieldConvergence: LeadFieldConvergenceReport?
-    // One check covers every lead field this run builds — the ERP's (its source
-    // comes from `makeSources`, same radius fraction) and the moving-source
-    // endpoint's (rotation preserves radius) — because **every source shares one
-    // eccentricity**, and truncation error depends on r/R. The ocular model uses
-    // a closed form and no series at all.
-    //
-    // Roadmap 4.3 ends that assumption: an explicitly placed ERP dipole can sit
-    // deeper than the ongoing sources, and this check would silently stop
-    // covering it. When 4.3 lands, move the check inside
-    // `SphericalForwardModel.leadField` as an opt-in parameter so it travels
-    // with every call site instead of being computed once here.
+    // Report convergence for the ongoing neural sources at their configured depth.
+    // Explicitly placed ERP sources can have different depths, so ERPGenerator
+    // requests its own convergence verification at each placed-source call site.
     if config.eegGenerationModel == .dipole {
         let sources = DipoleEEGGenerator.makeSources(config: config)
         let report = try SphericalForwardModel.convergenceReport(
@@ -2255,6 +2286,8 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
             .map { "\($0.key) (\($0.value))" }
         print("Bad EOG channels: " + described.joined(separator: ", "))
     }
+    // Optional invocation (`?`) skips a missing callback. `try` propagates scoring
+    // errors to the command handler even though the recording files already exist.
     try evaluate?(eeg.channels, noisy, erp?.trials ?? [])
     print(String(format: "Uncorrected broadband SNR: %.4f", baseline.broadbandSNR))
     return baseline
@@ -2262,6 +2295,9 @@ func runGenerate(config: SimulationConfig, arguments: Arguments, outputDirectory
 
 // MARK: - score
 
+/// Loads MFF samples as channels × samples Doubles with rate and optional names.
+/// Trims rounded padSeconds from both ends; if that would remove the whole channel,
+/// keeps the original channel instead. This helper does not resample or align channels.
 func loadChannels(_ path: String, padSeconds: Double) throws
     -> (channels: [[Double]], rate: Double, names: [String]?) {
     let url = URL(fileURLWithPath: path)
@@ -2275,12 +2311,14 @@ func loadChannels(_ path: String, padSeconds: Double) throws
     return (channels, signal.samplingRate, signal.channelNames)
 }
 
-/// Left-pads in Swift rather than via `%-8s`, which needs a C string whose
+/// Right-pads with spaces in Swift rather than via `%-8s`, which needs a C string whose
 /// lifetime is not guaranteed past the call that produced it.
 func padded(_ text: String, to width: Int) -> String {
     text.count >= width ? text : text + String(repeating: " ", count: width - text.count)
 }
 
+/// Builds the human-readable broadband, frequency-band, and channel score tables.
+/// An optional uncorrected baseline adds per-band SNR gains using corresponding band indices.
 func formatted(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
     var lines: [String] = []
     lines.append("")
@@ -2336,6 +2374,8 @@ func formatted(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
     return lines.joined(separator: "\n")
 }
 
+/// Serializes aggregate/band/channel correction scores in a fixed CSV column order.
+/// Missing baseline fields become empty strings; textual fields are joined directly.
 func csv(_ score: CorrectionScore, baseline: CorrectionScore?) -> String {
     var lines = ["label,scope,channel,band,low_hz,high_hz,snr,uncorrected_snr,correlation,rmse_uv,spectral_distortion_db_rms,power_ratio_db,clean_rms_uv,residual_rms_uv"]
     for (index, band) in score.bands.enumerated() {
@@ -2529,16 +2569,6 @@ func runGenerateGroup(_ arguments: Arguments) throws {
 
 // MARK: - evaluate-surrogate
 
-/// Repeated-seed evaluation of surrogate separation across a swept condition.
-///
-/// Exists because single runs cannot support the comparison. Measured across
-/// five seeds at one fixed configuration, corrected broadband SNR ranged 1.39 to
-/// 2.53 — a spread wider than most of the differences anyone would want to claim
-/// between conditions. Rusiniak et al. used 55 subjects; that was not incidental
-/// generosity, it is what the variance demands.
-///
-/// Everything runs in memory: no MFF is written, so a sweep of dozens of runs
-/// costs seconds rather than minutes.
 /// Resolves a `--correction-head` name to a standard head model. SI-4 uses this
 /// to build the PCA-S brain basis on a *different* head than the one that
 /// generated the truth — the "generate with one, invert with another" mismatch
@@ -2582,6 +2612,10 @@ func perturbedCorrectionHead(
                              centerMeters: center ?? truth.centerMeters, shells: shells)
 }
 
+/// Runs repeated-seed, in-memory BCG separation at each requested brain-basis offset.
+/// Forces dipole EEG, average reference, generator BCG, and no gradients; optional ERP
+/// scoring requires placed components. Skips seeds without usable artifact components.
+/// Prints summary tables or JSON with successful-seed counts; writes no MFF packages.
 func runEvaluateSurrogate(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "seeds", "offsets", "sources", "components", "brain-regularization",
@@ -2776,6 +2810,8 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
             )
             let output = try SourceInformedSeparation.apply(sourceInformedOperator, to: noisy)
 
+            /// Returns a linear amplitude SNR against this seed's clean referenced recording.
+            /// Sums signal/error energies across channels and samples; negligible error gives infinity.
             func snr(_ candidate: [[Double]]) -> Double {
                 var signal = 0.0
                 var residual = 0.0
@@ -2846,6 +2882,8 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
                 // components and trial jitter both move the realized peak, and
                 // scoring against a number the data never had would charge every
                 // method for the simulator's own design.
+                /// Scores clean, corrected, and noisy data with identical ERP onsets, spatial model,
+                /// and peak window. A nil result means this seed cannot supply the requested ERP metrics.
                 func evaluate(_ data: [[Double]]) -> ERPEvaluationResult? {
                     ERPEvaluation.evaluate(
                         channels: data, samplingRate: config.samplingRate,
@@ -2908,9 +2946,13 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         ))
     }
 
+    /// Returns the arithmetic mean across successful seeds, or zero for an empty list.
+    /// The JSON wrapper below separately represents missing results as null.
     func mean(_ values: [Double]) -> Double {
         values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count)
     }
+    /// Reports sample standard deviation across seeds (n − 1 denominator).
+    /// With fewer than two successful seeds there is no measured spread, so return zero.
     func standardDeviation(_ values: [Double]) -> Double {
         guard values.count > 1 else { return 0 }
         let m = mean(values)
@@ -2919,9 +2961,12 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
     }
 
     if arguments.flag("json") {
+        /// JSON cannot encode NaN or infinity as numbers; represent them as null instead.
         func jsonNumber(_ value: Double) -> Any {
             value.isFinite ? value : NSNull()
         }
+        /// Packages count, mean, sample SD, and individual seed values for JSON output.
+        /// Empty results keep count zero and use null statistics rather than misleading zeros.
         func statistics(_ values: [Double]) -> [String: Any] {
             guard !values.isEmpty else {
                 return [
@@ -3064,6 +3109,8 @@ func runEvaluateSurrogate(_ arguments: Arguments) throws {
         // about — comparing two means whose spreads overlap completely.
         print("  condition        trials kept    ERP SNR       latency err     "
             + "amplitude      explained var")
+        /// Prints one corrected or uncorrected ERP row, including across-seed spread.
+        /// The Boolean chooses the matching arrays from the same condition result.
         func describe(_ label: String, _ result: ConditionResult, corrected: Bool) {
             let trials = corrected ? result.correctedTrials : result.uncorrectedTrials
             let snr = corrected ? result.correctedERPSNR : result.uncorrectedERPSNR
@@ -3122,6 +3169,10 @@ struct SurrogateGridMetrics {
     var conditionIndicator: [Double] = []
 }
 
+/// Evaluates one grid condition over seeds 1...seedCount without writing recordings.
+/// Truth uses the base head/montage; optional correction geometry changes only the brain
+/// basis used by separation. Seeds without usable artifact components are skipped.
+/// Returns per-seed metrics; the conditioning array may be shorter if pivots are invalid.
 func evaluateSurrogateCore(
     base: SimulationConfig, montage: Montage, correctionHead: SphericalHeadModel?,
     correctionMontage: Montage?, offset: Double, regionalCount: Int, componentCount: Int,
@@ -3162,6 +3213,8 @@ func evaluateSurrogateCore(
         }
         let output = try SourceInformedSeparation.apply(op, to: noisy)
 
+        /// Returns sqrt(clean energy / residual energy) for this seed's referenced data.
+        /// This is a linear amplitude ratio; effectively zero residual returns infinity.
         func snr(_ candidate: [[Double]]) -> Double {
             var signal = 0.0, residual = 0.0
             for c in cleanReferenced.indices {
@@ -3236,7 +3289,9 @@ func runEvaluateSurrogateGrid(_ arguments: Arguments) throws {
         try importedMontage(path: $0, channelCount: base.channelCount).montage
     } ?? Montage.standard(count: base.channelCount)
 
+    /// Averages successful grid measurements; an empty set is represented as zero here.
     func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+    /// Computes sample standard deviation across grid seeds, or zero with fewer than two.
     func sd(_ v: [Double]) -> Double {
         guard v.count > 1 else { return 0 }
         let m = mean(v)
@@ -3404,8 +3459,8 @@ func runCorrect(_ arguments: Arguments) throws {
     // this wrong is not a subtle degradation: an average-referenced lead field
     // against infinity-referenced data leaves the common mode unexplainable by
     // the brain block, the artifact block absorbs it, and the filter removes
-    // most of the brain signal along with it. Prefer the truth sidecar, which
-    // records the convention (roadmap 4.6); fall back to the flag.
+    // most of the brain signal along with it. Start with the truth sidecar when
+    // supplied; an explicit --reference flag below overrides that convention.
     var reference: EEGReference = .average
     var simulatedSources: [SimulatedSource] = []
     var simulationTruth: SimulationTruth?
@@ -3588,6 +3643,9 @@ func runCorrect(_ arguments: Arguments) throws {
     }
 }
 
+/// Loads clean/corrected recordings and an optional noisy baseline, checks channel count
+/// and rate, then reports time/frequency-domain error. Optional CSV/JSON paths save results.
+/// Inputs must already have matching channel order and temporal alignment.
 func runScore(_ arguments: Arguments) throws {
     try arguments.validate(known: ["truth", "corrected", "baseline", "label", "pad-seconds", "csv", "json"])
 
@@ -3660,6 +3718,8 @@ func runScore(_ arguments: Arguments) throws {
 
 // MARK: - event-detection score
 
+/// Loads events from either a JSON wrapper/array or matching event codes in an MFF.
+/// The eventCode filter applies only to MFF; JSON already describes the detection set.
 func loadDetectedEvents(_ path: String, eventCode: String) throws -> [DetectedEvent] {
     let url = URL(fileURLWithPath: path)
     if url.pathExtension.lowercased() == "json" {
@@ -3677,6 +3737,9 @@ func loadDetectedEvents(_ path: String, eventCode: String) throws -> [DetectedEv
     }
 }
 
+/// Selects true event times and a default matching tolerance for the requested artifact.
+/// Scores supplied detections, prints detection/timing metrics, and optionally writes JSON.
+/// CLI tolerance is milliseconds; DetectionMetrics receives seconds.
 func runEventScore(_ arguments: Arguments) throws {
     try arguments.validate(known: [
         "truth", "detected", "type", "event-code", "tolerance-ms", "json"
@@ -3768,6 +3831,9 @@ func runEventScore(_ arguments: Arguments) throws {
 
 // MARK: - ERP score
 
+/// Reads an ERP wrapper, component array, or simulation truth sidecar.
+/// For sidecar trial-level scoring, excludes omitted responses and optionally overlapping
+/// trials; otherwise uses stored average components. Shape/decode failures become IO errors.
 func loadERPComponents(
     _ path: String, level: String = "average", excludeOverlap: Bool = false
 ) throws -> [ERPComponent] {
@@ -3795,6 +3861,9 @@ func loadERPComponents(
     )
 }
 
+/// Compares estimated ERP components with average- or trial-level truth by identity.
+/// Reports amplitude/latency errors and unmatched components, with optional JSON export.
+/// The overlap exclusion applies to truth trials so they define the intended scoring set.
 func runERPScore(_ arguments: Arguments) throws {
     try arguments.validate(known: ["truth", "estimated", "level", "exclude-overlap", "json"])
     guard let truthPath = arguments.string("truth"),
@@ -3850,6 +3919,9 @@ nonisolated struct PACScoreReport: Codable, Sendable {
     var circularPhaseErrorDegrees: Double
 }
 
+/// Compares estimated phase-amplitude coupling strength and preferred phase with truth.
+/// Uses circular phase distance so crossing the ±π boundary is not a large error.
+/// Prints the report and optionally writes it as JSON.
 func runPACScore(_ arguments: Arguments) throws {
     try arguments.validate(known: ["truth", "estimated", "json"])
     guard let truthPath = arguments.string("truth"),
@@ -3869,6 +3941,8 @@ func runPACScore(_ arguments: Arguments) throws {
         PACEstimate.self,
         from: Data(contentsOf: URL(fileURLWithPath: estimatedPath))
     )
+    // Wrapping through sin/cos chooses the shortest signed angular difference
+    // in [-π, π], then the report uses its magnitude.
     let signedPhaseError = atan2(
         sin(estimated.preferredPhaseRadians - known.preferredPhaseRadians),
         cos(estimated.preferredPhaseRadians - known.preferredPhaseRadians)
@@ -3900,6 +3974,8 @@ func runPACScore(_ arguments: Arguments) throws {
 
 // MARK: - source-space score
 
+/// Decodes source-location estimates from a JSON wrapper or a bare array.
+/// Positions and optional orientations are interpreted by the EstimatedSource model.
 func loadEstimatedSources(_ path: String) throws -> [EstimatedSource] {
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     let decoder = JSONDecoder()
@@ -3914,6 +3990,8 @@ func loadEstimatedSources(_ path: String) throws -> [EstimatedSource] {
     )
 }
 
+/// Formats matched/missed/extra source counts, spatial errors, and optional axial
+/// orientation errors. Distances are already in millimetres in the supplied score.
 func formatted(_ score: SourceLocationScore) -> String {
     var lines = [
         "",
@@ -3938,6 +4016,8 @@ func formatted(_ score: SourceLocationScore) -> String {
     return lines.joined(separator: "\n")
 }
 
+/// Formats source waveform matches and correlation summaries. Absolute correlation
+/// measures recovery independently of sign; each individual match still shows its sign.
 func formatted(_ score: SourceRecoveryScore) -> String {
     var lines = [
         "",
@@ -3975,10 +4055,15 @@ struct CleaningScore: Codable, Sendable {
     var correctedSpectralDistortionDbRMS: Double
 }
 
+/// Computes removed variance, remaining error, artifact reduction, and SNR against truth.
+/// Arrays are channels × samples and must share channel order/count. Pairwise differences
+/// use the shorter sample count per channel; a zero denominator produces fraction zero.
 func scoreCleaningCore(
     label: String, clean: [[Double]], noisy: [[Double]], corrected: [[Double]],
     rate: Double, names: [String]?
 ) -> CleaningScore {
+    /// Subtracts matching channels over their shared sample prefix. The caller must supply
+    /// the same channel count; this truncates sample tails without aligning or resampling.
     func difference(_ a: [[Double]], _ b: [[Double]]) -> [[Double]] {
         a.indices.map { channel in
             let x = a[channel], y = b[channel]
@@ -3986,6 +4071,7 @@ func scoreCleaningCore(
             return (0..<count).map { x[$0] - y[$0] }
         }
     }
+    /// Squares the generator's pooled standard deviation to obtain pooled signal variance.
     func variance(_ x: [[Double]]) -> Double {
         let sd = EEGGenerator.pooledStandardDeviation(x); return sd * sd
     }
@@ -4010,6 +4096,9 @@ func scoreCleaningCore(
         correctedSpectralDistortionDbRMS: corrected2.spectralDistortionDbRMS)
 }
 
+/// Loads the clean/noisy/corrected triple, checks rate/channel count, and computes the
+/// cleaning calibration metrics. Prints results and optionally saves JSON, encoding
+/// nonfinite numeric results as explicit strings.
 func runScoreCleaning(_ arguments: Arguments) throws {
     try arguments.validate(known: ["clean", "noisy", "corrected", "label", "pad-seconds", "json"])
     guard let cleanPath = arguments.string("clean") else {
@@ -4058,6 +4147,9 @@ func runScoreCleaning(_ arguments: Arguments) throws {
 
 // MARK: - score-preservation (did a cleaner keep the real brain transients?)
 
+/// Scores known brain-transient windows on each event's strongest channel.
+/// Reports 1 − error variance / clean variance by type; invalid windows are skipped.
+/// Loads without padding because truth onset times are relative to recording start.
 func runScorePreservation(_ arguments: Arguments) throws {
     try arguments.validate(known: ["clean", "corrected", "transients", "json"])
     guard let cleanPath = arguments.string("clean") else {
@@ -4081,6 +4173,8 @@ func runScorePreservation(_ arguments: Arguments) throws {
 
     // Per-event: how much of the transient survived cleaning, on its strongest
     // channel. 1 = preserved exactly, 0 = flattened, <0 = distorted past removal.
+    /// Computes population variance within one event window, or zero for an empty slice.
+    /// ArraySlice preserves original indices, but reduction visits just the selected samples.
     func variance(_ x: ArraySlice<Double>) -> Double {
         guard !x.isEmpty else { return 0 }
         let mean = x.reduce(0, +) / Double(x.count)
@@ -4097,10 +4191,13 @@ func runScorePreservation(_ arguments: Arguments) throws {
         let correctedWindow = corrected.channels[channel][start..<end]
         let errors = zip(cleanWindow, correctedWindow).map { $0 - $1 }[...]
         let cleanVar = variance(cleanWindow)
+        // A perfectly preserved window has zero error and scores 1. Flattening it
+        // leaves error equal to the original waveform and scores 0; worse errors go negative.
         let preserved = cleanVar > 1e-12 ? 1 - variance(errors) / cleanVar : 1
         byType[event.type, default: []].append(preserved)
     }
 
+    /// Averages preservation scores within a transient type, or zero when none are available.
     func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
     print("brain-transient preservation — \(episodes.count) events")
     print("  (1 = kept intact, 0 = flattened, <0 = distorted; a wavelet reducer that")
@@ -4145,6 +4242,8 @@ func amariIndex(mixing: [[Double]], unmixing: [[Double]]) -> Double {
             product[i][j] = abs(sum)
         }
     }
+    // Normalize each row/column by its largest response: a single nonzero entry
+    // contributes zero leakage regardless of source scaling or permutation.
     var rowTerm = 0.0
     for i in 0..<n {
         let rowMax = product[i].max() ?? 0
@@ -4161,6 +4260,8 @@ func amariIndex(mixing: [[Double]], unmixing: [[Double]]) -> Double {
     return (rowTerm + colTerm) / (2 * Double(n))
 }
 
+/// Loads true mixing and estimated unmixing matrices, computes the Amari leakage index,
+/// and prints it, optionally writing JSON. Rows/columns must use matching channel order.
 func runScoreMixing(_ arguments: Arguments) throws {
     try arguments.validate(known: ["true-mixing", "unmixing", "json"])
     guard let mixingPath = arguments.string("true-mixing") else {
@@ -4169,6 +4270,7 @@ func runScoreMixing(_ arguments: Arguments) throws {
     guard let unmixingPath = arguments.string("unmixing") else {
         throw SimulateError.usage("score-mixing needs --unmixing <W.json> (sources × channels)")
     }
+    /// Decodes a JSON array of numeric rows; matrix dimensions are interpreted by amariIndex.
     func loadMatrix(_ path: String) throws -> [[Double]] {
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         return try JSONDecoder().decode([[Double]].self, from: data)
@@ -4260,6 +4362,8 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
                 var cov = 0.0
                 let chMean = cleaned[channel].prefix(count).reduce(0, +) / Double(max(1, count))
                 for i in 0..<count { cov += (cleaned[channel][i] - chMean) * veog[i] }
+                // Least-squares slope: covariance divided by VEOG energy estimates the
+                // channel's ocular contribution. Subtract that scaled, mean-centered trace.
                 let beta = cov / veogVar
                 for i in 0..<count { cleaned[channel][i] -= beta * veog[i] }
             }
@@ -4270,6 +4374,8 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
         let topographies = erpInjection.componentSources.map(\.topography)
         let nominal = erpInjection.componentSources.map(\.nominalPeakLatencySeconds).min() ?? 0.3
         let fwhmStart = nominal - 0.02, fwhmEnd = nominal + 0.02
+        /// Scores target ERPs with shared timing/topographies and the selected rejection policy.
+        /// Using the same peak window keeps the three strategies comparable.
         func evaluate(_ data: [[Double]], thresholds: ERPEvaluationThresholds) -> ERPEvaluationResult? {
             ERPEvaluation.evaluate(
                 channels: data, samplingRate: config.samplingRate, onsets: onsets,
@@ -4281,6 +4387,8 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
               let dirty = evaluate(noisy, thresholds: acceptAll),
               let kept = evaluate(cleaned, thresholds: acceptAll) else { continue }
 
+        /// Appends one seed's metrics to the caller's row (`inout` makes those changes persist).
+        /// Bias is relative to this seed's clean ERP; latency is converted from seconds to ms.
         func record(_ r: ERPEvaluationResult, into row: inout Row) {
             row.accepted.append(Double(r.acceptedTrials))
             row.snr.append(r.signalToNoise)
@@ -4293,7 +4401,9 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
     }
 
     guard completed > 0 else { throw SimulateError.usage("no seeds produced a scorable ERP") }
+    /// Averages a retention metric over completed seeds; an empty array yields zero.
     func mean(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.reduce(0, +) / Double(v.count) }
+    /// Returns sample standard deviation for retention results; fewer than two yield zero.
     func sd(_ v: [Double]) -> Double {
         guard v.count > 1 else { return 0 }
         let m = mean(v); return (v.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(v.count - 1)).squareRoot()
@@ -4302,6 +4412,7 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
     print("  ~\(String(format: "%.0f", mean(contaminated))) of \(base.erp?.trialCount ?? 0) trials contaminated by a blink")
     print("  strategy       trials kept     avg SNR      peak bias (µV)   latency bias (ms)")
     print("  --------------------------------------------------------------------------------")
+    /// Prints the mean retained trials, SNR, amplitude bias, and latency bias for a strategy.
     func line(_ name: String, _ r: Row) {
         print(String(format: "  %-13@  %5.1f          %5.2f        %+6.2f           %+6.1f",
             name as NSString, mean(r.accepted), mean(r.snr), mean(r.ampBias), mean(r.latencyBias)))
@@ -4317,6 +4428,7 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
 
     if let path = arguments.string("output") {
         var rows = ["strategy,trials_kept_mean,snr_mean,snr_sd,peak_bias_uv_mean,peak_bias_uv_sd,latency_bias_ms_mean"]
+        /// Serializes one strategy's means and selected sample SDs in the CSV header's order.
         func csvRow(_ name: String, _ r: Row) -> String {
             [name, String(format: "%.3f", mean(r.accepted)), String(format: "%.4f", mean(r.snr)),
              String(format: "%.4f", sd(r.snr)), String(format: "%.4f", mean(r.ampBias)),
@@ -4328,6 +4440,9 @@ func runEvaluateRetention(_ arguments: Arguments) throws {
     }
 }
 
+/// Scores estimated source locations and/or recovered source waveforms against truth.
+/// Waveform scoring regenerates seeded dipole source time courses from the stored config,
+/// then trims all signals to a shared interval. Prints and optionally saves both reports.
 func runSourceScore(_ arguments: Arguments) throws {
     try arguments.validate(known: ["truth", "estimated", "recovered", "pad-seconds", "json"])
     guard let truthPath = arguments.string("truth") else {
@@ -4407,10 +4522,16 @@ func runSourceScore(_ arguments: Arguments) throws {
 
 // MARK: - sweep
 
+/// Applies one named numeric sweep setting to the caller's configuration.
+/// `inout` passes the changed configuration back; SimulationSweep validates the axis.
 func applySweep(_ parameter: String, value: Double, to config: inout SimulationConfig) throws {
     try SimulationSweep.apply(SimulationSweepAxis(parameter: parameter, values: [value]), value: value, to: &config)
 }
 
+/// Preflights every one- or two-axis/repetition configuration before generating recordings.
+/// Uses paired seeds across parameter cells, saves each resolved scenario and evaluation,
+/// and writes incremental JSON plus final summary/aggregate CSV files. Existing sweep
+/// outputs are rejected; deferred cleanup removes only the temporary preflight folder.
 func runSweep(_ arguments: Arguments) throws {
     let sweepKeys: Set<String> = ["parameter", "values", "condition", "peak", "parameter2", "values2", "condition2", "peak2",
         "repeats", "evaluate", "eval-pre", "eval-post", "eval-peak-start", "eval-peak-end", "eval-channel", "eval-reject", "sweep-fixed-duration"]
@@ -4418,6 +4539,8 @@ func runSweep(_ arguments: Arguments) throws {
     for key in ["write-config", "write-mixing", "write-transients"] where arguments.string(key) != nil {
         throw SimulateError.usage("--\(key) is ambiguous for a sweep. Every run saves its resolved scenario and truth automatically.")
     }
+    /// Reads one sweep axis, using an empty suffix for the first and "2" for the second.
+    /// Condition/peak identifiers optionally target one ERP element within the configuration.
     func axis(_ suffix: String) throws -> SimulationSweepAxis {
         guard let parameter = arguments.string("parameter" + suffix), let values = arguments.string("values" + suffix) else {
             throw SimulateError.usage("Sweep needs --parameter\(suffix) and --values\(suffix).")
@@ -4459,6 +4582,8 @@ func runSweep(_ arguments: Arguments) throws {
         for (j, second) in (plan.axes.count == 2 ? plan.axes[1].values.map(Optional.some) : [nil]).enumerated() {
             for repetition in 0..<plan.repeats {
                 var config = base
+                // The same repetition seed is reused across cells. That pairs noise draws
+                // so parameter comparisons are not confounded by unrelated random recordings.
                 config.seed = repetition == 0 ? base.seed : ERPExperimentSampler.seed(base.seed, "sweep-repeat/\(repetition)")
                 try SimulationSweep.apply(plan.axes[0], value: value, to: &config)
                 if let second { try SimulationSweep.apply(plan.axes[1], value: second, to: &config) }
@@ -4497,6 +4622,8 @@ func runSweep(_ arguments: Arguments) throws {
         row.uncorrectedSNR = score.broadbandSNR.isFinite ? score.broadbandSNR : nil
         report.rows.append(row)
         try encoder.encode(row).write(to: directory.appendingPathComponent("evaluation.json"), options: .atomic)
+        // Persist accumulated results after each completed cell; a later error need
+        // not erase the report for recordings already generated.
         try encoder.encode(report).write(to: root.appendingPathComponent("sweep_results.json"), options: .atomic)
         summary.append([plan.axes[0].parameter, String(row.value), String(score.broadbandSNR), row.directory,
                         row.secondValue.map(String.init(describing:)) ?? "", String(row.repetition), String(row.seed)].map(sweepCSV).joined(separator: ","))
@@ -4516,14 +4643,20 @@ func runSweep(_ arguments: Arguments) throws {
     print("Wrote sweep_results.json, sweep_summary.csv, and sweep_aggregates.csv")
 }
 
+/// Quotes a CSV field and doubles embedded quotes so commas/newlines remain part of it.
 func sweepCSV(_ value: String) -> String { "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
 
+/// Uses plain integer text for safely representable whole values; otherwise preserves
+/// Swift's Double formatting. Used in sweep labels, directory names, and reports.
 func formatSweepValue(_ value: Double) -> String {
     value.isFinite && abs(value) < 1e15 && value == value.rounded() ? String(Int(value)) : String(value)
 }
 
 // MARK: - Entry point
 
+// Top-level Swift statements are this executable's entry point. Drop argv[0]
+// (the executable path), read the command, then parse its remaining options.
+// Exit 2 means missing/unknown command; thrown errors and failed self-tests use 1.
 let tokens = Array(CommandLine.arguments.dropFirst())
 guard let command = tokens.first else {
     print(usage())
@@ -4585,6 +4718,8 @@ do {
         try arguments.validate(known: [])
         var failures = 0
         print("")
+        // Known limitations remain visible but do not increment the failure count.
+        // All outcomes are printed before deciding the process exit status.
         for outcome in SelfTest.run() {
             let mark = outcome.passed ? "PASS" : (outcome.knownLimitation == nil ? "FAIL" : "KNOWN")
             if !outcome.passed, outcome.knownLimitation == nil { failures += 1 }

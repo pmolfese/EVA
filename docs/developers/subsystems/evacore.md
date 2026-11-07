@@ -1,10 +1,15 @@
-# EVACore — core library — `EVACore/` (Core, Forward, Geometry, Channels, Registration, Imaging, Epoching)
+# EVACore — shared core sources — `EVACore/` (Core, Forward, Geometry, Channels, Registration, Imaging, Epoching)
 
 **Purpose.** The UI-free computational heart, reusable by the app, the CLI tools,
 QuickLook, and Resolve. This page covers the math and geometry groups; the format
 readers are on [evacore-io.md](evacore-io.md), synthetic-data generation is on
 [evacore-simulation.md](evacore-simulation.md), and the `eva.xml` schema
 (`EVACore/Pipeline`) is documented with [pipeline.md](pipeline.md).
+
+`EVACore/` is compiled directly into multiple products; it is not a standalone
+library target or separately imported module. Check target membership and
+standalone tool source lists when adding a file; see
+[source groups and build targets](../architecture.md#source-groups-and-build-targets).
 
 **Start here.** `DSP` (filters/FFT/convolution) and `LinearAlgebra`
 (LU/Cholesky) are the primitives. The **forward model** is the crown jewel:

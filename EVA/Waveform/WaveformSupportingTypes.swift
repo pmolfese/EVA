@@ -25,8 +25,10 @@ enum ArtifactTopographyChannelScope: CaseIterable, Hashable, Identifiable {
     case topN
     case channelSet
 
+    /// Use the enum case itself as stable picker identity.
     var id: Self { self }
 
+    /// Display label for the topography channel-selection scope.
     var label: String {
         switch self {
         case .allGood:     return "All good channels"
@@ -40,6 +42,7 @@ enum ArtifactDefinitionPanel: String, CaseIterable, Identifiable {
     case waveforms = "Waveforms"
     case topography = "Topography"
 
+    /// Stable identity for an artifact-definition tab.
     var id: String { rawValue }
 }
 
@@ -47,6 +50,7 @@ enum ArtifactDefinitionResultSource: Equatable {
     case waveform
     case topography
 
+    /// Short name of the definition method shown with its result.
     var displayName: String {
         switch self {
         case .waveform: return "Waveform"
@@ -54,6 +58,7 @@ enum ArtifactDefinitionResultSource: Equatable {
         }
     }
 
+    /// Name used when confirming which definition result to accept.
     var confirmationName: String {
         switch self {
         case .waveform: return "Waveform"
@@ -61,6 +66,7 @@ enum ArtifactDefinitionResultSource: Equatable {
         }
     }
 
+    /// SF Symbol name representing waveform or topography definition.
     var systemImage: String {
         switch self {
         case .waveform: return "waveform.path"
@@ -80,6 +86,7 @@ enum WaveletCandidateSortColumn: String, CaseIterable, Identifiable {
     case contributingChannels = "Contrib"
     case type = "Type"
 
+    /// Stable identity for a sortable candidate column.
     var id: String { rawValue }
 
     /// Rank reads naturally low-to-high; the rest are most interesting
@@ -98,6 +105,7 @@ enum WaveletExplorerChannelScope: String, CaseIterable, Identifiable {
     case all = "All Channels"
     case ocular = "Ocular"
 
+    /// Stable identity for a wavelet channel-scope choice.
     var id: String { rawValue }
 }
 
@@ -106,6 +114,7 @@ enum FilterLineNoiseMode: String, CaseIterable, Identifiable, Sendable {
     case notch = "IIR Notch"
     case adaptiveCleanLine = "CleanLine"
 
+    /// Stable identity for a line-noise treatment choice.
     var id: String { rawValue }
 }
 
@@ -120,8 +129,8 @@ struct SyntheticPNSChannel: Identifiable {
     let id = UUID()
     /// Display name — defaults to "ICA" + sorted component numbers, e.g. "ICA13".
     var name: String
-    /// Time course at `samplingRate` (sum of selected component activations, linearly
-    /// upsampled from the ICA analysis rate to the EEG sampling rate).
+    /// Time course at `samplingRate`, formed by summing selected component activations.
+    /// The ICA synthesis caller currently retains the analysis sampling rate.
     let samples: [Float]
     let samplingRate: Double
     /// The ICA component indices (0-based) that were summed to produce this channel.
@@ -157,10 +166,12 @@ struct ToolbarIcon: View {
     var inactiveForeground: Color = .primary
 
     private let size = CGSize(width: 77, height: 58)
+    /// Whether the toolbar face should reserve space for a nonempty caption.
     private var hasLabel: Bool {
         label?.isEmpty == false
     }
 
+    /// Draw consistent toolbar chrome, icon and optional caption independently of Button/Menu styles.
     var body: some View {
         VStack(spacing: hasLabel ? 3 : 0) {
             iconImage
@@ -190,6 +201,7 @@ struct ToolbarIcon: View {
         .contentShape(Rectangle())
     }
 
+    /// Choose a system symbol when supplied, otherwise load the named custom asset.
     @ViewBuilder
     private var iconImage: some View {
         if let systemName {
@@ -213,6 +225,7 @@ struct ICADebugSignalStats {
     let maxAbs: Double
     let maxAbsChannel: Int?
 
+    /// Format sampled signal diagnostics into one compact report line.
     var summary: String {
         let channelText = maxAbsChannel.map { "Ch \($0 + 1)" } ?? "n/a"
         return [
@@ -228,6 +241,9 @@ struct ICADebugSignalStats {
         ].joined(separator: "; ")
     }
 
+    /// Estimate signal amplitude statistics from finite samples in a clipped range.
+    /// Use a stride targeting roughly 200,000 values; extrema and percentiles describe
+    /// the sampled subset, not necessarily every value in the recording.
     static func make(signal: MFFSignalData, sampleRange: ClosedRange<Int>? = nil) -> Self {
         let channelCount = signal.data.count
         let sampleCount = signal.data.first?.count ?? 0
@@ -313,6 +329,7 @@ struct ICADebugSignalStats {
         )
     }
 
+    /// Format a finite diagnostic amplitude in microvolts with precision based on magnitude.
     private static func format(_ value: Double) -> String {
         guard value.isFinite else { return "nan" }
         if abs(value) >= 100 {
@@ -381,6 +398,9 @@ struct WaveformHoverInfo {
 /// in that case a marker is retained whenever the window overlaps the epoch and
 /// is pinned to the nearest epoch edge when its original center is outside.
 nonisolated enum EpochedOverlayEventMapper {
+    /// Map a continuous event onto one concatenated epoch’s display timeline.
+    /// Require its point or supplied overlap window to intersect the epoch, clamp the
+    /// displayed anchor to epoch bounds and give each projected event a distinct ID.
     static func map(
         _ event: MFFEvent,
         into segment: EpochSegment,
@@ -441,6 +461,8 @@ struct WaveformEpochSegmentSignature: Equatable {
 
     static let empty = WaveformEpochSegmentSignature(segments: [])
 
+    /// Capture count and first/middle/last segment IDs as a lightweight cache signature.
+    /// This does not compare every segment or all of its timing metadata.
     init(segments: [EpochSegment]) {
         count = segments.count
         let middleIndex = segments.isEmpty ? nil : segments.index(segments.startIndex, offsetBy: segments.count / 2)
@@ -456,6 +478,7 @@ struct EventSummary: Identifiable {
     var detail: String? = nil
     var searchText: String = ""
     var searchFields: [PSAEventSearchField: String] = [:]
+    /// Identify an event summary by its code.
     var id: String { code }
 }
 
@@ -466,6 +489,8 @@ enum PSAEventSearchField: String, CaseIterable {
     case cell = "Cell"
     case source = "Source"
 
+    /// Parse a case-insensitive search-field alias after trimming whitespace and colons.
+    /// The failable initializer returns nil for an unknown field name.
     init?(alias: String) {
         switch alias
             .trimmingCharacters(in: CharacterSet(charactersIn: ":").union(.whitespacesAndNewlines))
@@ -496,6 +521,7 @@ struct EpochCategorySummary: Identifiable {
     let count: Int
     let color: Color
 
+    /// Identify a category-summary row by category name.
     var id: String { category }
 }
 
@@ -505,6 +531,7 @@ struct AveragedTopomapSample: Identifiable {
     let latencySeconds: Double
     let colorIndex: Int
 
+    /// Identify a topomap sample by category and sample index.
     var id: String { "\(category)-\(sample)" }
 }
 
@@ -523,6 +550,7 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
         /// `skippedArtifactBreakdown` plus the non-artifact rejection causes.
         var reasons: [String: Int] = [:]
 
+        /// Count this category’s candidates that are no longer accepted, floored at zero.
         var excluded: Int { max(candidates - accepted, 0) }
     }
 
@@ -549,14 +577,17 @@ nonisolated struct PSAExclusionSummary: Sendable, Equatable {
         perCategory.values.reduce(0) { $0 + $1.candidates } > candidateEvents
     }
 
+    /// Count accepted epochs remaining after manually labeled-bad exclusions.
     var keptEpochs: Int {
         max(acceptedEpochs - skippedLabeledBadSegments, 0)
     }
 
+    /// Sum recorded rejection counters across build and labeled-bad exclusion reasons.
     var excludedEpochs: Int {
         skippedLabeledBadSegments + skippedArtifacts + skippedTimingMarkers + skippedOutOfBounds + rejectedForTooManyBadChannels
     }
 
+    /// Whether any recorded rejection counter contributes to the exclusion total.
     var hasExclusions: Bool {
         excludedEpochs > 0
     }
@@ -620,7 +651,7 @@ nonisolated struct PSABuildResult {
     /// Channel index → number of epochs that flagged it bad, when per-epoch
     /// bad-channel interpolation was enabled. Empty when the feature was off.
     var epochBadChannelCounts: [Int: Int] = [:]
-    /// Epoch count the above counts are a fraction of (== accepted epochs).
+    /// Number of planned epoch/category jobs evaluated, including jobs later rejected.
     var totalEpochsEvaluated: Int = 0
     /// Epochs dropped entirely for exceeding the bad-channel-fraction limit.
     /// NOTE: these three fields describe the RAW (pre-average) build only —
@@ -646,7 +677,7 @@ nonisolated struct PSABuildResult {
     var suggestedRejectedEpochReasons: [Int: [String]] = [:]
     var exclusionSummary = PSAExclusionSummary()
 
-    /// Averages each category's epochs. Runs off the main thread.
+    /// Average each category’s epochs synchronously; callers choose the execution context.
     ///
     /// - Parameter excludedIndices: Indices into `segments` (matching
     ///   `SegmentHealthAnalyzer.segmentID(index:segment:)`'s indexing) to drop
@@ -658,6 +689,8 @@ nonisolated struct PSABuildResult {
         let epochLength = firstSegment.endSample - firstSegment.startSample + 1
         guard epochLength > 0 else { return nil }
 
+        // Exclusions refer to original segment positions. Filter before grouping so a
+        // category average and its contributing-trial count use the same survivors.
         let includedSegments = excludedIndices.isEmpty
             ? segments
             : segments.enumerated().filter { !excludedIndices.contains($0.offset) }.map(\.element)
@@ -737,8 +770,8 @@ nonisolated struct PSABuildResult {
     /// Signal-to-noise metrics per category, computed from the RAW (pre-average)
     /// single-trial segments — the plus-minus, split-half, and SME measures all
     /// need the individual trials, so this must run on `self` before `average()`
-    /// collapses them. Mirrors `average()`'s trial extraction. Runs off the main
-    /// thread.
+    /// collapses them. Mirrors `average()`’s trial extraction and parallelizes categories
+    /// internally; callers choose the execution context.
     ///
     /// - Parameter excludedIndices: same meaning as `average()` — segment indices
     ///   to drop (e.g. manually labeled "Bad") so the SNR matches the average.
@@ -788,7 +821,8 @@ nonisolated struct PSABuildResult {
         return result
     }
 
-    /// Applies average-reference and/or baseline correction. Runs off the main thread.
+    /// Apply average reference first, then optional baseline correction synchronously.
+    /// Callers choose the execution context; the source result remains a value snapshot.
     func postProcessed(averageReference: Bool, baselineCorrect: Bool, badChannels: Set<Int>) -> PSABuildResult {
         var output = self
         if averageReference { output = output.withAverageReference(excluding: badChannels) }
@@ -796,11 +830,15 @@ nonisolated struct PSABuildResult {
         return output
     }
 
+    /// Return referenced samples with the same segments/message, using good channels for the reference.
+    /// The newly constructed result does not carry the raw build’s diagnostic fields forward.
     private func withAverageReference(excluding bad: Set<Int>) -> PSABuildResult {
         let s = Rereferencing.applied(signal, excluding: bad)
         return PSABuildResult(signal: s, segments: segments, message: message)
     }
 
+    /// Subtract each channel’s pre-stimulus mean throughout each epoch when that mean is finite.
+    /// Epochs without pre-stimulus samples are left alone; return a fresh result wrapper.
     private func withBaselineCorrection() -> PSABuildResult {
         var data = signal.data
         for segment in segments {
@@ -904,6 +942,8 @@ nonisolated struct PSABuildJob: Sendable {
         // below, before every skip site, so each drop can be debited to exactly
         // the categories it would have fed.
         var perCategory: [String: PSAExclusionSummary.CategoryTally] = [:]
+        /// Attribute one rejected event to every category it would have contributed to.
+        /// This helper updates per-category reasons; global rejection counters are maintained separately.
         func debit(_ categories: [String], _ reason: String) {
             for category in categories {
                 perCategory[category, default: .init()].reasons[reason, default: 0] += 1
@@ -1034,6 +1074,8 @@ nonisolated struct PSABuildJob: Sendable {
         }
 
         guard !jobs.isEmpty else { return nil }
+        // Freeze the planned order before parallel sample extraction. One physical event
+        // may intentionally appear in several category jobs.
         let acceptedJobs = jobs
 
         // PASS 2 (parallel): each job independently extracts its own channel
@@ -1048,6 +1090,8 @@ nonisolated struct PSABuildJob: Sendable {
         var jobBadChannels = [Set<Int>?](repeating: nil, count: acceptedJobs.count)
         let total = acceptedJobs.count
         let progressLock = NSLock()
+        // These counters cross concurrency checks manually; every worker update is
+        // protected by progressLock. Output buffers use distinct indices instead.
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var rejectedForTooManyBadChannels = 0
         let maxBadChannelsPerEpoch: Int
@@ -1132,9 +1176,9 @@ nonisolated struct PSABuildJob: Sendable {
             }
         }
 
-        // Aggregate how many epochs flagged each channel bad, for reporting
-        // and for the caller's "escalate to globally bad" decision. Rejected
-        // epochs (too messy) don't contribute — they were never interpolated.
+        // Aggregate detected bad-channel evidence from every evaluated job, including
+        // rejected jobs. The accepted-segment dictionaries below separately describe
+        // evidence and interpolation in the retained output.
         var epochBadChannelCounts: [Int: Int] = [:]
         if interpolatesBadChannelsPerEpoch {
             for badSet in jobBadChannels {
@@ -1164,6 +1208,8 @@ nonisolated struct PSABuildJob: Sendable {
                 continue
             }
             perCategory[job.category, default: .init()].accepted += 1
+            // User-visible segment numbers are one-based after rejected slices are removed.
+            // Dictionary keys for suggested epoch rejection remain zero-based array positions.
             let acceptedSegmentNumber = segments.count + 1
             var suggestedReasons = job.suggestedRejectionReasons
             if defersBadChannelDecisions,
@@ -1187,6 +1233,8 @@ nonisolated struct PSABuildJob: Sendable {
             }
 
             let epochStart = outputStartSample
+            // The output timeline concatenates retained epochs. Store both this display
+            // position and the original anchor time so later analysis can recover provenance.
             let stimulusSample = epochStart + preSamples
             let stimulusTime = Double(stimulusSample) / signal.samplingRate
             epochedEvents.append(MFFEvent(
@@ -1264,6 +1312,8 @@ nonisolated struct PSABuildJob: Sendable {
         )
     }
 
+    /// Find the closest timing marker, breaking equal distances toward the earlier marker.
+    /// A positive tolerance restricts candidates; a nonpositive tolerance imposes no distance limit.
     private func nearestEvent(to event: MFFEvent, in candidates: [MFFEvent]) -> MFFEvent? {
         let within = timingTolerance > 0
             ? candidates.filter { abs($0.beginTimeSeconds - event.beginTimeSeconds) <= timingTolerance }
@@ -1294,6 +1344,7 @@ struct MFFSplitOutput: Sendable {
     let url: URL
 }
 
+/// Ensure the selected export URL ends in an MFF extension, preserving an existing case variant.
 func normalizedMFFPackageURL(_ url: URL) -> URL {
     url.pathExtension.lowercased() == "mff" ? url : url.appendingPathExtension("mff")
 }
@@ -1301,10 +1352,12 @@ func normalizedMFFPackageURL(_ url: URL) -> URL {
 struct WaveformRightClickMonitor: NSViewRepresentable {
     var onRightClick: (CGPoint) -> Void
 
+    /// Create the AppKit event-monitor owner that survives SwiftUI view updates.
     func makeCoordinator() -> Coordinator {
         Coordinator(onRightClick: onRightClick)
     }
 
+    /// Create the coordinate-reference view, attach it to the coordinator and install monitoring.
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView()
         context.coordinator.view = view
@@ -1312,17 +1365,20 @@ struct WaveformRightClickMonitor: NSViewRepresentable {
         return view
     }
 
+    /// Refresh the callback/view reference when SwiftUI updates this representable.
     func updateNSView(_ nsView: MonitorView, context: Context) {
         context.coordinator.onRightClick = onRightClick
         context.coordinator.view = nsView
         context.coordinator.installIfNeeded()
     }
 
+    /// Remove the local event monitor when SwiftUI dismantles the native view.
     static func dismantleNSView(_ nsView: MonitorView, coordinator: Coordinator) {
         coordinator.uninstall()
     }
 
     final class MonitorView: NSView {
+        /// Use a top-left origin so AppKit points agree with the surrounding SwiftUI coordinates.
         override var isFlipped: Bool { true }
     }
 
@@ -1331,14 +1387,18 @@ struct WaveformRightClickMonitor: NSViewRepresentable {
         var onRightClick: (CGPoint) -> Void
         private var monitor: Any?
 
+        /// Retain the callback for clicks inside the monitored view.
         init(onRightClick: @escaping (CGPoint) -> Void) {
             self.onRightClick = onRightClick
         }
 
+        /// Release the AppKit monitor if the coordinator is destroyed before explicit dismantling.
         deinit {
             uninstall()
         }
 
+        /// Install one local right-click observer scoped to this view’s window and bounds.
+        /// Return the original event so observing it does not consume normal AppKit handling.
         func installIfNeeded() {
             guard monitor == nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown]) { [weak self] event in
@@ -1347,6 +1407,8 @@ struct WaveformRightClickMonitor: NSViewRepresentable {
                       event.window === view.window else {
                     return event
                 }
+                // Convert window coordinates into the monitored view’s flipped local coordinates
+                // before deciding whether the click belongs to this waveform region.
                 let point = view.convert(event.locationInWindow, from: nil)
                 if view.bounds.contains(point) {
                     self.onRightClick(point)
@@ -1355,6 +1417,7 @@ struct WaveformRightClickMonitor: NSViewRepresentable {
             }
         }
 
+        /// Remove the event observer if installed and clear its token; safe to call repeatedly.
         func uninstall() {
             if let monitor {
                 NSEvent.removeMonitor(monitor)
@@ -1374,6 +1437,7 @@ struct ICAProgressUpdate: Sendable {
 struct EpochBuildProgress: Sendable {
     var completed: Int
     var total: Int
+    /// Convert completed/total into progress, using zero when the total is not positive.
     var fraction: Double { total > 0 ? Double(completed) / Double(total) : 0 }
 }
 
@@ -1385,6 +1449,7 @@ enum ArtifactTemplateChannelScope: String, CaseIterable, Identifiable {
     case allChannels = "All Channels"
     case specificChannels = "Specific Channels"
 
+    /// Stable identity for artifact-template channel-scope selection.
     var id: String { rawValue }
 }
 
@@ -1395,6 +1460,7 @@ nonisolated enum PSASegmentField: String, CaseIterable, Identifiable {
     case label = "Label"
     case artifact = "Artifacts"
 
+    /// Stable identity for the event field used to create PSA categories.
     var id: String { rawValue }
 }
 
@@ -1411,6 +1477,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
     case cwlRegression  = "cwlRegression"
     case surrogatePCAS  = "surrogatePCAS"
 
+    /// Stable stored identity of this BCG method.
     nonisolated var id: String { rawValue }
 
     /// True for methods that directly correct the signal from an external
@@ -1431,6 +1498,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         self == .surrogatePCAS
     }
 
+    /// Compact method name for the BCG picker.
     nonisolated var tabLabel: String {
         switch self {
         case .periodicity:      return "Periodicity"
@@ -1445,6 +1513,7 @@ enum BCGDetectionMethod: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// User-facing description of this detection or correction method.
     nonisolated var summary: String {
         switch self {
         case .periodicity:

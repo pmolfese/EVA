@@ -56,3 +56,16 @@ model in a registry. A new **menu command** is a `FocusedValues` key on
 field in `EVAGeneralPreferences`/`ProcessingDefaults` and a control in
 `PreferencesView`. Keep feature logic in the feature subsystems — `App` should
 stay scaffolding: lifecycle, windows, commands, settings.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [ERPExperimentEditor.swift](../../../EVA/App/ERPExperimentEditor.swift) | Edits event-related potential experiment configuration for simulation. |
+| [ERPStudioHelp.swift](../../../EVA/App/ERPStudioHelp.swift) | Explains ERP experiment design and simulator controls. |
+| [SweepHelp.swift](../../../EVA/App/SweepHelp.swift) | Explains simulator parameter sweeps in the application help UI. |
+| [TemporaryFileSweeper.swift](../../../EVA/App/TemporaryFileSweeper.swift) | Removes temporary combined packages when no open or pending window still references them. |

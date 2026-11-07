@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  RhythmicityExplorerViewModel.swift
 //  EVA
@@ -12,6 +19,7 @@ enum RhythmicityExplorerMode: String, CaseIterable, Identifiable, Sendable {
     case eventRelated = "Event-related"
     case bursts = "Bursts"
 
+    /// Use the displayed enum value as stable picker identity.
     var id: String { rawValue }
 }
 
@@ -19,12 +27,14 @@ enum WTPLDisplayMeasure: String, CaseIterable, Identifiable, Sendable {
     case raw = "Raw WTPL"
     case delta = "ΔWTPL"
     case validCounts = "Valid counts"
+    /// Stable identity for the available WTPL display choices.
     var id: String { rawValue }
 }
 
 enum RhythmicBurstBackground: String, CaseIterable, Identifiable, Sendable {
     case power = "Power / P90"
     case wtpl = "WTPL"
+    /// Stable identity for burst-background choices.
     var id: String { rawValue }
 }
 
@@ -98,6 +108,7 @@ private enum RhythmicityExplorerError: LocalizedError {
     case invalidWTPLComparison
     case invalidWTPLConfiguration
 
+    /// Present selection/configuration errors in the workspace status area.
     var errorDescription: String? {
         switch self {
         case .emptySignal: return "The processed signal contains no readable samples."
@@ -115,10 +126,14 @@ private enum RhythmicityExplorerError: LocalizedError {
 
 @MainActor
 @Observable
+/// Recording-scoped UI state for bands, event-related WTPL and burst analysis.
+/// The main actor owns observable state; immutable snapshots cross to detached workers.
+/// ObservationIgnored properties hold task/cache bookkeeping rather than UI observations.
 final class RhythmicityExplorerViewModel {
     let store: RecordingStore
     @ObservationIgnored private let persistenceStore: RhythmicityPersistenceStore
 
+    /// Attach recording state and persistence services, then initialize the paper preset.
     init(
         store: RecordingStore,
         persistenceStore: RhythmicityPersistenceStore = RhythmicityPersistenceStore()
@@ -131,6 +146,8 @@ final class RhythmicityExplorerViewModel {
     var showsSheet = false
     var mode = RhythmicityExplorerMode.bands
     var source = RhythmicitySignalSource.processed
+    // Property observers (didSet) update freshness when inputs change. They do
+    // not rerun expensive analysis automatically.
     var configuration: RhythmicityConfiguration {
         didSet { updateStaleState(); updateWTPLStaleState(); updateBurstStaleState() }
     }
@@ -200,6 +217,8 @@ final class RhythmicityExplorerViewModel {
     var burstBackground = RhythmicBurstBackground.power
     var selectedBurstID: String?
 
+    // Task handles and context signatures are bookkeeping; changing them alone
+    // should not trigger SwiftUI observation updates.
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var cancellation: RhythmicityCancellation?
     @ObservationIgnored private var resultSignature: RhythmicityContextSignature?
@@ -221,16 +240,19 @@ final class RhythmicityExplorerViewModel {
     @ObservationIgnored private var lastLoggedSignificanceMilestone = 0
     @ObservationIgnored private var runStartedAt: Date?
 
+    /// Request cancellation when the model is released so workers can stop cooperatively.
     deinit {
         cancellation?.cancel()
         task?.cancel()
     }
 
+    /// Find the selected channel’s LAVI result, falling back to the first available channel.
     var selectedChannelResult: LAVIChannelResult? {
         guard let result = laviResult else { return nil }
         return result.channels.first { $0.channelIndex == selectedChannelIndex } ?? result.channels.first
     }
 
+    /// Classify results by staleness, usable pairs, significance availability and preset identity.
     var validity: RhythmicityValidity {
         if resultIsStale { return .stale }
         guard let result = laviResult else {
@@ -246,20 +268,24 @@ final class RhythmicityExplorerViewModel {
             ? .referenceValid : .customSignificance
     }
 
+    /// Count sustained bands across every analyzed channel.
     var detectedSustainedCount: Int {
         laviResult?.channels.flatMap(\.bands).count { $0.direction == .sustained } ?? 0
     }
 
+    /// Count transient bands across every analyzed channel.
     var detectedTransientCount: Int {
         laviResult?.channels.flatMap(\.bands).count { $0.direction == .transient } ?? 0
     }
 
+    /// Count channels with an identified band at the alpha anchor.
     var alphaAnchorCount: Int {
         laviResult?.channels.count { channel in
             channel.bands.contains { $0.relativeToAlpha == 0 }
         } ?? 0
     }
 
+    /// Describe the completed result’s backend when available, otherwise the requested backend.
     var backendDescription: String {
         switch laviResult?.configuration.backend ?? configuration.backend {
         case .automatic: return "Automatic · Metal when suitable"
@@ -269,6 +295,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Describe work dimensions for the active mode; this is a workload estimate, not elapsed time.
     var runEstimate: String {
         if mode == .eventRelated {
             let conditions = selectedWTPLConditions
@@ -284,18 +311,21 @@ final class RhythmicityExplorerViewModel {
         return "\(channelCount) channel\(channelCount == 1 ? "" : "s") × \(configuration.frequenciesHz.count) frequencies × \(profileCount) profile\(profileCount == 1 ? "" : "s")"
     }
 
+    /// Return condition A and, for difference mode, a distinct nonempty condition B.
     var selectedWTPLConditions: [String] {
         var values = [wtplConditionA].filter { !$0.isEmpty }
         if wtplShowsDifference, let b = wtplConditionB, !b.isEmpty, !values.contains(b) { values.append(b) }
         return values
     }
 
+    /// Resolve the selected WTPL condition/channel with first-available fallbacks.
     var selectedWTPLChannelResult: WTPLChannelResult? {
         guard let condition = wtplResult?.conditions.first(where: { $0.condition == wtplConditionA })
             ?? wtplResult?.conditions.first else { return nil }
         return condition.channels.first { $0.channelIndex == selectedChannelIndex } ?? condition.channels.first
     }
 
+    /// Find the selected burst ID, then fall back to this channel’s first burst or the first overall.
     var selectedBurst: RhythmicBurst? {
         guard let result = burstResult else { return nil }
         if let selectedBurstID,
@@ -306,6 +336,7 @@ final class RhythmicityExplorerViewModel {
             ?? result.bursts.first
     }
 
+    /// Check whether the requested baseline fits the selected condition’s trial stack.
     var wtplBaselineIsAvailable: Bool {
         guard let signal = currentEventSignal,
               let condition = selectedWTPLConditions.first else { return false }
@@ -318,6 +349,7 @@ final class RhythmicityExplorerViewModel {
         ) != nil
     }
 
+    /// Combine selection guidance and result warnings, removing duplicate display text.
     var validityWarnings: [String] {
         var warnings: [String] = []
         let duration = Double(estimatedSelectedSampleCount) / max(currentSamplingRate, 1)
@@ -345,12 +377,15 @@ final class RhythmicityExplorerViewModel {
         return warnings.filter { seen.insert($0).inserted }
     }
 
+    /// Switch significance mode and reset analysis configuration to the corresponding paper preset.
     func setSignificanceEnabled(_ enabled: Bool) {
         guard includesSignificance != enabled else { return }
         includesSignificance = enabled
         configuration = Self.preferredPaperConfiguration(includesSignificance: enabled)
     }
 
+    /// Refresh the current signal, viewport, channel sets and artifact context.
+    /// Repair invalid selections, attempt persisted-result restoration and recalculate staleness.
     func synchronizeContext(
         signal: MFFSignalData,
         visibleRange: ClosedRange<Int>?,
@@ -375,6 +410,7 @@ final class RhythmicityExplorerViewModel {
         updateBurstStaleState()
     }
 
+    /// Refresh retained epochs and ensure selected condition names exist and differ.
     func synchronizeEventContext(signal: MFFSignalData, segments: [EpochSegment]) {
         currentEventSignal = signal
         currentEpochSegments = segments
@@ -388,6 +424,8 @@ final class RhythmicityExplorerViewModel {
         updateWTPLStaleState()
     }
 
+    /// Attempt one persisted-result load per recording path, restoring its settings and selection.
+    /// Keep mismatched results visible but stale; loading failures become status/log messages.
     private func restorePersistedResultIfNeeded(signal: MFFSignalData) {
         let path = signal.signalURL.standardizedFileURL.path
         guard loadedPersistenceRecordingPath != path else { return }
@@ -443,6 +481,8 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Compare saved channel/exclusion choices and effective segments with the current context.
+    /// Return false when the selection cannot be resolved.
     private func restoredContextMatches(
         _ persisted: RhythmicitySelectionDescriptor,
         signal: MFFSignalData
@@ -474,6 +514,8 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Choose the paper significance or exploratory preset and apply the user’s CPU/GPU preference.
+    /// An optional seed preserves reproducibility across significance runs.
     private static func preferredPaperConfiguration(
         includesSignificance: Bool,
         seed: UInt64? = nil
@@ -491,6 +533,9 @@ final class RhythmicityExplorerViewModel {
         return value
     }
 
+    /// Validate and snapshot a bands analysis, queue a detached worker, then publish and persist
+    /// a completed result. Generation checks reject updates from superseded runs; errors
+    /// and cancellation retain any previous result rather than publishing partial output.
     func run(
         packageName: String,
         signal: MFFSignalData,
@@ -508,6 +553,8 @@ final class RhythmicityExplorerViewModel {
         )
         guard !isRunning else { return }
 
+        // Reusing the significance seed keeps repeated surrogate analyses reproducible
+        // while the preset is rebuilt with the current backend preference.
         let retainedSeed: UInt64?
         if case let .onDemand(significance) = configuration.significance {
             retainedSeed = significance.seed
@@ -647,6 +694,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Validate conditions, frequency limits and baseline settings, then start a WTPL snapshot run.
     func runEventRelated(
         packageName: String,
         signal: MFFSignalData,
@@ -706,6 +754,8 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Snapshot the selected signal regions and resolved band definitions, then launch burst detection.
+    /// Record the band source in provenance and in the signature used to detect stale results.
     func runBursts(
         packageName: String,
         signal: MFFSignalData,
@@ -768,6 +818,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Write available WTPL results, requested bands and windows to an export bundle; propagate errors.
     func exportWTPLPackage(
         to destination: URL,
         bands: [EEGFrequencyBand],
@@ -780,6 +831,7 @@ final class RhythmicityExplorerViewModel {
         appendLog(exportStatus ?? "WTPL export complete.")
     }
 
+    /// Write a burst-results bundle and log success. Missing results are a no-op; write failures throw.
     func exportBurstPackage(to destination: URL) throws {
         guard let result = burstResult else { return }
         let contents = try RhythmicBurstExport.bundle(result: result)
@@ -788,6 +840,8 @@ final class RhythmicityExplorerViewModel {
         appendLog(exportStatus ?? "Burst export complete.")
     }
 
+    /// Invalidate the current generation, cancel both cooperative and Swift task handles and reset progress.
+    /// Previously completed results remain available.
     func cancel() {
         runGeneration &+= 1
         cancellation?.cancel()
@@ -806,6 +860,7 @@ final class RhythmicityExplorerViewModel {
         appendLog("Cancelled; partial results were discarded.")
     }
 
+    /// Export LAVI results with their saved selection and current warnings; propagate write errors.
     func exportPackage(to destination: URL) throws {
         guard let result = laviResult, let selection = resultSelection else { return }
         let contents = try RhythmicityExport.bundle(
@@ -818,6 +873,8 @@ final class RhythmicityExplorerViewModel {
         appendLog(exportStatus ?? "Export complete.")
     }
 
+    /// Publish the selected channel’s current bands to this session’s Time-Frequency workspace.
+    /// Return false with an explanation if the result is stale or has no publishable bands.
     @discardableResult
     func publishSelectedChannelBandsToTimeFrequency() -> Bool {
         guard !resultIsStale,
@@ -838,12 +895,14 @@ final class RhythmicityExplorerViewModel {
         return true
     }
 
+    /// Cancel active work, hide the sheet and reset its mode while retaining completed results.
     func resetForClose() {
         if isRunning { cancel() }
         showsSheet = false
         mode = .bands
     }
 
+    /// Estimate selected samples from context without subtracting marked artifact intervals.
     private var estimatedSelectedSampleCount: Int {
         switch dataSelection {
         case .entireProcessedRecording: return currentSampleCount
@@ -852,6 +911,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Resolve candidate channels for workload/staleness checks, excluding globally bad channels.
     private var estimatedChannelIndices: [Int] {
         let valid = Set(0..<currentChannelCount)
         let bad = store.channels.bad
@@ -868,6 +928,8 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Freeze the selected channels, usable segments, configuration and provenance for a worker.
+    /// Remove marked-artifact intervals unless explicitly included; reject an empty selection.
     private func makeSnapshot(
         packageName: String,
         signal: MFFSignalData,
@@ -929,12 +991,15 @@ final class RhythmicityExplorerViewModel {
         )
     }
 
+    /// Resolve whole-recording, visible or selected sample ranges. Preserve epoch boundaries
+    /// for segmented data rather than treating adjacent trials as one continuous recording.
     private func selectedSegments(
         signal: MFFSignalData,
         sampleCount: Int,
         visibleRange: ClosedRange<Int>?,
         selectedRange: ClosedRange<Int>?
     ) throws -> [RhythmicitySegment] {
+        /// Clip an inclusive waveform range to available samples and reject an empty intersection.
         func clipped(_ range: ClosedRange<Int>, label: String) throws -> [RhythmicitySegment] {
             let lower = max(range.lowerBound, 0)
             let upper = min(range.upperBound, sampleCount - 1)
@@ -961,6 +1026,8 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Resolve the channel scope against this signal and bad-channel set; return the named set label.
+    /// A missing named set throws rather than silently switching scope.
     private func selectedChannels(signal: MFFSignalData, channelSets: [ChannelSet]) throws -> ([Int], String?) {
         let valid = Set(signal.data.indices)
         let bad = store.channels.bad
@@ -979,6 +1046,8 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Capture inputs relevant to bands/burst staleness. Ignore viewport and channel choices
+    /// that do not affect the selected scope, so unrelated UI changes do not invalidate results.
     private func makeSignature(
         signalRevision: UUID,
         visibleRange: ClosedRange<Int>?,
@@ -1005,6 +1074,8 @@ final class RhythmicityExplorerViewModel {
         )
     }
 
+    /// Compare the current bands context with the completed result signature.
+    /// Published Time-Frequency bands are checked against source revision when a signature exists.
     private func updateStaleState() {
         guard let resultSignature, let currentSignalRevision else {
             resultIsStale = laviResult != nil && resultSignature == nil
@@ -1023,6 +1094,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Mark event-related results stale when their epochs, channels or analysis settings differ.
     private func updateWTPLStaleState() {
         guard let signature = wtplResultSignature,
               let signal = currentEventSignal else {
@@ -1044,6 +1116,7 @@ final class RhythmicityExplorerViewModel {
         )
     }
 
+    /// Compare burst settings, resolved bands and selected data with the completed run signature.
     private func updateBurstStaleState() {
         guard let signature = burstResultSignature,
               let signalRevision = currentSignalRevision else {
@@ -1066,6 +1139,7 @@ final class RhythmicityExplorerViewModel {
         burstResultIsStale = signature != current
     }
 
+    /// Capture the signal revision, epoch metadata, selected conditions and WTPL numerical settings.
     private func makeWTPLSignature(
         signal: MFFSignalData,
         segments: [EpochSegment],
@@ -1086,6 +1160,7 @@ final class RhythmicityExplorerViewModel {
         )
     }
 
+    /// Queue WTPL computation, bridge worker progress to the main actor and publish only the current generation.
     private func startWTPLRun(snapshot: WTPLRunSnapshot, signature: WTPLContextSignature) {
         runGeneration &+= 1
         let generation = runGeneration
@@ -1145,6 +1220,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Queue burst computation with cooperative cancellation and generation-guarded UI publication.
     private func startBurstRun(
         snapshot: RhythmicBurstRunSnapshot,
         signature: RhythmicBurstContextSignature
@@ -1209,6 +1285,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Close the progress stream and stop its consumer; update status only for the active generation.
     private func finishCancellation(
         generation: Int,
         progressContinuation: AsyncStream<RhythmicityProgress>.Continuation,
@@ -1230,11 +1307,13 @@ final class RhythmicityExplorerViewModel {
         appendLog("Cancelled; partial results were discarded.")
     }
 
+    /// Append a timestamped status message and retain only the most recent 200 entries.
     private func appendLog(_ message: String) {
         log.append(RhythmicityLogLine(date: Date(), message: message))
         if log.count > 200 { log.removeFirst(log.count - 200) }
     }
 
+    /// Log phase changes and significance milestones instead of every fine-grained progress update.
     private func recordProgressInLog(
         _ update: RhythmicityProgress,
         description: String
@@ -1282,22 +1361,27 @@ final class RhythmicityExplorerViewModel {
         lastLoggedProgressPhase = update.phase
     }
 
+    /// Count samples in an inclusive integer range, whose upper endpoint contributes one sample.
     private static func rangeCount(_ range: ClosedRange<Int>) -> Int {
         max(range.upperBound - range.lowerBound + 1, 0)
     }
 
+    /// Serialize sorted artifact IDs, start times and window sizes for context comparison.
     private static func artifactSignature(_ sources: [EEGArtifactRejectionSource]) -> String {
         sources.flatMap { source in
             source.events.map { "\(source.id):\($0.id):\($0.beginTimeSeconds):\(source.windowSizeSeconds)" }
         }.sorted().joined(separator: "|")
     }
 
+    /// Serialize ordered epoch identity, category and sample bounds for stale-result detection.
     private static func epochSignature(_ segments: [EpochSegment]) -> String {
         segments.map {
             "\($0.id):\($0.category):\($0.startSample):\($0.endSample):\($0.stimulusOffsetSamples)"
         }.joined(separator: "|")
     }
 
+    /// Convert event-relative milliseconds to inclusive trial sample indices.
+    /// Return nil unless the entire finite, ordered baseline fits inside the trial stack.
     fileprivate nonisolated static func baselineSpec(
         startMs: Double,
         endMs: Double,
@@ -1310,6 +1394,8 @@ final class RhythmicityExplorerViewModel {
         return WTPLBaselineSpec(startSample: start, endSample: end)
     }
 
+    /// Turn event-centered artifact windows into clipped sample intervals and subtract them
+    /// from selected segments, preserving gaps instead of concatenating surviving samples.
     private static func removingArtifactIntervals(
         from segments: [RhythmicitySegment],
         sources: [EEGArtifactRejectionSource],
@@ -1328,6 +1414,7 @@ final class RhythmicityExplorerViewModel {
         return RhythmicitySegmentPolicy.removing(excludedRanges: intervals, from: segments)
     }
 
+    /// Format channel, phase and optional frequency, preferring detailed backend progress text.
     private static func progressDescription(_ update: RhythmicityProgress) -> String {
         let channel = update.channelIndex.map { "Channel \($0 + 1) · " } ?? ""
         if let detail = update.detail { return channel + detail }
@@ -1345,6 +1432,8 @@ final class RhythmicityExplorerViewModel {
         return channel + phase + frequency
     }
 
+    /// Resolve per-channel burst labels from defaults, user bands or current/published ABBA results.
+    /// If ABBA evidence is unavailable, return empty band lists and an explicit description.
     private func resolvedBurstBands(
         channelIndices: [Int]
     ) -> (byChannel: [Int: [RhythmicBurstBandDefinition]], description: String, signature: String) {
@@ -1404,6 +1493,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Convert ordinary frequency bands into burst labels, preserving the named source.
     private nonisolated static func burstDefinitions(
         _ bands: [EEGFrequencyBand],
         source: String
@@ -1417,6 +1507,7 @@ final class RhythmicityExplorerViewModel {
         }
     }
 
+    /// Convert one channel’s ABBA detections into burst labels, ordering each band’s edges.
     private nonisolated static func burstDefinitions(
         _ channel: LAVIChannelResult
     ) -> [RhythmicBurstBandDefinition] {
@@ -1434,6 +1525,7 @@ final class RhythmicityExplorerViewModel {
 }
 
 private nonisolated enum RhythmicityExplorerRunner {
+    /// Analyze a captured recording selection with a progress relay that suppresses regressions.
     static func analyze(
         snapshot: RhythmicityRunSnapshot,
         cancellation: RhythmicityCancellation,
@@ -1447,6 +1539,9 @@ private nonisolated enum RhythmicityExplorerRunner {
         )
     }
 
+    /// Analyze channels one at a time and map per-channel progress onto the full selection.
+    /// If a later channel changes backend, recompute the whole selection on CPU so one
+    /// result does not mix numerical backends.
     private static func analyzePass(
         snapshot: RhythmicityRunSnapshot,
         cancellation: RhythmicityCancellation,
@@ -1497,6 +1592,8 @@ private nonisolated enum RhythmicityExplorerRunner {
                     totalSignificanceProfiles: update.totalSignificanceProfiles
                 ))
             }
+            // If one channel falls back after earlier GPU results, restart all channels on CPU
+            // so the exported configuration describes every channel consistently.
             if let effectiveConfiguration,
                output.configuration.backend != effectiveConfiguration.backend {
                 var fallbackSnapshot = snapshot
@@ -1538,6 +1635,7 @@ private nonisolated enum RhythmicityExplorerRunner {
         )
     }
 
+    /// Recognize backend-fallback warnings using Swift enum case matching.
     private static func isBackendFallback(_ warning: RhythmicityWarning) -> Bool {
         if case .computeBackendFallback = warning { return true }
         return false
@@ -1549,10 +1647,13 @@ private nonisolated final class RhythmicityRunnerProgressRelay: @unchecked Senda
     private let progress: @Sendable (RhythmicityProgress) -> Void
     private var highestFraction = -Double.infinity
 
+    /// Retain the callback and start with no previously accepted progress fraction.
     init(progress: @escaping @Sendable (RhythmicityProgress) -> Void) {
         self.progress = progress
     }
 
+    /// Update the highest accepted progress fraction under a lock, then call outside it.
+    /// Regressing updates are dropped; the lock does not serialize callback execution.
     func emit(_ update: RhythmicityProgress) {
         lock.lock()
         guard update.fractionComplete >= highestFraction else {
@@ -1566,6 +1667,9 @@ private nonisolated final class RhythmicityRunnerProgressRelay: @unchecked Senda
 }
 
 private nonisolated enum WTPLExplorerRunner {
+    /// Compute event-related WTPL for each selected condition/channel using CPU coefficients.
+    /// Validate a shared time axis, retain summary maps and deduplicate warnings; throw
+    /// when no usable trials exist or the engine rejects an input.
     static func analyze(
         snapshot: WTPLRunSnapshot,
         cancellation: RhythmicityCancellation,
@@ -1622,6 +1726,8 @@ private nonisolated enum WTPLExplorerRunner {
                         totalTiles: total
                     ))
                 }
+                // Comparisons across conditions require the same event-relative sample axis.
+                // Reject a different axis instead of aligning unrelated columns by array index.
                 if sharedTimes.isEmpty {
                     sharedTimes = result.timesMs
                 } else if result.timesMs != sharedTimes {

@@ -43,10 +43,12 @@ nonisolated struct WaveletArtifactDetectionResult: Sendable {
     var waveformScores: WaveletArtifactScoreSummary?
     var topographyScores: WaveletArtifactScoreSummary?
 
+    /// Whether waveform-template scanning produced any events.
     var hasWaveformMatches: Bool {
         !waveformEvents.isEmpty
     }
 
+    /// Whether spatial-trajectory scanning produced any events.
     var hasTopographyMatches: Bool {
         !topographyEvents.isEmpty
     }
@@ -75,6 +77,7 @@ nonisolated struct WaveletArtifactChannelSummary: Identifiable, Sendable {
     var peakArtifactMagnitude: Float
     var dominantLevel: Int
 
+    /// Use the original channel index as the stable row identity.
     var id: Int { channelIndex }
 }
 
@@ -83,6 +86,7 @@ nonisolated struct WaveletArtifactLevelSummary: Identifiable, Sendable {
     var artifactEnergyFraction: Double
     var centerFrequencyHz: Double
 
+    /// Use the one-based wavelet level as the stable row identity.
     var id: Int { level }
 }
 
@@ -164,11 +168,14 @@ nonisolated struct WaveletChannelRoles: Sendable {
     var ocular: Set<Int>
     var lateral: Set<Int>
 
+    /// Store injectable channel-role sets; indices use the recording’s zero-based channel order.
     init(ocular: Set<Int>, lateral: Set<Int>) {
         self.ocular = ocular
         self.lateral = lateral
     }
 
+    /// Resolve ocular channels from montage rules and lateral channels from electrode x positions.
+    /// Missing geometry leaves the lateral set empty; the cutoff selects the outermost roughly 30%.
     static func resolve(for signal: MFFSignalData) -> WaveletChannelRoles {
         let layout = SensorLayout.load(fromPackageContaining: signal.signalURL)
         let ocularIndices = EyeArtifactThresholdDetector.autoOcularChannelIndices(
@@ -231,6 +238,7 @@ nonisolated struct WaveletChannelGoodnessResult: Identifiable, Sendable {
     var peakArtifactMagnitude: Float
     var dominantLevel: Int
 
+    /// Identify the goodness result by its original channel index.
     var id: Int { channelIndex }
 }
 
@@ -238,6 +246,8 @@ nonisolated enum WaveletArtifactAnalyzer {
     static let defaultLevelCount = 5
     static let maximumLevelCount = 11
 
+    /// Summarize thresholded wavelet detail energy for valid channels at a reduced sampling rate.
+    /// Return an empty summary for invalid/short data; this computes features without changing samples.
     static func analyze(
         signal: MFFSignalData,
         channelIndices requestedChannels: [Int],
@@ -270,6 +280,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         return featureSummary(from: data, effectiveSamplingRate: effectiveRate)
     }
 
+    /// Prepare wavelet features once, run the requested waveform/spatial exemplar matchers
+    /// and return centered event markers plus summaries and preview data.
     static func detect(
         in signal: MFFSignalData,
         configuration: WaveletArtifactConfiguration
@@ -373,12 +385,15 @@ nonisolated enum WaveletArtifactAnalyzer {
         )
     }
 
+    /// Find and rank transient bursts using local channel thresholds and optional full-rate rescanning.
+    /// Artifact types are heuristic suggestions for review, not confirmed physiological classifications.
     static func explore(
         in signal: MFFSignalData,
         configuration: WaveletArtifactExplorerConfiguration,
         channelRoles: WaveletChannelRoles? = nil,
         progress: (@Sendable (WaveletArtifactExplorerProgress) -> Void)? = nil
     ) -> WaveletArtifactExplorerResult {
+        /// Emit a progress update with its fraction clamped to 0–1; the caller chooses callback scheduling.
         func report(_ fraction: Double, _ title: String, _ detail: String) {
             progress?(WaveletArtifactExplorerProgress(
                 fraction: min(max(fraction, 0), 1),
@@ -510,11 +525,14 @@ nonisolated enum WaveletArtifactAnalyzer {
         )
     }
 
+    /// Score each channel’s wavelet burden relative to other analyzed channels.
+    /// Combine relative energy, burst occupancy and peak magnitude into a clamped 0–1 goodness score.
     static func channelGoodness(
         in signal: MFFSignalData,
         configuration: WaveletChannelGoodnessConfiguration,
         progress: (@Sendable (WaveletArtifactExplorerProgress) -> Void)? = nil
     ) -> [Int: WaveletChannelGoodnessResult] {
+        /// Forward a clamped progress update from the current scoring stage.
         func report(_ fraction: Double, _ title: String, _ detail: String) {
             progress?(WaveletArtifactExplorerProgress(
                 fraction: min(max(fraction, 0), 1),
@@ -619,6 +637,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         var levelCount: Int
     }
 
+    /// Clamp a padded candidate window to the recording and resolve its valid channels and transform depth.
     private static func previewPlan(
         in signal: MFFSignalData,
         candidate: WaveletArtifactCandidate,
@@ -744,6 +763,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return results
     }
 
+    /// Plan and compute a CPU preview for one padded candidate window; return nil for invalid input.
     static func cleaningPreview(
         in signal: MFFSignalData,
         candidate: WaveletArtifactCandidate,
@@ -755,6 +775,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         return cleaningPreview(in: signal, plan: plan, precomputedDetails: nil)
     }
 
+    /// Build before/artifact/after preview arrays without modifying the recording.
+    /// Use supplied GPU details per channel when available, otherwise compute them on the CPU.
     private static func cleaningPreview(
         in signal: MFFSignalData,
         plan: PreviewPlan,
@@ -882,6 +904,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         var weight: Float
     }
 
+    /// Prepare channels in input order using bounded CPU workers, or an optional GPU aggregate path.
+    /// A nil GPU result falls back to CPU processing; invalid channels are omitted from the output.
     private static func prepareChannels(
         signal: MFFSignalData,
         channelIndices: [Int],
@@ -943,6 +967,9 @@ nonisolated enum WaveletArtifactAnalyzer {
             }
         }
 
+        // Swift’s isolation checks cannot establish this manual worker synchronization.
+        // The locks protect shared array writes and the completion counter; callbacks
+        // run after unlocking and therefore may arrive concurrently or out of order.
         nonisolated(unsafe) var results = Array<ChannelWaveletData?>(repeating: nil, count: channelIndices.count)
         nonisolated(unsafe) var completedCount = 0
         let resultLock = NSLock()
@@ -982,14 +1009,9 @@ nonisolated enum WaveletArtifactAnalyzer {
         return results.compactMap { $0 }
     }
 
-    /// GPU decomposition path. Channels are downsampled and detrended on the
-    /// CPU, handed to Metal in batches sized to the device's buffer limit, and
-    /// the returned detail bands are folded back through the same
-    /// thresholding and accumulation the CPU path uses — so only the
-    /// transform differs. Batching keeps peak memory to one batch rather than
-    /// the whole net's per-level coefficients.
-    ///
-    /// Returns nil if the backend can't complete, letting the caller fall back.
+    /// Downsample/detrend on CPU, transform batches on GPU and retain detail bands on-device.
+    /// CPU workers read coefficient subsamples to estimate robust thresholds; the GPU then
+    /// accumulates salience and energy. Return nil on a failed stage so the caller can retry on CPU.
     private static func prepareChannelsOnGPU(
         backend: WaveletMetalBackend,
         signal: MFFSignalData,
@@ -1163,10 +1185,13 @@ nonisolated enum WaveletArtifactAnalyzer {
         return delays
     }
 
+    /// Limit parallel work to both the shared worker cap and the number of requested channels.
     private static func waveletWorkerCount(for channelCount: Int) -> Int {
         min(evaMaxWorkers, max(channelCount, 1))
     }
 
+    /// Downsample one channel, compute thresholded detail bands and collect salience/energy summaries.
+    /// Retain only the intermediate arrays requested by the caller to limit memory use.
     private static func prepareChannel(
         signal: MFFSignalData,
         channelIndex: Int,
@@ -1211,6 +1236,8 @@ nonisolated enum WaveletArtifactAnalyzer {
                 let artifactValue = Double(artifact[sample])
                 totalEnergyByLevel[level] += detailValue * detailValue
                 artifactEnergyByLevel[level] += artifactValue * artifactValue
+                // Salience adds absolute coefficient magnitudes, while the energy summaries
+                // above add squared magnitudes. Keep these distinct when interpreting scores.
                 let magnitude = abs(artifact[sample])
                 if retention.signedSalience {
                     signedSalience[sample] += artifact[sample]
@@ -1252,6 +1279,9 @@ nonisolated enum WaveletArtifactAnalyzer {
     /// whole-recording statistic.
     private static let localThresholdWindowSeconds = 30.0
 
+    /// Compute stationary wavelet detail bands, align their delays and isolate outlier coefficients.
+    /// “Undecimated” means every level retains one coefficient per input sample; it does not halve
+    /// the array at successive levels. Edge coefficients are suppressed in the artifact arrays.
     private static func undecimatedDetails(
         _ samples: [Float],
         levelCount: Int,
@@ -1452,6 +1482,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return interpolatedCurve(centerValues, centers: centers, count: n)
     }
 
+    /// Keep coefficients above the gate; soft thresholding also subtracts the gate from their magnitude.
     private static func thresholdCoefficient(
         _ value: Float,
         threshold: Float,
@@ -1518,6 +1549,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         return min(universalThreshold, max(bayesThreshold, lowerBound))
     }
 
+    /// Estimate noise scale from sampled finite absolute coefficients using median(|x|)/0.6745.
+    /// This assumes coefficients are approximately zero-centered; it does not subtract their median.
     private static func robustSigma(_ values: [Float]) -> Float {
         let stride = max(values.count / robustStatisticSampleCap, 1)
         var absValues: [Float] = []
@@ -1535,6 +1568,8 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Waveform matching
 
+    /// Match the exemplar’s normalized channel/level waveforms at candidate starts.
+    /// Weight correlations by exemplar RMS, apply the polarity rule and merge nearby accepted hits.
     private static func detectWaveform(
         data: [ChannelWaveletData],
         channelIndices: [Int],
@@ -1637,6 +1672,8 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Topography trajectory matching
 
+    /// Match a sequence of normalized spatial maps across channels, rather than one waveform.
+    /// Average valid map correlations through time, merge nearby hits and return the exemplar map.
     private static func detectTopographyTrajectory(
         signal: MFFSignalData,
         data: [ChannelWaveletData],
@@ -1739,6 +1776,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return (events, reference, scoreSummary(candidates: candidates, hits: merged))
     }
 
+    /// Average signed salience within the exemplar for each analyzed channel; leave other channels zero.
     private static func waveletTopographyValues(
         channelCount: Int,
         channels: [ChannelWaveletData],
@@ -1762,6 +1800,8 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Features
 
+    /// Aggregate per-level energy and rank channels by peak salience.
+    /// Reported band frequencies are dyadic approximations based on the effective sampling rate.
     private static func featureSummary(
         from data: [ChannelWaveletData],
         effectiveSamplingRate: Double
@@ -1821,6 +1861,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         )
     }
 
+    /// Create a zero-valued result while preserving the supplied effective sampling rate.
     private static func emptySummary(effectiveSamplingRate: Double) -> WaveletArtifactFeatureSummary {
         WaveletArtifactFeatureSummary(
             channelCount: 0,
@@ -1835,6 +1876,8 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Cleaning preview
 
+    /// Sum the aligned, thresholded detail arrays into the preview’s artifact estimate.
+    /// This preview estimate is a detail-band sum, not a full inverse wavelet reconstruction.
     private static func reconstructedArtifactSignal(
         _ samples: [Float],
         levelCount: Int,
@@ -1866,6 +1909,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return artifact
     }
 
+    /// Wrap a single preview window in the average-display model and calculate channel amplitude summaries.
     private static func averageFromSamples(
         _ samples: [[Float]],
         selectedChannelIndices: [Int],
@@ -1896,6 +1940,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         )
     }
 
+    /// Flatten selected channels to compare before/after variance, correlation, removed RMS and peak reduction.
+    /// Variance retained is a ratio and can exceed 100%; peak reduction is floored at zero.
     private static func cleaningPreviewMetrics(
         before: [[Float]],
         after: [[Float]],
@@ -1925,6 +1971,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         )
     }
 
+    /// Measure removed energy per selected channel and normalize its squared RMS against the largest channel.
     private static func cleaningPreviewChannelEnergy(
         before: [[Float]],
         artifact: [[Float]],
@@ -2272,6 +2319,7 @@ nonisolated enum WaveletArtifactAnalyzer {
     /// as contributing — see `mergeChannelCandidates`.
     private static let contributingChannelScoreFraction: Float = 0.35
 
+    /// Read the one-based strongest detail level at a sample, defaulting to level one if unavailable.
     private static func dominantLevel(in channel: ChannelWaveletData, at sample: Int) -> Int {
         guard channel.dominantLevels.indices.contains(sample) else { return 1 }
         return max(Int(channel.dominantLevels[sample]), 1)
@@ -2318,6 +2366,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return .movement
     }
 
+    /// Convert decimated burst intervals back to inclusive original-sample bounds and attach review metadata.
     private static func buildExplorerCandidates(
         from events: [MergedArtifactEvent],
         sampleCount: Int,
@@ -2328,6 +2377,8 @@ nonisolated enum WaveletArtifactAnalyzer {
     ) -> [WaveletArtifactCandidate] {
         events.enumerated().map { offset, event in
             let startSample = min(max(event.start * decimation, 0), max(sampleCount - 1, 0))
+            // One decimated sample represents a block of original samples. Expand the
+            // inclusive end to the last sample of that block before clamping.
             let endSample = min(max((event.end + 1) * decimation - 1, startSample), max(sampleCount - 1, 0))
             let peakSample = min(max(event.peak * decimation, startSample), endSample)
             let durationSeconds = Double(max(endSample - startSample + 1, 1)) / samplingRate
@@ -2357,35 +2408,10 @@ nonisolated enum WaveletArtifactAnalyzer {
         }
     }
 
-    /// Robust local burst threshold for one window of a channel's salience
-    /// trace — the same percentile-based formula the old whole-recording
-    /// projection threshold used, just applied per-window via
-    /// `windowedThreshold` so it adapts to local noise level instead of one
-    /// global statistic.
-    /// Robust local burst threshold for one window of a channel's salience
-    /// trace. Deliberately NOT a percentile-rank cutoff (e.g. "top 1.5% of
-    /// this window") — a fixed local percentile always flags *something* in
-    /// every window purely by construction, artifact or not, once you're
-    /// evaluating "top X%" against a small local sample instead of the whole
-    /// recording. Instead this is a fixed-significance (sigma-scaled)
-    /// universal threshold, the same style `coefficientThreshold` already
-    /// uses for detail coefficients: median + robust-sigma * sqrt(2 ln N).
-    /// That scales with window size the right way — a real outlier has to
-    /// clear a noise-calibrated bar, not merely rank near the top of
-    /// whatever's in the window.
-    /// Robust local statistics for one window of a channel's salience trace.
-    /// The threshold is deliberately NOT a percentile-rank cutoff (e.g. "top
-    /// 1.5% of this window") — a fixed local percentile always flags
-    /// *something* in every window purely by construction, artifact or not,
-    /// once you're evaluating "top X%" against a small local sample instead
-    /// of the whole recording. It's a fixed-significance (sigma-scaled)
-    /// universal threshold, the same style `coefficientThreshold` uses for
-    /// detail coefficients: a real outlier has to clear a noise-calibrated
-    /// bar, not merely rank near the top of whatever's in the window.
-    ///
-    /// `median` and `sigma` come back alongside it because the candidate
-    /// score is expressed in sigmas above the local median — deriving all
-    /// three from the one sort keeps this off the hot path.
+    /// Estimate local median and MAD-based noise scale from sampled finite salience values.
+    /// Set the burst gate to median + 1.8 × sigma × sqrt(2 ln N), where N is the
+    /// sampled count. The empirical 1.8 factor accommodates the right-skewed salience;
+    /// this heuristic is not a calibrated probability of an artifact.
     private static func burstStatistics(_ values: [Float]) -> (median: Float, sigma: Float, threshold: Float) {
         let sampled = sampledFiniteValues(values).sorted()
         guard !sampled.isEmpty else { return (0, 0, 0) }
@@ -2421,11 +2447,13 @@ nonisolated enum WaveletArtifactAnalyzer {
         var thresholds: [Float]
     }
 
+    /// Estimate median, noise scale and threshold in overlapping windows for one salience trace.
     private static func localNoiseModel(for values: [Float], windowSamples: Int) -> LocalNoiseModel {
         var model = LocalNoiseModel(centers: [], medians: [], sigmas: [], thresholds: [])
         let n = values.count
         guard n > 0 else { return model }
 
+        /// Append one half-open window’s robust statistics and its center to the shared local model.
         func appendWindow(from start: Int, to end: Int) {
             let stats = burstStatistics(Array(values[start..<end]))
             model.centers.append((start + end - 1) / 2)
@@ -2499,6 +2527,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return result
     }
 
+    /// Estimate the fraction of all samples above a high-salience gate derived from positive sampled values.
     private static func channelBurstFraction(_ channel: ChannelWaveletData) -> Double {
         let sampled = sampledFiniteValues(channel.energySalience).filter { $0 > 0 }.sorted()
         guard !sampled.isEmpty else { return 0 }
@@ -2509,6 +2538,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return Double(burstCount) / Double(max(channel.energySalience.count, 1))
     }
 
+    /// Interpolate the median of finite positive values, using the fallback as both default and lower bound.
     private static func medianPositive(_ values: [Double], fallback: Double) -> Double {
         let finite = values.filter { $0.isFinite && $0 > 0 }.sorted()
         guard !finite.isEmpty else { return fallback }
@@ -2519,7 +2549,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return max(finite[lower] * (1 - weight) + finite[upper] * weight, fallback)
     }
 
-    /// Robust statistics (median, MAD) are estimated from at most this many
+    /// Robust statistics (median, MAD) target approximately this many
     /// evenly-strided samples. These estimates get recomputed for every
     /// window of every level of every channel, and each one sorts its
     /// sample — at 256 channels this is the single largest cost in the scan
@@ -2529,6 +2559,7 @@ nonisolated enum WaveletArtifactAnalyzer {
     /// reached the result.
     private static let robustStatisticSampleCap = 2_000
 
+    /// Take evenly strided finite values for robust statistics. Integer stride makes the sample cap approximate.
     private static func sampledFiniteValues(_ values: [Float]) -> [Float] {
         guard !values.isEmpty else { return [] }
         let stride = max(values.count / robustStatisticSampleCap, 1)
@@ -2545,6 +2576,7 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Event and average helpers
 
+    /// Convert analyzed-window starts into centered event markers on the original recording timeline.
     private static func eventsFromHits(
         _ hits: [(start: Int, score: Float)],
         templateLength: Int,
@@ -2570,6 +2602,8 @@ nonisolated enum WaveletArtifactAnalyzer {
         }
     }
 
+    /// Average complete event-centered windows across recording channels.
+    /// Skip windows crossing the recording boundary and return nil when none are accepted.
     private static func average(
         signal: MFFSignalData,
         events: [MFFEvent],
@@ -2634,6 +2668,8 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Matching helpers
 
+    /// Center the requested duration on the selected range and clamp it in decimated sample coordinates.
+    /// The returned end is exclusive; the reference center remains in original-sample coordinates.
     private static func exemplarWindow(
         range: ClosedRange<Int>,
         windowSeconds: Double,
@@ -2657,6 +2693,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         )
     }
 
+    /// Propose separated peaks above the salience baseline, or a regular grid when fewer than 12 peaks qualify.
     private static func candidateStarts(
         projection: [Float],
         templateLength: Int
@@ -2683,6 +2720,8 @@ nonisolated enum WaveletArtifactAnalyzer {
             lastAccepted = sample
         }
 
+        // Sparse peak proposals could miss a good exemplar match. In that case scan
+        // a regular overlapping grid instead; these are proposals, not accepted events.
         if candidates.count < 12 {
             let fallbackStride = max(templateLength / 4, 1)
             candidates = Array(Swift.stride(from: 0, through: projection.count - templateLength, by: fallbackStride))
@@ -2691,6 +2730,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return Array(Set(candidates)).sorted()
     }
 
+    /// Summarize merged accepted hits, using zero for best/median score when there are no matches.
     private static func scoreSummary(
         candidates: [Int],
         hits: [(start: Int, score: Float)]
@@ -2706,10 +2746,12 @@ nonisolated enum WaveletArtifactAnalyzer {
 
     // MARK: - Small math helpers
 
+    /// Ask the shared downsampler for the integer reduction factor appropriate to the target rate.
     private static func decimationFactor(samplingRate: Double, targetRate: Double) -> Int {
         Downsampler.factor(sourceRate: samplingRate, targetRate: targetRate)
     }
 
+    /// Clamp transform depth to the configured limit and the amount supported by the sample count.
     private static func boundedLevelCount(_ requested: Int, sampleCount: Int) -> Int {
         let maximumBySamples = max(Int(floor(log2(Double(max(sampleCount, 2))))) - 1, 1)
         return min(max(requested, 1), maximumLevelCount, maximumBySamples)
@@ -2729,12 +2771,15 @@ nonisolated enum WaveletArtifactAnalyzer {
         return demean(values)
     }
 
+    /// Subtract the arithmetic mean from every sample; preserve an empty input.
     private static func demean(_ samples: [Float]) -> [Float] {
         guard !samples.isEmpty else { return [] }
         let mean = samples.reduce(Float(0), +) / Float(samples.count)
         return samples.map { $0 - mean }
     }
 
+    /// Return the original data alongside its zero-mean, unit-length vector for correlation.
+    /// An empty normalized vector signals a constant or negligible-energy window.
     private static func normalized(_ samples: [Float]) -> (original: [Float], normalized: [Float]) {
         guard !samples.isEmpty else { return (samples, []) }
         let mean = samples.reduce(Float(0), +) / Float(samples.count)
@@ -2747,6 +2792,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return (samples, centered)
     }
 
+    /// Center and normalize a map across at least three electrodes; reject constant or undersized maps.
     private static func normalizedSpatial(_ values: [Float]) -> [Float] {
         guard values.count >= 3 else { return [] }
         let mean = values.reduce(Float(0), +) / Float(values.count)
@@ -2759,16 +2805,19 @@ nonisolated enum WaveletArtifactAnalyzer {
         return centered
     }
 
+    /// Compute root-mean-square amplitude, returning zero for empty input.
     private static func rms(_ samples: [Float]) -> Float {
         guard !samples.isEmpty else { return 0 }
         let sumSquares = samples.reduce(Float(0)) { $0 + ($1 * $1) }
         return sqrt(sumSquares / Float(samples.count))
     }
 
+    /// Sum squared sample amplitudes without dividing by sample count.
     private static func vectorEnergy(_ samples: [Float]) -> Double {
         samples.reduce(0) { $0 + Double($1 * $1) }
     }
 
+    /// Compute population variance (divide by N), returning zero for empty input.
     private static func variance(_ samples: [Float]) -> Double {
         guard !samples.isEmpty else { return 0 }
         let mean = samples.reduce(Double(0)) { $0 + Double($1) } / Double(samples.count)
@@ -2778,6 +2827,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         } / Double(samples.count)
     }
 
+    /// Compute Pearson correlation over the common prefix, returning zero for insufficient or constant data.
     private static func correlation(_ lhs: [Float], _ rhs: [Float]) -> Double {
         let count = min(lhs.count, rhs.count)
         guard count > 1 else { return 0 }
@@ -2798,6 +2848,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return numerator / denominator
     }
 
+    /// Linearly interpolate a percentile of an already-sorted array after clamping the fraction to 0–1.
     private static func percentile(_ sortedValues: [Float], fraction: Double) -> Float {
         guard !sortedValues.isEmpty else { return 0 }
         let clampedFraction = min(max(fraction, 0), 1)
@@ -2809,6 +2860,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight
     }
 
+    /// Read the median of an already-sorted array, averaging the two middle values for an even count.
     private static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let middle = values.count / 2
@@ -2818,6 +2870,7 @@ nonisolated enum WaveletArtifactAnalyzer {
         return values[middle]
     }
 
+    /// Compute a ratio clamped to 0–1, treating a negligible/nonpositive denominator as zero.
     private static func safeFraction(_ numerator: Double, _ denominator: Double) -> Double {
         guard denominator > 1e-12 else { return 0 }
         return max(0, min(1, numerator / denominator))

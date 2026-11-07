@@ -3595,6 +3595,15 @@ bottleneck*; that trap was measured twice in the Resolve fit work alone.
 
 # 13. Developer Documentation
 
+The expanded newcomer-to-maintainer guide is tracked in
+[developer onboarding milestones](docs/developers/onboarding-milestones.md).
+M1 begins with setup, a first tested change, and factual corrections; M2 includes
+DEV-1c and an inventory audit; M6 includes DEV-1d and publication checks.
+M2–M6 chapters, tutorial patches and site/drift checks are delivered; see the
+[validation record](docs/developers/guide-validation.md). Independent-newcomer,
+normal GUI/toolchain, signed-release and remote deployment acceptance remain
+open. Completed reference pages below do not imply those acceptance gates passed.
+
 
 A `docs/developers/` tree that traces EVA's features to the code that implements
 them — a cross between a Read-the-Docs-style API reference and an onboarding
@@ -3622,13 +3631,13 @@ the architecture map and the feature→code index that no header can give.
   starts from, a one-line synopsis of each file (seeded from its header comment,
   then curated), and a short "how to extend this" note. This is the "outline of
   each source file" the request started from.
-- [ ] **DEV-1c — Feature → code map.** `docs/developers/features.md`: a table
+- [x] **DEV-1c — Feature → code map.** `docs/developers/features.md`: a table
   from user-facing feature (BCG detection, PCA-S correction, wavelet denoising,
   gradient/FASTR, ICA labelling, cluster-permutation stats, trial diagnostics,
   history/undo, batch/replay, MFF QuickLook, figure export, …) to the files and
   entry points that implement it and where behaviour would change. This is the
   index that motivated the whole effort ("where did we build X").
-- [ ] **DEV-1d — Keep-it-in-sync.** A lightweight check, in the spirit of the
+- [x] **DEV-1d — Keep-it-in-sync.** A lightweight check, in the spirit of the
   existing `docs/manual/contributor-guide`, that flags a new source file with no
   subsystem-page entry (and, ideally, a file whose header changed without its
   synopsis following). Optional: a small extractor that regenerates the

@@ -1,9 +1,16 @@
 # Subsystem Pages
 
 One page per top-level source group. Each page lists its **purpose**, the
-**entry-point types** to start from, a **one-line synopsis of every file**, and a
+**entry-point types** to start from, **file synopses**, and a
 short **"how to extend this"** note. Start from
 [the architecture map](../architecture.md) for the big picture and data flow.
+
+The M2 reconciliation adds missing descriptions to the source-group pages.
+For every current product/shared/test/tool/script source file, use the
+[checked source inventory](../source-inventory.md). The
+[feature-to-code-and-tests map](../features.md) provides workflow entry points.
+The generated inventory is the completeness check; these curated pages explain
+responsibility and integration.
 
 ## The `EVA/` app
 
@@ -31,7 +38,7 @@ Load → clean → epoch → analyze → view, plus the spines underneath.
 | Waveform | [waveform.md](waveform.md) | The recording window and every panel/plot in it. |
 | App & UI shell | [app.md](app.md) | App entry point, windows, preferences, update check, and the Simulator/help windows. |
 
-## The `EVACore/` library (UI-free)
+## The `EVACore/` shared source group (UI-free)
 
 | Group | Page | What lives here |
 |---|---|---|

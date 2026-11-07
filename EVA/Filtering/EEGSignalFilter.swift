@@ -22,6 +22,7 @@ enum EEGSignalFilterError: LocalizedError {
     case nonFiniteOutput(channel: Int)
     case unstableOutput(channel: Int)
 
+    /// Describes invalid cutoffs or numerical failure using the requested values/channel number.
     var errorDescription: String? {
         switch self {
         case .invalidSamplingRate:
@@ -55,6 +56,7 @@ enum FilterPrecision: String, CaseIterable, Identifiable, Codable, Sendable {
 
     nonisolated var id: String { rawValue }
 
+    /// User-facing precision label; Auto lets the numerical heuristics choose the first attempt.
     nonisolated var label: String {
         switch self {
         case .auto:
@@ -75,10 +77,9 @@ enum FilterPrecision: String, CaseIterable, Identifiable, Codable, Sendable {
 /// design slope (used to derive `designPoles`); `label` reports the true,
 /// user-facing effective slope actually delivered by the filter.
 ///
-/// Mapping: rawValue 12 dB/oct = 2-pole design (1st-order section + filtfilt)
-///          -> effective 24 dB/oct; rawValue 24 = 4-pole design (1 biquad)
-///          -> effective 48 dB/oct; rawValue 36 = 6-pole -> effective 72;
-///          rawValue 48 = 8-pole (2 biquads) -> effective 96.
+/// Mapping: rawValue 12 uses 2 poles (1 biquad), 24 uses 4 poles (2 biquads),
+/// 36 uses 6 poles (3 biquads), and 48 uses 8 poles (4 biquads). The forward/
+/// backward application doubles their asymptotic attenuation to 24/48/72/96 dB/oct.
 enum FilterSlope: Int, CaseIterable, Identifiable, Codable, Sendable {
     case dB12 = 12
     case dB24 = 24
@@ -110,6 +111,7 @@ enum FilterFamily: String, CaseIterable, Identifiable, Codable, Sendable {
 
     nonisolated var id: String { rawValue }
 
+    /// Short UI name for the requested filter family before resolving Auto per edge.
     nonisolated var label: String {
         switch self {
         case .iir: return "IIR"
@@ -124,6 +126,7 @@ enum IIRDesign: String, CaseIterable, Identifiable, Codable, Sendable {
     case elliptic
 
     nonisolated var id: String { rawValue }
+    /// Display name for the recursive filter’s coefficient-design method.
     nonisolated var label: String {
         switch self {
         case .butterworth: return "Butterworth"
@@ -137,6 +140,7 @@ enum FIRWindow: String, CaseIterable, Identifiable, Codable, Sendable {
     case kaiser
 
     nonisolated var id: String { rawValue }
+    /// Display name for the FIR window used to taper the ideal sinc kernel.
     nonisolated var label: String {
         switch self {
         case .hamming: return "Hamming"
@@ -154,6 +158,7 @@ enum FIRApplication: String, CaseIterable, Identifiable, Codable, Sendable {
     case forward
 
     nonisolated var id: String { rawValue }
+    /// Explains whether FIR application keeps, removes, or cancels its phase delay.
     nonisolated var label: String {
         switch self {
         case .zeroPhase: return "Zero phase (two pass)"
@@ -174,6 +179,7 @@ enum AutoCrossoverRule: String, CaseIterable, Identifiable, Codable, Sendable {
     case through
 
     nonisolated var id: String { rawValue }
+    /// Display text for whether the Auto crossover includes the boundary frequency.
     nonisolated var label: String {
         switch self {
         case .below: return "below"
@@ -213,6 +219,7 @@ nonisolated enum FIRDesignRule: String, CaseIterable, Identifiable, Sendable {
 
     nonisolated var id: String { rawValue }
 
+    /// Display name for the convention used to interpret requested FIR cutoffs.
     var label: String {
         switch self {
         case .eva: return "EVA"
@@ -267,6 +274,14 @@ struct EEGSignalFilter {
         }
     }
 
+    /// Filters `channels[channel][sample]`, preserving the array's channel order.
+    /// Frequencies and samplingRate are in Hz; nil cutoffs disable the respective
+    /// high/low-pass edge. Filter family, phase and boundary handling are separate
+    /// choices: read FIRApplication and the per-channel routines before changing them.
+    ///
+    /// Flow: validate requested edges → resolve filter design → process channels
+    /// → validate output. This function computes samples; recording/history updates
+    /// belong to FilterViewModel and its caller. Progress is a fraction, not a sample index.
     nonisolated static func bandPass(
         channels: [[Float]],
         samplingRate: Double,
@@ -297,6 +312,8 @@ struct EEGSignalFilter {
             throw EEGSignalFilterError.invalidSamplingRate
         }
 
+        // Nyquist is half the sample rate. A digital cutoff must lie below it;
+        // lowCutoff names the high-pass edge and highCutoff names the low-pass edge.
         let nyquist = samplingRate / 2
         if let lowCutoff, !(lowCutoff > 0 && lowCutoff < nyquist) {
             throw EEGSignalFilterError.invalidFilterRange(lowCutoff: lowCutoff, highCutoff: highCutoff, nyquist: nyquist)
@@ -316,7 +333,7 @@ struct EEGSignalFilter {
 
         // EEGLAB/MNE size a band-pass from the *narrower* of the two
         // transitions and use that one length for both edges, so the pair
-        // behaves as the single kernel those packages build. EVA's own rules
+        // shares one tap count; the edges are still applied in sequence below. EVA's own rules
         // size each edge independently, which is why this is nil for them.
         let sharedFIRTaps = firDesignRule.usesSharedKernelLength
             ? sharedBandpassTapCount(
@@ -411,6 +428,9 @@ struct EEGSignalFilter {
 
         let total = max(channels.count, 1)
         let reportEvery = max(1, total / 100)
+        // The compiler cannot prove these parallel mutations safe. The lock protects
+        // shared progress/error state; the output buffer below gives each worker a
+        // different channel slot. Keep both invariants when changing this loop.
         let progressLock = NSLock()
         nonisolated(unsafe) var completed = 0
         nonisolated(unsafe) var firstError: Error?
@@ -467,6 +487,9 @@ struct EEGSignalFilter {
         return filteredChannels
     }
 
+    /// Reduces line-frequency sinusoids and valid harmonics independently per channel.
+    /// Uses overlapping local fits so amplitude/phase can vary over time; clamps window
+    /// and subtraction strength. Invalid basic inputs return the original arrays.
     nonisolated static func adaptiveLineNoiseReduction(
         channels: [[Float]],
         samplingRate: Double,
@@ -526,8 +549,8 @@ struct EEGSignalFilter {
         return cleanedChannels
     }
 
-    /// Common-average reference: subtract the instantaneous mean across all
-    /// channels at each sample. Returns the data unchanged if it is ragged.
+    /// Common-average reference: subtract the instantaneous mean across non-bad
+    /// channels from every channel at each sample. Returns the data unchanged if it is ragged.
     ///
     /// Implemented as two cache-friendly, SIMD-vectorized passes: accumulate
     /// every channel row into a per-sample sum (vDSP_vadd), scale to a mean,
@@ -539,9 +562,8 @@ struct EEGSignalFilter {
         return copy
     }
 
-    /// In-place common-average reference. Avoids copying the channel buffers,
-    /// so the filter pipeline (which owns its band-passed buffer) can re-reference
-    /// without an extra allocation. Bad channels are excluded from the average so
+    /// In-place common-average reference. Mutates the caller’s arrays through
+    /// inout; Swift may still copy buffers if another value shares their storage. Bad channels are excluded from the average so
     /// they do not corrupt the reference, but the reference is still subtracted
     /// from every channel.
     nonisolated static func averageReferenceInPlace(_ channels: inout [[Float]], excluding bad: Set<Int> = []) {
@@ -578,13 +600,16 @@ struct EEGSignalFilter {
     /// high-pass. The high-pass time constant is τ = 1/(2π·f), and the response
     /// settles in a few τ; filtfilt roughly doubles the effective order, so we
     /// pad ~3/f seconds (≈ 4× the 1% settling time of a single pass) to keep the
-    /// ringing entirely within the reflected boundary.
+    /// reduce ringing in the retained samples; actual padding is limited by input length.
     nonisolated static func transientPadding(lowCutoff: Double, samplingRate: Double) -> Int {
         guard lowCutoff > 0, samplingRate > 0 else { return 24 }
         let estimate = Int((3.0 * samplingRate / lowCutoff).rounded(.up))
         return max(estimate, 24)
     }
 
+    /// Chooses Double for especially small normalized high-pass cutoffs or low-pass
+    /// cutoffs near Nyquist, where recursive Float arithmetic is more fragile. Otherwise
+    /// starts with Float; automatic mode can retry numerical failures in Double.
     private nonisolated static func automaticPrecision(
         samplingRate: Double,
         lowCutoff: Double?,
@@ -615,6 +640,8 @@ struct EEGSignalFilter {
         return .float
     }
 
+    /// Filters one channel and retries in Double only when Auto first used Float
+    /// and output validation reported instability. Explicit precision requests never retry.
     private nonisolated static func filterChannel(
         _ channel: [Float],
         channelIndex: Int,
@@ -669,6 +696,8 @@ struct EEGSignalFilter {
         }
     }
 
+    /// Applies the prepared high-pass, low-pass, and optional notch stages in order,
+    /// then verifies length, finite values, and excessive growth before returning samples.
     private nonisolated static func filterChannelOnce(
         _ channel: [Float],
         channelIndex: Int,
@@ -787,6 +816,7 @@ struct EEGSignalFilter {
             return requestedTransitionHz * Double(requestedTaps) / Double(realizedTaps)
         }
 
+        /// Duration represented by the uncapped requested FIR tap count.
         var requestedKernelSeconds: Double {
             samplingRate > 0 ? Double(requestedTaps) / samplingRate : 0
         }
@@ -798,6 +828,7 @@ struct EEGSignalFilter {
             samplingRate > 0 ? Double((requestedTaps + 1) * 3) / samplingRate : 0
         }
 
+        /// Summarizes realized taps and estimated transition width, including a capping warning.
         var summary: String {
             let transition = String(format: "%.3g", realizedTransitionHz)
             guard wasCapped else {
@@ -915,6 +946,8 @@ struct EEGSignalFilter {
             taps = min(taps, max(capFromLength, 3))
         }
         taps = max(taps, 3)
+        // An odd tap count gives a symmetric Type-I kernel one exact center sample,
+        // needed by the high-pass spectral-inversion impulse.
         if taps % 2 == 0 { taps += 1 }
         return taps
     }
@@ -1029,6 +1062,8 @@ struct EEGSignalFilter {
         return kernel
     }
 
+    /// Converts requested stopband attenuation into the piecewise Kaiser-window beta
+    /// parameter. Higher beta changes the taper; low attenuation uses beta zero.
     nonisolated static func kaiserBeta(forAttenuationDB attenuationDB: Double) -> Double {
         let attenuation = max(attenuationDB, 0)
         if attenuation > 50 {
@@ -1041,6 +1076,7 @@ struct EEGSignalFilter {
         return 0
     }
 
+    /// Identifies numerical output failures that an automatic Double retry may address.
     private nonisolated static func isPrecisionFallbackError(_ error: Error) -> Bool {
         switch error {
         case EEGSignalFilterError.nonFiniteOutput(_), EEGSignalFilterError.unstableOutput(_):
@@ -1050,6 +1086,8 @@ struct EEGSignalFilter {
         }
     }
 
+    /// Rejects changed output length, nonfinite samples, or extreme growth relative
+    /// to the source. Reported channel numbers are one-based for user-facing errors.
     private nonisolated static func validateFilteredChannel(
         _ result: [Float],
         source: [Float],
@@ -1071,12 +1109,16 @@ struct EEGSignalFilter {
             resultMax = max(resultMax, abs(value))
         }
 
+        // This is a numerical blow-up check, not an artifact detector: allow normal
+        // filter transients while rejecting orders-of-magnitude runaway feedback.
         let growthLimit = max(Double(sourceMax) * 10_000, 1.0e9)
         if Double(resultMax) > growthLimit {
             throw EEGSignalFilterError.unstableOutput(channel: channelIndex + 1)
         }
     }
 
+    /// Dispatches one forward/backward biquad operation to Float or Double arithmetic.
+    /// An unresolved Auto value takes the Double path here.
     private nonisolated static func zeroPhaseFilter(
         _ samples: [Float],
         coefficients: BiquadCoefficients,
@@ -1091,6 +1133,9 @@ struct EEGSignalFilter {
         }
     }
 
+    /// Pads, filters forward, filters the reversed result, restores order, and trims padding.
+    /// Uses Double recurrence state/coefficients but stores each pass’s samples as Float.
+    /// Inputs of six samples or fewer are returned unchanged.
     private nonisolated static func zeroPhaseFilterDouble(
         _ samples: [Float],
         coefficients: BiquadCoefficients,
@@ -1113,6 +1158,8 @@ struct EEGSignalFilter {
         return Array(restored[paddingCount..<(restored.count - paddingCount)])
     }
 
+    /// Float-state counterpart of the forward/backward biquad operation, preserving
+    /// input length after trimming reflected boundaries. Very short inputs are unchanged.
     private nonisolated static func zeroPhaseFilterFloat(
         _ samples: [Float],
         coefficients: BiquadCoefficients,
@@ -1135,6 +1182,7 @@ struct EEGSignalFilter {
         return Array(restored[paddingCount..<(restored.count - paddingCount)])
     }
 
+    /// Subtracts each requested sinusoid in sequence from one channel; very short traces are unchanged.
     private nonisolated static func adaptiveLineNoiseChannel(
         _ samples: [Float],
         samplingRate: Double,
@@ -1156,6 +1204,9 @@ struct EEGSignalFilter {
         return cleaned
     }
 
+    /// Fits sine/cosine coefficients within half-overlapping windows, accepting fits
+    /// only when they explain enough local energy. Hann-weighted overlap averaging
+    /// blends corrections before subtracting them at the requested strength.
     private nonisolated static func subtractAdaptiveSinusoid(
         from samples: [Float],
         samplingRate: Double,
@@ -1212,6 +1263,9 @@ struct EEGSignalFilter {
                 energy += centered * centered
             }
 
+            // Solve the 2×2 least-squares normal equations for cosine/sine amplitudes.
+            // cc/ss are basis energies, cs is their cross-product, and yc/ys project the
+            // mean-centered data onto each basis. A tiny determinant means an unreliable fit.
             let determinant = cc * ss - cs * cs
             guard determinant > 1e-12, energy > 1e-12 else { continue }
             let cosineCoefficient = (yc * ss - ys * cs) / determinant
@@ -1224,6 +1278,8 @@ struct EEGSignalFilter {
                 let fitted = cosineCoefficient * cos(phase) + sineCoefficient * sin(phase)
                 fittedEnergy += fitted * fitted
             }
+            // Ignore fits too small relative to the window’s signal energy, avoiding
+            // subtraction driven by an insignificant sinusoidal match.
             guard fittedEnergy / energy >= minimumExplainedFraction else { continue }
 
             for local in 0..<(end - start) {
@@ -1237,12 +1293,16 @@ struct EEGSignalFilter {
         }
 
         var cleaned = samples
+        // Normalize overlapping accepted fits by their accumulated taper weights.
+        // Uncovered points (including zero-weight endpoints) retain the original sample.
         for index in cleaned.indices where weightSum[index] > 1e-12 {
             cleaned[index] = Float(Double(samples[index]) - strength * correctionSum[index] / weightSum[index])
         }
         return cleaned
     }
 
+    /// Creates a symmetric Hann taper with zero-valued endpoints for overlap blending.
+    /// Counts of zero or one use the single weight [1].
     private nonisolated static func hannWindow(count: Int) -> [Double] {
         guard count > 1 else { return [1] }
         return (0..<count).map { index in
@@ -1250,17 +1310,23 @@ struct EEGSignalFilter {
         }
     }
 
+    /// Mirrors samples on both ends without repeating the endpoint itself.
+    /// The caller must limit count to samples.count−1 before forming these slices.
     private nonisolated static func reflectedPadding(for samples: [Float], count: Int) -> [Float] {
         guard count > 0, samples.count > 1 else {
             return samples
         }
 
+        // These are even reflections of nearby values, not zero padding or a
+        // reflection around the endpoint amplitude. Filtering transients occur in the padding.
         let prefix = Array(samples[1...count].reversed())
         let suffixStart = samples.count - count - 1
         let suffix = Array(samples[suffixStart..<(samples.count - 1)].reversed())
         return prefix + samples + suffix
     }
 
+    /// Applies a biquad recurrence with Double coefficients/state and Float output.
+    /// x1/x2 are prior input samples; y1/y2 are prior outputs. All state starts at zero.
     private nonisolated static func applyBiquad(to samples: [Float], coefficients: BiquadCoefficients) -> [Float] {
         var filtered: [Float] = []
         filtered.reserveCapacity(samples.count)
@@ -1287,6 +1353,7 @@ struct EEGSignalFilter {
         return filtered
     }
 
+    /// Applies the same biquad recurrence entirely in Float, converting coefficients once.
     private nonisolated static func applyBiquadFloat(to samples: [Float], coefficients: BiquadCoefficients) -> [Float] {
         var filtered: [Float] = []
         filtered.reserveCapacity(samples.count)
@@ -1328,6 +1395,8 @@ private struct BiquadCoefficients {
 
     enum FilterType { case lowPass, highPass }
 
+    /// Builds recursive sections using the selected Butterworth or elliptic design.
+    /// Converts elliptic sections into the coefficient representation used by this filter.
     nonisolated static func designed(
         design: IIRDesign,
         cutoff: Double,
@@ -1412,6 +1481,7 @@ private struct BiquadCoefficients {
         }
     }
 
+    /// Designs a normalized second-order low-pass section for cutoff Hz and quality factor Q.
     nonisolated static func lowPass(cutoff: Double, samplingRate: Double, q: Double) -> Self {
         let omega = 2 * Double.pi * cutoff / samplingRate
         let cosine = cos(omega)
@@ -1427,6 +1497,7 @@ private struct BiquadCoefficients {
         return normalize(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
+    /// Designs a normalized second-order high-pass section; Q controls the pole-pair damping.
     nonisolated static func highPass(cutoff: Double, samplingRate: Double, q: Double) -> Self {
         let omega = 2 * Double.pi * cutoff / samplingRate
         let cosine = cos(omega)
@@ -1442,6 +1513,7 @@ private struct BiquadCoefficients {
         return normalize(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
+    /// Designs a notch at the requested frequency; Q controls how narrow the rejected band is.
     nonisolated static func notch(centerFrequency: Double, samplingRate: Double, q: Double) -> Self {
         let omega = 2 * Double.pi * centerFrequency / samplingRate
         let cosine = cos(omega)
@@ -1457,6 +1529,7 @@ private struct BiquadCoefficients {
         return normalize(b0: b0, b1: b1, b2: b2, a0: a0, a1: a1, a2: a2)
     }
 
+    /// Divides numerator/denominator coefficients by a0 so the recurrence assumes a0 = 1.
     private nonisolated static func normalize(
         b0: Double, b1: Double, b2: Double, a0: Double, a1: Double, a2: Double
     ) -> Self {

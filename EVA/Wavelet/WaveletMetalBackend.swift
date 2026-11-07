@@ -9,10 +9,10 @@
 //  protection within the United States (17 U.S.C. § 105). International copyrights
 //  may apply.
 //
-//  Metal acceleration for the Wavelet Artifact Explorer's decomposition. Only
-//  the transform runs here — it's the dominant cost and is perfectly parallel
-//  over (sample x channel). The windowed median/MAD statistics and candidate
-//  extraction stay on the CPU, where sorting and sequential run-walking belong.
+//  Metal acceleration for wavelet decomposition, threshold accumulation and
+//  artifact reconstruction, parallel across samples/channels. Robust threshold
+//  estimation and candidate extraction remain on the CPU; their tables feed
+//  the GPU kernels through the request types below.
 //  Same split as `GradientMetalBackend`: dense kernels on the GPU, algorithmic
 //  choices on the CPU.
 //
@@ -24,6 +24,8 @@ import Foundation
 import Metal
 
 nonisolated final class WaveletMetalBackend: @unchecked Sendable {
+    // These small parameter structs cross the Swift/Metal boundary as raw bytes.
+    // Field order, fixed-width integer types and padding must match the kernel declarations.
     private struct SWTParameters {
         var sampleCount: UInt32
         var channelCount: UInt32
@@ -110,8 +112,12 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
     private let bandEnergyPipeline: MTLComputePipelineState
 
     static let shared: WaveletMetalBackend? = WaveletMetalBackend()
+    /// Whether the lazily initialized shared backend was created successfully.
+    /// Reading this property initializes it, including loading the compiled Metal library.
     static var isAvailable: Bool { shared != nil }
 
+    /// Create the Metal device, queue and reusable compute pipelines.
+    /// Return nil without a device; missing queue/library/functions/pipelines also issue debug assertions.
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
         guard let queue = device.makeCommandQueue() else {
@@ -170,6 +176,7 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         let channelCount: Int
         let levelCount: Int
 
+        /// Retain the completed shared-storage detail buffer and the dimensions needed to index it.
         fileprivate init(buffer: MTLBuffer, sampleCount: Int, channelCount: Int, levelCount: Int) {
             self.buffer = buffer
             self.sampleCount = sampleCount
@@ -181,6 +188,9 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         /// the sample matches what the accumulate kernel will threshold.
         func subsample(level: Int, channel: Int, delay: Int, from start: Int, to end: Int, stride: Int) -> [Float] {
             guard level < levelCount, channel < channelCount, stride > 0, end > start else { return [] }
+            // The contiguous allocation is [level][channel][sample]. Callers provide
+            // nonnegative indices and a valid half-open sample interval; this helper only
+            // checks part of that contract. Earlier-than-delay values are zero-filled.
             let base = (level * channelCount + channel) * sampleCount
             let pointer = buffer.contents().bindMemory(to: Float.self, capacity: levelCount * channelCount * sampleCount)
             var values: [Float] = []
@@ -195,9 +205,9 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
     }
 
     /// How many channels can share one dispatch without any single buffer
-    /// exceeding the device limit. The largest allocation is one
-    /// `channelCount x sampleCount` float buffer, and three of those are live
-    /// at once (input, approx, detail) plus one detail buffer per level.
+    /// exceeding a conservative budget (at most 512 MiB or the device buffer limit).
+    /// Estimate three scratch/input planes plus one plane per detail level;
+    /// residentDetails packs all detail planes into a single allocation.
     func maximumBatchChannels(sampleCount: Int, levelCount: Int) -> Int {
         guard sampleCount > 0 else { return 1 }
         let bytesPerChannel = sampleCount * MemoryLayout<Float>.stride
@@ -219,6 +229,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         let sampleCount = channels[0].count
         guard sampleCount > 0, channels.allSatisfy({ $0.count == sampleCount }) else { return nil }
         let channelCount = channels.count
+        // A plane contains all channels at one level, laid out channel by channel.
+        // The resident detail buffer concatenates one such plane for each level.
         let planeCount = sampleCount * channelCount
         let planeBytes = planeCount * MemoryLayout<Float>.stride
 
@@ -260,6 +272,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
                 highLength: UInt32(highPass.count),
                 dilation: UInt32(1 << level)
             )
+            // Buffer indices are the argument slots in waveletSWTLevel, not array indices.
+            // Each level writes its own detail plane while approximations reuse scratch space.
             encoder.setComputePipelineState(swtLevelPipeline)
             encoder.setBuffer(readBuffer, offset: 0, index: 0)
             encoder.setBuffer(writeBuffer, offset: 0, index: 1)
@@ -392,6 +406,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.error == nil else { return nil }
 
+        // The command has completed before these shared-memory reads. Copy values into
+        // Swift arrays so returned results do not depend on the temporary Metal buffers.
         let saliencePointer = salienceBuffer.contents().bindMemory(to: Float.self, capacity: planeCount)
         let signedSaliencePointer = signedSalienceBuffer.contents().bindMemory(to: Float.self, capacity: planeCount)
         let dominantPointer = dominantBuffer.contents().bindMemory(to: UInt8.self, capacity: planeCount)
@@ -414,6 +430,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
             salience.append(Array(UnsafeBufferPointer(start: saliencePointer + start, count: sampleCount)))
             signedSalience.append(Array(UnsafeBufferPointer(start: signedSaliencePointer + start, count: sampleCount)))
             dominant.append(Array(UnsafeBufferPointer(start: dominantPointer + start, count: sampleCount)))
+            // Energy kernels store [level][channel]; transpose the indexing here to return
+            // [channel][level], matching the CPU analyzer’s result layout.
             totals.append((0..<levelCount).map { Double(totalPointer[$0 * channelCount + channel]) })
             artifacts.append((0..<levelCount).map { Double(artifactPointer[$0 * channelCount + channel]) })
         }
@@ -449,6 +467,7 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         fileprivate let approxIsPing: Bool
         fileprivate let approxLength: Int
 
+        /// Retain forward-transform buffers and remember which scratch buffer holds the final approximation.
         fileprivate init(
             kind: WaveletTransformKind,
             paddedLength: Int,
@@ -479,6 +498,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         func detailSubsample(level: Int, channel: Int, from start: Int, to end: Int, stride: Int) -> [Float] {
             guard level < levelCount, channel < channelCount, stride > 0 else { return [] }
             let bandLength = bandLengths[level]
+            // Caller-supplied level, channel and start must be nonnegative. The upper
+            // window boundary is clipped to this band’s length before reading its buffer.
             let clampedEnd = min(end, bandLength)
             guard clampedEnd > start else { return [] }
             let pointer = detailBuffers[level].contents()
@@ -544,6 +565,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
 
         var bandLengths: [Int] = []
         bandLengths.reserveCapacity(levelCount)
+        // DWT halves the coefficient count each level (right shift); SWT keeps the
+        // full length and instead increases filter dilation.
         for level in 0..<levelCount {
             bandLengths.append(kind == .dwt ? paddedLength >> (level + 1) : paddedLength)
         }
@@ -674,6 +697,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
             return nil
         }
 
+        // Finishing mutates the resident details and scratch buffers. Treat this as
+        // a consuming operation: do not finish or read the same bands concurrently.
         var totalEnergyBuffers: [MTLBuffer] = []
         var keptEnergyBuffers: [MTLBuffer] = []
         let energyBytes = channelCount * MemoryLayout<Float>.stride
@@ -717,6 +742,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
             energyEncoder.setBuffer(totalBuffer, offset: 0, index: 3)
             energyEncoder.setBuffer(keptBuffer, offset: 0, index: 4)
             energyEncoder.setBytes(&parameters, length: MemoryLayout<ShrinkParameters>.stride, index: 5)
+            // Measure original and retained energies before the following encoder overwrites
+            // this detail band with its thresholded artifact coefficients.
             let energyWidth = max(min(bandEnergyPipeline.threadExecutionWidth, channelCount), 1)
             energyEncoder.dispatchThreads(
                 MTLSize(width: channelCount, height: 1, depth: 1),
@@ -811,6 +838,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         return (artifact, totalEnergy, keptEnergy)
     }
 
+    /// Encode one GPU thread per logical x/y position, sizing threadgroups within pipeline limits.
+    /// This schedules work on the encoder; committing and waiting are the caller’s responsibility.
     private func dispatch2D(
         _ encoder: MTLComputeCommandEncoder,
         pipeline: MTLComputePipelineState,
@@ -927,6 +956,8 @@ nonisolated final class WaveletMetalBackend: @unchecked Sendable {
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.error == nil else { return nil }
 
+        // This convenience path materializes every level as Swift arrays. The resident
+        // API above avoids that full copy when only aggregate salience/energy is needed.
         var results = [[[Float]]](
             repeating: [[Float]](repeating: [], count: levelCount),
             count: channelCount

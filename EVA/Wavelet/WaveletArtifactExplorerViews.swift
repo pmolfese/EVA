@@ -32,6 +32,7 @@ struct WaveletExplorerSummaryChip<Detail: View>: View {
 
     @State private var showsDetail = false
 
+    /// Display a compact summary button whose locally owned state opens the supplied detail view.
     var body: some View {
         Button {
             showsDetail.toggle()
@@ -60,6 +61,7 @@ struct WaveletExplorerSummaryChip<Detail: View>: View {
 extension WaveformView {
     // MARK: - Wavelet artifact explorer
 
+    /// Clamp the scan rate, seed preset defaults on first opening and present the explorer sheet.
     func openWaveletArtifactExplorer(for signal: MFFSignalData) {
         waveletExplorer.downsampleRate = min(max(waveletExplorer.downsampleRate, 20), signal.samplingRate)
         waveletExplorer.statusMessage = nil
@@ -72,6 +74,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Compose whole-signal reduction settings, change inspection and run/revert controls.
     func waveletReductionSheet(input: MFFSignalData) -> some View {
         let reduceCount = input.data.indices.filter { !channels.bad.contains($0) }.count
         VStack(alignment: .leading, spacing: 12) {
@@ -125,6 +128,8 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Bind reduction parameters to controls and show progress or quality results.
+    /// Changing the mode intentionally replaces the configuration with that mode’s defaults.
     func waveletReductionSettingsColumn(input: MFFSignalData, reduceCount: Int) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -342,6 +347,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Show the selected before/after trace, per-level removal and a selectable ranked change list.
     func waveletReductionInspector(input: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Inspect Changes")
@@ -419,6 +425,7 @@ extension WaveformView {
         return options.sorted()
     }
 
+    /// Show the sampling rate implied by a reduction factor, labeling factor one as full rate.
     func downsampleFactorLabel(factor: Int, rate: Double) -> String {
         let decimatedRate = Int((rate / Double(max(factor, 1))).rounded())
         return factor == 1 ? "Full (\(decimatedRate) Hz)" : "\(decimatedRate) Hz"
@@ -492,12 +499,15 @@ extension WaveformView {
         .frame(width: 320)
     }
 
+    /// Resolve the selected change by ID, falling back to the first available candidate.
     var selectedWaveletCandidate: WaveletReductionCandidate? {
         wavelet.candidates.first { $0.id == wavelet.selectedCandidateID }
             ?? wavelet.candidates.first
     }
 
     @ViewBuilder
+    /// Overlay original, removed and cleaned samples from a valid candidate interval on one amplitude scale.
+    /// Candidate bounds are expected to come from the reduction result for this input.
     func waveletCandidatePlot(candidate: WaveletReductionCandidate, input: MFFSignalData) -> some View {
         let channel = candidate.channelIndex
         let start = candidate.startSample
@@ -530,6 +540,7 @@ extension WaveformView {
         }
     }
 
+    /// Draw one trace-legend entry with a colored marker and descriptive text.
     func legendDot(_ color: Color, _ label: String) -> some View {
         HStack(spacing: 4) {
             Circle().fill(color).frame(width: 7, height: 7)
@@ -537,6 +548,8 @@ extension WaveformView {
         }
     }
 
+    /// Map samples evenly across a plot, with positive amplitude upward and 10% vertical headroom.
+    /// Return an empty path when there are too few samples or the scale is nonpositive.
     func tracePath(_ samples: [Float], in size: CGSize, scale: Float) -> Path {
         Path { path in
             guard samples.count > 1, scale > 0 else { return }
@@ -552,6 +565,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Average each level’s removed-energy metric across channels and draw bars from fine to coarse.
     func waveletPerLevelBars(result: WaveletReductionResult) -> some View {
         let metrics = Array(result.perChannel.values)
         let levelCount = metrics.map(\.removedEnergyByLevel.count).max() ?? 0
@@ -583,6 +597,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Present aggregate preservation/removal metrics, including optional in-band variance retention.
     func waveletReductionQCView(result: WaveletReductionResult) -> some View {
         let metrics = Array(result.perChannel.values)
         let meanPeak = metrics.isEmpty ? 0 : metrics.map(\.peakReductionPercent).reduce(0, +) / Double(metrics.count)
@@ -621,6 +636,7 @@ extension WaveformView {
         }
     }
 
+    /// Compose scan settings, progress, candidate review and apply/clear actions in the explorer sheet.
     func waveletArtifactExplorerSheet(for signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -701,6 +717,8 @@ extension WaveformView {
         .frame(minHeight: 640, idealHeight: 760, maxHeight: 820)
     }
 
+    /// Expose scan and preview settings through bindings; disable editing during a scan.
+    /// Preset bindings perform related updates, while ordinary bindings write a single setting.
     func waveletExplorerConfigurationSection(signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 10) {
@@ -923,6 +941,7 @@ extension WaveformView {
         .disabled(waveletExplorer.isRunning)
     }
 
+    /// Show current progress/detail and the latest 80 log entries while the scan is running.
     var waveletExplorerProgressSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -966,6 +985,7 @@ extension WaveformView {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Combine result metrics, expandable channel/level summaries and the candidate review table.
     func waveletExplorerResultView(_ result: WaveletArtifactExplorerResult, signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
@@ -1009,6 +1029,7 @@ extension WaveformView {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Draw a compact title/value metric using the shared explorer styling.
     func waveletExplorerMetricChip(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -1023,6 +1044,7 @@ extension WaveformView {
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.08)))
     }
 
+    /// Display the first eight ranked channels with energy fraction, peak magnitude and dominant level.
     func waveletExplorerChannelSummary(_ summary: WaveletArtifactFeatureSummary) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Strongest channels")
@@ -1051,6 +1073,7 @@ extension WaveformView {
         }
     }
 
+    /// Display approximate center frequency and artifact-energy fraction for each detail level.
     func waveletExplorerLevelSummary(_ summary: WaveletArtifactFeatureSummary) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Dominant levels")
@@ -1077,6 +1100,7 @@ extension WaveformView {
         }
     }
 
+    /// Show sortable candidates with inclusion checkboxes, previews, scalograms and waveform navigation.
     func waveletExplorerCandidateTable(_ candidates: [WaveletArtifactCandidate], signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Ranked candidates")
@@ -1165,6 +1189,7 @@ extension WaveformView {
         )
     }
 
+    /// Bridge the positive checkbox value to the model’s inverse representation: a set of excluded IDs.
     func waveletCandidateIncludedBinding(_ candidate: WaveletArtifactCandidate) -> Binding<Bool> {
         Binding(
             get: { !waveletExplorer.excludedCandidateIDs.contains(candidate.id) },
@@ -1178,6 +1203,7 @@ extension WaveformView {
         )
     }
 
+    /// Count current candidates not present in the exclusion set.
     var waveletExplorerIncludedCandidateCount: Int {
         guard let result = waveletExplorer.result else { return 0 }
         return result.candidates.filter { !waveletExplorer.excludedCandidateIDs.contains($0.id) }.count
@@ -1233,6 +1259,9 @@ extension WaveformView {
         let selectedChannels = Array(Set(included.map { $0.channelIndex })).sorted()
         let averageWindowSeconds = events.compactMap(\.durationSeconds).reduce(0, +) / Double(max(events.count, 1))
 
+        // Keep the same artifact identity across applies when it still exists. The
+        // general cleaning pipeline consumes this definition, so review and provenance
+        // follow the same route as the other artifact-cleaning methods.
         let existingIndex = waveletExplorer.appliedArtifactID.flatMap { id in
             template.definedArtifacts.firstIndex(where: { $0.id == id })
         }
@@ -1265,6 +1294,7 @@ extension WaveformView {
         applyArtifactCleaning(to: signal)
     }
 
+    /// Replace wavelet/threshold/mode defaults for the selected pipeline and optionally publish status.
     func applyWaveletExplorerPipelineDefaults(
         _ pipeline: WaveletCleaningPipeline,
         samplingRate: Double,
@@ -1288,6 +1318,7 @@ extension WaveformView {
         waveletExplorer.statusMessage = nil
     }
 
+    /// Reset intensity to the selected mode’s default and optionally describe its effective gate.
     func applyWaveletExplorerCleaningModeDefaults(
         _ mode: WaveletCleaningMode,
         updatesStatus: Bool = true
@@ -1299,6 +1330,8 @@ extension WaveformView {
         waveletExplorer.statusMessage = nil
     }
 
+    /// Combine base gate, mode multiplier and inverse intensity with a minimum gate of 0.05.
+    /// Higher intensity lowers this gate, allowing more coefficients into the artifact estimate.
     var effectiveWaveletExplorerThresholdScale: Double {
         max(
             0.05,
@@ -1308,6 +1341,8 @@ extension WaveformView {
         )
     }
 
+    /// Snapshot preview settings, ensuring the candidate’s peak channel is included.
+    /// Pad the review interval by its duration clamped to 0.08–0.30 seconds.
     func waveletCleaningConfiguration(
         for signal: MFFSignalData,
         candidate: WaveletArtifactCandidate
@@ -1327,14 +1362,10 @@ extension WaveformView {
         )
     }
 
-    /// Computes every candidate's hover preview up front (concurrently, off
-    /// the main actor) right after a scan, instead of on first hover. A
-    /// `TaskGroup` fans the per-candidate `cleaningPreview` calls out across
-    /// cores — each one is already independent (its own padded window, no
-    /// shared state) — then writes the whole batch into `previewCache` in one
-    /// go so this doesn't thrash observation with dozens of tiny updates.
-    /// Guarded by `runGeneration` the same way the scan itself is, so a
-    /// rescan cleanly drops a still-running precompute's results.
+    /// Precompute previews for the top-ranked handful in one detached batch.
+    /// GPU work can group compatible windows; the CPU path computes previews in sequence.
+    /// Publish completed entries on the UI actor only if the scan generation still matches;
+    /// other candidates keep their on-demand preview path.
     func precomputeWaveletExplorerPreviews(in signal: MFFSignalData) {
         guard let result = waveletExplorer.result, !result.candidates.isEmpty else { return }
         // Only the top-ranked handful. A preview costs more than its share of
@@ -1375,6 +1406,8 @@ extension WaveformView {
                 return collected
             }
             let entries = await worker.value
+            // A new scan owns its own preview cache. Discard this completed batch if it
+            // belongs to a previous generation rather than mixing incompatible results.
             guard generation == waveletExplorer.runGeneration else { return }
             for (key, preview) in entries {
                 waveletExplorer.previewCache[key] = preview
@@ -1388,6 +1421,8 @@ extension WaveformView {
     /// realistically hovers first.
     var waveletExplorerPrefetchCount: Int { 12 }
 
+    /// Snapshot valid settings and launch analysis away from the main actor.
+    /// Publish results only if the generation and recording session still match and the task was not cancelled.
     func runWaveletArtifactExplorer(in signal: MFFSignalData) {
         guard !waveletExplorer.isRunning else { return }
         let channelIndices = waveletExplorerChannels(in: signal)
@@ -1408,6 +1443,8 @@ extension WaveformView {
         waveletExplorer.statusMessage = nil
         waveletExplorer.isRunning = true
 
+        // Capture a value snapshot before leaving the UI actor; the worker should not
+        // read changing SwiftUI state while processing the recording.
         let configuration = WaveletArtifactExplorerConfiguration(
             channelIndices: channelIndices,
             downsampleRate: min(max(waveletExplorer.downsampleRate, 20), signal.samplingRate),
@@ -1439,6 +1476,9 @@ extension WaveformView {
                 operation: {
                     await worker.value
                 },
+                // Forward cancellation to the detached worker. The analyzer is synchronous,
+                // so cancellation is a request; the guards below prevent a late result from
+                // being installed even if the computation continues to completion.
                 onCancel: {
                     worker.cancel()
                 }
@@ -1464,6 +1504,7 @@ extension WaveformView {
     }
 
     @MainActor
+    /// Accept progress only for the current generation and retain at most 240 status-log entries.
     func publishWaveletExplorerProgress(_ update: WaveletArtifactExplorerProgress, generation: Int) {
         guard generation == waveletExplorer.runGeneration else { return }
         waveletExplorer.progress = update.fraction
@@ -1478,6 +1519,8 @@ extension WaveformView {
         }
     }
 
+    /// Resolve the requested channel scope against visibility and bad-channel state.
+    /// The all-channel scope intentionally includes bad and hidden channels.
     func waveletExplorerChannels(in signal: MFFSignalData) -> [Int] {
         switch waveletExplorer.channelScope {
         case .visibleGood:
@@ -1492,6 +1535,7 @@ extension WaveformView {
         }
     }
 
+    /// Select a candidate’s bounded sample interval and scroll its center into view.
     func jumpToWaveletCandidate(_ candidate: WaveletArtifactCandidate, in signal: MFFSignalData) {
         guard let sampleCount = signal.data.first?.count, sampleCount > 0 else { return }
         let lower = min(max(candidate.startSample, 0), sampleCount - 1)
@@ -1513,10 +1557,12 @@ extension WaveformView {
         horizontalScrollPosition.scrollTo(x: clampedOffset)
     }
 
+    /// Format a fractional metric as a percentage with one decimal place.
     func waveletExplorerPercent(_ value: Double) -> String {
         String(format: "%.1f%%", value * 100)
     }
 
+    /// Format nonnegative amplitude with fewer decimal places as its magnitude grows.
     func waveletExplorerMicrovolts(_ value: Float) -> String {
         if value >= 100 {
             return String(format: "%.0f µV", value)

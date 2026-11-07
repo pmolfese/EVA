@@ -69,6 +69,26 @@ shared "apply a stage" path), `ReplayController` (re-run a script with gates), a
 what it needs in `PipelineSnapshot`, declare what it invalidates in
 `PipelineInvalidation`, and — if it has learned state (an unmixing matrix, a
 template) — give it a replay payload validated by `PayloadConsistency`. Add its
-defaults to `ProcessingDefaults` and a summary to `HistoryStepSummary`. Get this
-right and undo, branching, replay, and batch all work for free; get it wrong and
-the stage silently breaks reproducibility.
+defaults to `ProcessingDefaults` and a summary to `HistoryStepSummary`.
+
+These are integration points, not an automatic guarantee. Also wire interactive
+settings restoration and replay dispatch where applicable. Test snapshot/restore,
+undo and branching, serialized parameter round-trip, replay on the intended
+recording, batch execution, downstream invalidation, and cancellation/stale-result
+publication. Learned payloads may be recording-specific: verify compatibility
+rather than reusing a matrix or template merely because it decodes. See
+[history and replay](../history-and-replay.md) and [testing](../testing.md).
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [BatchCheckpoint.swift](../../../EVA/Pipeline/BatchCheckpoint.swift) | Persists batch progress for resumable jobs. |
+| [BatchDecisionPolicy.swift](../../../EVA/Pipeline/BatchDecisionPolicy.swift) | Applies per-file rules for unsupported recorded decisions without reordering supported steps. |
+| [BatchPrefixPlanner.swift](../../../EVA/Pipeline/BatchPrefixPlanner.swift) | Plans reuse of a recording’s existing processing prefix during batch replay. |
+| [BatchPreflight.swift](../../../EVA/Pipeline/BatchPreflight.swift) | Inspects input metadata and replay compatibility before batch execution. |
+| [StepQuality.swift](../../../EVA/Pipeline/StepQuality.swift) | Represents quality information attached to processing steps. |

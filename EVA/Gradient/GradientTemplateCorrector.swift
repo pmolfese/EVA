@@ -57,6 +57,11 @@ nonisolated enum GradientTemplateCorrector {
     ///   - progress: Called with a monotonically increasing fraction in 0...1,
     ///     ending at exactly 1.
     /// - Returns: Corrected channels, same shape and order, plus diagnostics.
+    /// Coordinates layout → alignment → donor selection → template subtraction →
+    /// optional OBS (optimal basis set) → optional ANC (adaptive noise cancellation).
+    /// A tile is a bounded group of channels; a slot indexes one channel/epoch pair
+    /// inside that tile. Dense backend buffers use this flattened layout throughout.
+    /// Throws validation/backend/cancellation errors instead of publishing a partial result.
     static func correct(
         channels: [[Float]],
         volumeTriggers: [Int],
@@ -136,6 +141,8 @@ nonisolated enum GradientTemplateCorrector {
             layout = layout.extended(bySamples: closingPadding, upsampleFactor: factor)
         }
         let workingCount = sampleCount + closingPadding
+        /// Extends one channel by repeating its final sample when the layout needs closing
+        /// support. That temporary support is cropped from the returned correction.
         func working(_ channel: [Float]) -> [Float] {
             closingPadding > 0
                 ? channel + [Float](repeating: channel[sampleCount - 1], count: closingPadding)
@@ -237,6 +244,8 @@ nonisolated enum GradientTemplateCorrector {
             }
             donorEligible[epoch] = start != nil && !censored && !protected
         }
+        /// Reads precomputed donor eligibility: valid bounds, no censor/high-motion flag,
+        /// and no overlap with protected intervals including interpolation support.
         func isEligible(_ epoch: Int) -> Bool { donorEligible[epoch] }
 
         var plan = GradientBatchPlan(
@@ -350,6 +359,7 @@ nonisolated enum GradientTemplateCorrector {
         let unitsPerTile = 6
         var completedUnits = 0
         let totalUnits = max(1, tiles.count * unitsPerTile)
+        /// Reports completion of one of six stages per channel tile as a bounded fraction.
         func advance() {
             completedUnits += 1
             progress(min(1, Double(completedUnits) / Double(totalUnits)))
@@ -358,6 +368,8 @@ nonisolated enum GradientTemplateCorrector {
         for tile in tiles {
             try Task.checkCancellation()
             let width = tile.count
+            // A flattened slot identifies (local channel, epoch): slot * epochCount + epoch.
+            // Waveform samples add another dimension by multiplying that index by windowLength.
             let slotCount = width * epochCount
             let tileInputs = tile.map { working(channels[$0]) }
             let diagnosticSlot = tile.firstIndex(of: diagnosticChannel)
@@ -381,6 +393,8 @@ nonisolated enum GradientTemplateCorrector {
                 )
             }
 
+            /// Records donor fallback/missing-donor evidence for the representative diagnostic channel.
+            /// An empty donor list creates an uncorrected-epoch diagnostic.
             func record(_ selection: (donors: [Int], fellBack: Bool), target: Int) {
                 if selection.fellBack {
                     epochWarningsByEpoch[target].append(.correlationDonorsFellBack(epoch: target))
@@ -406,6 +420,8 @@ nonisolated enum GradientTemplateCorrector {
                     continue
                 }
 
+                /// Adds target-dependent donor restrictions to global eligibility: optional acquisition
+                /// group matching and maximum temporal distance on the internally upsampled axis.
                 func targetEligible(_ candidate: Int) -> Bool {
                     guard isEligible(candidate) else { return false }
                     guard let policy = config.donorPolicy else { return true }
@@ -413,6 +429,8 @@ nonisolated enum GradientTemplateCorrector {
                         && Double(abs(layout.triggers[candidate] - layout.triggers[target]))
                             <= policy.maximumDistanceSeconds * samplingRate * Double(factor)
                 }
+                /// Turns an undersized donor set into an empty set while preserving the fallback flag.
+                /// The correction stages then leave that target without a donor template.
                 func enforceMinimum(_ selection: (donors: [Int], fellBack: Bool)) -> (donors: [Int], fellBack: Bool) {
                     guard selection.donors.count >= (config.donorPolicy?.minimumDonors ?? 1) else {
                         return ([], selection.fellBack)
@@ -492,6 +510,8 @@ nonisolated enum GradientTemplateCorrector {
                         }
                         continue
                     }
+                    // Least-squares template amplitude is dot(target, template) / dot(template, template).
+                    // Quantize before validating so tiny backend rounding differences do not change acceptance.
                     fitted[epoch] = sanitizedScale(
                         quantized(templates.projections[index] / templates.energies[index]),
                         range: config.templateScaleRange
@@ -645,6 +665,8 @@ nonisolated enum GradientTemplateCorrector {
     ///
     /// A GPU round trip has a fixed cost that a short recording never earns back,
     /// and the user should not have to reason about where that crossover is.
+    /// Uses CPU unless Metal was requested, the workload is large enough, and a Metal
+    /// backend is available. The returned backend determines actual diagnostics, not the request.
     static func resolveBackend(
         _ requested: GradientComputeBackend,
         plan: GradientBatchPlan,
@@ -661,6 +683,9 @@ nonisolated enum GradientTemplateCorrector {
 
     /// Correlations for every `(channel, candidate pair)`, in target blocks so a
     /// long recording never needs the whole matrix resident at once.
+    /// Keeps returned scores channel-major: scores[channel * pairCount + pair].
+    /// The temporary backend/transfer block is bounded; the complete CPU scores array
+    /// is still allocated for every channel/pair in this tile.
     private static func scoreCorrelations(
         backend: GradientBackend,
         pairs: [GradientEpochPair],
@@ -700,6 +725,9 @@ nonisolated enum GradientTemplateCorrector {
     /// while still being large enough that the per-dispatch overhead disappears.
     private static let correlationValueBudget = 8_000_000
 
+    /// Extracts eligible candidates for one channel/target, optionally squares correlation,
+    /// and quantizes scores before ranking. Squared mode may include the target itself
+    /// when self-donation is enabled and it passes donor eligibility.
     private static func scoredCandidates(
         target: Int,
         channelSlot: Int,
@@ -732,6 +760,9 @@ nonisolated enum GradientTemplateCorrector {
 
     // MARK: - Donor dispatch
 
+    /// Dispatches temporal, motion-informed, or correlation-ranked donor selection.
+    /// Insufficient correlation matches fall back to temporal donors and set fellBack;
+    /// motion selection also falls back temporally when its mapped donor list is empty.
     private static func selectDonors(
         target: Int,
         scheme: GradientTemplateScheme,
@@ -743,6 +774,8 @@ nonisolated enum GradientTemplateCorrector {
         scored: [GradientDonorSelection.ScoredCandidate]?
     ) -> (donors: [Int], fellBack: Bool) {
 
+        /// Finds nearby eligible epochs, preserving acquisition-position matching when
+        /// serving as a fallback for correlation-based selection.
         func temporal() -> [Int] {
             GradientDonorSelection.nearestTemporalDonors(
                 target: target,
@@ -799,6 +832,9 @@ nonisolated enum GradientTemplateCorrector {
     /// - Returns: Per-`(channel, epoch)` contributions to add to the artifact
     ///   estimate, on each epoch's own sub-sample phase, or nil when no chunk
     ///   produced a basis.
+    /// Builds residual bases per channel/chunk, projects usable residual epochs onto them,
+    /// and returns those estimated artifact contributions. Small/low-energy/unusable chunks
+    /// are skipped; diagnostics are collected in deterministic job order after parallel work.
     private static func applyOBS(
         backend: GradientBackend,
         tile: [Int],
@@ -868,6 +904,8 @@ nonisolated enum GradientTemplateCorrector {
                     continue
                 }
 
+                // Estimate a compact basis from a bounded subset, then project every usable
+                // epoch onto it. Detrending keeps offset/slope from dominating the residual shapes.
                 let sampled = GradientOBS.subsample(usable, limit: config.obsMaximumEpochsPerChunk)
                 let detrended = sampled.map { epoch -> [Float] in
                     let base = (slot * epochCount + epoch) * length
@@ -887,6 +925,8 @@ nonisolated enum GradientTemplateCorrector {
         guard !jobs.isEmpty else { return nil }
         let finalizedJobs = jobs
 
+        // A Gram matrix contains pairwise dot products of residual windows. It lets
+        // the basis solver work in epoch space before recovering sample-space shapes.
         let grams = try backend.gramMatrices(
             jobs: gramJobs,
             detrended: detrendedBuffer,
@@ -965,6 +1005,8 @@ nonisolated enum GradientTemplateCorrector {
     /// not already a near-tie: correlations between real donor candidates differ
     /// in the fourth decimal, and a 1e-6 shift in a template scale moves a 100 µV
     /// artifact estimate by 1e-4 µV.
+    /// Leaves nonfinite or extremely large values unchanged; ordinary values round
+    /// to six decimal places before backend-sensitive discrete decisions.
     static func quantized(_ value: Double) -> Double {
         guard value.isFinite, abs(value) < 1e9 else { return value }
         return (value * 1e6).rounded() / 1e6
@@ -992,6 +1034,8 @@ nonisolated enum GradientTemplateCorrector {
     ///   correlating with the template does not, so it stops being subtracted.
     ///   The median rather than a mean because it also passes a step change —
     ///   which is what head motion produces — through sharply.
+    /// A missing fit always retains scale 1, even in drift-tracking mode. Valid fits
+    /// use the median of available nearby fits; missing neighbors are ignored.
     static func resolveScales(
         fitted: [Double?],
         mode: GradientTemplateScaling,
@@ -1033,6 +1077,8 @@ nonisolated enum GradientTemplateCorrector {
     /// that is not excluded, since gradient artifact dominates variance and a
     /// flat or disconnected channel carries no timing information. Ties go to
     /// the lowest index so the choice is deterministic.
+    /// Uses population variance over each full channel. If no eligible channel has
+    /// a usable variance, falls back to index zero for the diagnostic/alignment source.
     static func representativeChannel(
         _ channels: [[Float]],
         excluding excluded: Set<Int>
@@ -1061,6 +1107,9 @@ nonisolated enum GradientTemplateCorrector {
         return found ? best : 0
     }
 
+    /// Packs variable-length donor lists into one index array plus cumulative offsets.
+    /// For slot s, its donors occupy indices[offsets[s]..<offsets[s+1]]; the final offset
+    /// is the total count, including when the last slot has no donors.
     private static func flatten(_ lists: [[Int32]], slotCount: Int) -> GradientDonorTable {
         var offsets = [Int32](repeating: 0, count: slotCount + 1)
         var indices: [Int32] = []
@@ -1069,10 +1118,12 @@ nonisolated enum GradientTemplateCorrector {
             offsets[slot] = Int32(indices.count)
             indices.append(contentsOf: lists[slot])
         }
+        // The extra sentinel lets even the final slot use the same start/end lookup.
         offsets[slotCount] = Int32(indices.count)
         return GradientDonorTable(offsets: offsets, indices: indices)
     }
 
+    /// Unpacks a single slot’s half-open donor range and widens Int32 indices to Int.
     private static func donorIndices(_ table: GradientDonorTable, slot: Int) -> [Int] {
         let first = Int(table.offsets[slot])
         let last = Int(table.offsets[slot + 1])
@@ -1080,6 +1131,7 @@ nonisolated enum GradientTemplateCorrector {
         return table.indices[first..<last].map(Int.init)
     }
 
+    /// Packages epoch identity, shifts, donors, scale, and correction status into a report value.
     private static func diagnostic(
         layout: GradientEpochLayout,
         alignment: GradientEpochAlignment,

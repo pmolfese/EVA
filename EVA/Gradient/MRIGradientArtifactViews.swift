@@ -25,6 +25,8 @@ extension WaveformView {
 
     /// Volume-trigger sample indices from the raw recording (events whose code
     /// matches `code`), used as the TR grid for gradient correction.
+    /// Converts event times in seconds onto the requested sample axis (EEG by default).
+    /// Returns sorted indices without trimming or deduplicating markers.
     func trMarkerSamples(in signal: MFFSignalData, code: String, samplingRate: Double? = nil) -> [Int] {
         let rate = samplingRate ?? signal.samplingRate
         return signal.events
@@ -46,6 +48,9 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Builds correction configuration, timing/motion checks, and run controls.
+    /// SwiftUI Bindings edit the gradient model; canApply combines required inputs
+    /// with marker-spacing validation. A keyed task refreshes the advisory timing probe.
     func mriPopover(for signal: MFFSignalData?) -> some View {
         let codeCounts = signal.map(eventCodeCounts) ?? []
         let selectedCount = codeCounts.first { $0.code == gradient.trMarkerCode }?.count
@@ -309,6 +314,8 @@ extension WaveformView {
 
                 Button("Apply") {
                     gradient.showsPopover = false
+                    // During replay, Apply releases the waiting gate. The replay loop then runs
+                    // the correction once; launching another task here would duplicate that work.
                     if replay.state.isAwaitingReview {
                         // During replay the loop applies after the gate resolves.
                         replay.resume(.proceed)
@@ -330,6 +337,8 @@ extension WaveformView {
         }
         .padding(16)
         .frame(width: 420)
+        // SwiftUI restarts this task when the input key changes and cancels the old
+        // one. The view model forwards cancellation to its detached measurement worker.
         .task(id: gradient.timingProbeKey(for: signal)) {
             await gradient.updateTimingProbe(for: signal)
         }
@@ -356,7 +365,11 @@ extension WaveformView {
         }
     }
 
+    /// Clamps leading/trailing marker skips while retaining at least two markers when
+    /// available. Preserves the leading skip first, then bounds the trailing skip.
     func clampMRITrims(totalMarkers: Int?) {
+        // At least two scanner markers are needed to estimate a repetition interval.
+        // When fewer exist, force both trims to zero and let validation explain the shortage.
         let maximumCombinedSkip = max(0, (totalMarkers ?? 0) - 2)
         let clampedStart = min(max(gradient.skipStart, 0), maximumCombinedSkip)
         let clampedEnd = min(max(gradient.skipEnd, 0), maximumCombinedSkip - clampedStart)
@@ -368,6 +381,8 @@ extension WaveformView {
         }
     }
 
+    /// Provides a text field and stepper over a clamped Binding. Both read/write the
+    /// same skip count, reserving two markers after the other end’s trim.
     func mriSkipControl(
         title: String,
         value: Binding<Int>,
@@ -398,10 +413,13 @@ extension WaveformView {
         .help("Trim \(title.lowercased()) \(gradient.trMarkerCode) markers before running gradient correction.")
     }
 
+    /// Counts remaining markers after both trims, flooring the displayed count at zero.
     func trimmedMarkerCount(total: Int) -> Int {
         max(total - gradient.skipStart - gradient.skipEnd, 0)
     }
 
+    /// Requires loaded motion rows to match the retained marker count. No loaded motion
+    /// passes this count check; missing-required-motion validation is handled separately.
     func mriMotionAlignmentOK(selectedCount: Int?) -> Bool {
         guard let motion = gradient.motionParameters else { return true }
         guard let selectedCount else { return false }
@@ -409,6 +427,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Shows whether motion rows match retained TR markers and describes how to resolve a mismatch.
     func mriMotionAlignmentStatus(motion: MotionParameters, selectedCount: Int?) -> some View {
         let usedCount = selectedCount.map(trimmedMarkerCount(total:)) ?? 0
         let matches = selectedCount != nil && usedCount == motion.count
@@ -436,6 +455,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Reports whether retained triggers provide a sufficiently large, evenly spaced TR grid.
     func mriTRSpacingStatus(spacing: TRSpacingInfo, totalMarkers: Int) -> some View {
         let usedCount = trimmedMarkerCount(total: totalMarkers)
         HStack(spacing: 6) {
@@ -457,12 +477,15 @@ extension WaveformView {
     /// TR markers after trimming `gradient.skipStart` events from the start and
     /// `gradient.skipEnd` from the end (to align the EEG's TREV events to the motion
     /// file). Returns [] if the skips would leave nothing.
+    /// Slices the sorted trigger list using nonnegative model trim counts. The optional
+    /// rate supports converting the same marker times to another signal’s sample axis.
     func trimmedTRMarkers(in signal: MFFSignalData, code: String, samplingRate: Double? = nil) -> [Int] {
         let all = trMarkerSamples(in: signal, code: code, samplingRate: samplingRate)
         guard all.count > gradient.skipStart + gradient.skipEnd else { return [] }
         return Array(all[gradient.skipStart..<(all.count - gradient.skipEnd)])
     }
 
+    /// Analyzes spacing after trimming; a missing signal produces an empty assessment.
     func trSpacingInfo(for signal: MFFSignalData?) -> TRSpacingInfo {
         guard let signal else {
             return TRSpacingInfo.from(triggerSamples: [], samplingRate: 0)
@@ -480,9 +503,11 @@ extension WaveformView {
     /// `ica`, whose caches it invalidates) can outlive a single run — a
     /// same-window "Close Recording" while a correction Task is still in
     /// flight, without a full view teardown — so the CROSS-domain
-    /// invalidation is gated on `recordingSessionID`. Writes `apply` itself
-    /// makes to its own VM are safe unconditionally (see
-    /// `GradientViewModel.apply`'s doc comment).
+    /// invalidation is gated on `recordingSessionID`. Cancellation/lifetime of
+    /// the model’s own output publication remains the owner’s responsibility.
+    /// Queues the shared correction operation and captures the recording identity for
+    /// the downstream-invalidation callback. The model owns computation/publication;
+    /// this wrapper’s session check protects cross-domain invalidation only.
     func applyGradientCorrection(to signal: MFFSignalData?) async {
         guard let signal else { return }
         let sessionID = recordingSessionID
@@ -498,6 +523,7 @@ extension WaveformView {
     }
 
     /// Tooltip for the Apply button explaining why it may be disabled.
+    /// Explains the first failed marker/motion/timing prerequisite, otherwise names the action.
     func applyButtonHelp(motionUsable: Bool, selectedCount: Int?, spacing: TRSpacingInfo, motionAlignmentOK: Bool) -> String {
         if (selectedCount ?? 0) < 2 {
             return "Select a TR marker event with at least two markers to enable Apply."
@@ -523,6 +549,9 @@ extension WaveformView {
     // MARK: - Small control rows
 
     @ViewBuilder
+    /// Builds whole-TR, slice/multiband, explicit-group, or imported-JSON timing controls.
+    /// The model resolves these choices into acquisition groups; anatomical slices
+    /// acquired simultaneously share one artifact epoch.
     func mriFASTRAcquisitionTiming() -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Template Timing")
@@ -612,6 +641,8 @@ extension WaveformView {
     /// with this many controls will otherwise blow the SwiftUI type-checker's
     /// budget, which is what "unable to type-check this expression in
     /// reasonable time" means when it appears here.
+    /// Reusable integer field and bounded stepper. The stepper constrains its own
+    /// changes; the text field writes through the Binding and engine validation handles validity.
     func mriIntRow(
         _ title: String,
         value: Binding<Int>,
@@ -631,6 +662,7 @@ extension WaveformView {
         .help(help)
     }
 
+    /// Reusable numeric field with optional units and explanatory help, editing the supplied Binding.
     func mriDoubleRow(
         _ title: String,
         value: Binding<Double>,
@@ -656,6 +688,7 @@ extension WaveformView {
     /// Motion source line for Moosmann, assembled outside the view body for the
     /// same type-checking reason.
     @ViewBuilder
+    /// Summarizes the loaded motion source, row count, metric, and threshold for the selected method.
     func mriMotionSummary() -> some View {
         let name = gradient.motionParameters?.sourceName ?? ""
         let volumes = gradient.motionParameters?.count ?? 0
@@ -669,6 +702,7 @@ extension WaveformView {
     // MARK: - Per-method options
 
     @ViewBuilder
+    /// Dispatches option rendering by the selected method’s underlying correction engine.
     func mriMethodOptions() -> some View {
         switch gradient.method.engine {
         case .sliceTemplate: mriSliceTemplateOptions()
@@ -678,6 +712,8 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Builds FASTR-family scaling, synchronization, residual correction, and donor controls.
+    /// Template-only channel selection is relevant only when OBS or ANC is enabled.
     func mriSliceTemplateOptions() -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("FASTR family Options")
@@ -818,6 +854,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Shows Allen IAR running-template and ANC controls; other AAS variants add no content here.
     func mriAverageTemplateOptions() -> some View {
         if gradient.method == .allenIAR {
             VStack(alignment: .leading, spacing: 8) {
@@ -858,6 +895,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Builds local-template donor distance/count, weighting, correlation, and insufficient-donor controls.
     func mriLocalTemplateOptions() -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(gradient.method.label) Options")
@@ -901,6 +939,8 @@ extension WaveformView {
     // MARK: - Advanced
 
     @ViewBuilder
+    /// Expands only advanced sections relevant to the selected engine and enabled stages.
+    /// ViewBuilder permits conditional sections without manually erasing their view types.
     func mriAdvancedOptions() -> some View {
         if gradient.method.isFASTR || gradient.method == .allenIAR {
             DisclosureGroup(isExpanded: $gradient.showsAdvanced) {
@@ -932,6 +972,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Edits internal upsampling and the trigger’s fractional position within each artifact epoch.
     func mriAdvancedAlignment() -> some View {
         mriIntRow(
             "Upsample factor",
@@ -947,6 +988,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Edits the drift-tracking window and permitted fitted-template amplitude range.
     func mriAdvancedScaling() -> some View {
         mriIntRow(
             "Scale smoothing epochs",
@@ -967,6 +1009,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Edits donor-scoring features, qualification threshold/count, and temporal search reach.
     func mriAdvancedCorrelation() -> some View {
         Picker("Donor scoring", selection: $gradient.correlationFeature) {
             ForEach(GradientCorrelationFeature.allCases) { feature in
@@ -994,6 +1037,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Edits automatic basis selection, chunk length, sampled epoch count, and residual-energy floor.
     func mriAdvancedOBS() -> some View {
         if gradient.obsSelection == .automatic {
             mriDoubleRow(
@@ -1028,6 +1072,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Edits adaptive-filter tap count and normalized-LMS adaptation step size.
     func mriAdvancedANC() -> some View {
         mriIntRow(
             "ANC filter length",
@@ -1046,6 +1091,7 @@ extension WaveformView {
 
     /// Explanation of the method choice with references.
     @ViewBuilder
+    /// Displays explanatory method descriptions and citations using shared help-entry formatting.
     func mriMethodHelp() -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -1112,6 +1158,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Reusable title/body block for method and signal-preservation help popovers.
     func mriMethodEntry(_ title: String, _ body: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -1126,6 +1173,7 @@ extension WaveformView {
     /// The three signal-preservation guards, which are EVA-specific and worth
     /// explaining where the user meets them.
     @ViewBuilder
+    /// Explains template-scaling tradeoffs and the OBS/ANC controls in a scrollable help view.
     func mriSafetyHelp() -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -1171,6 +1219,7 @@ extension WaveformView {
     }
 
     @ViewBuilder
+    /// Explains default versus squared-correlation ranking and its self-donation behavior.
     func mriDonorHelp() -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Donor Ranking")
@@ -1186,6 +1235,8 @@ extension WaveformView {
         .frame(width: 340)
     }
 
+    /// Removes EEG/PNS corrected outputs and this stage’s variance record, then invalidates
+    /// downstream products that used the corrected base. Configuration remains available.
     func clearGradientCorrection() {
         gradient.correctedSignal = nil
         gradient.correctedPNSSignal = nil

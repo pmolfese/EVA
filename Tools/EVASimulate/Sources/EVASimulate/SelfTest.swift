@@ -49,6 +49,8 @@ nonisolated enum SelfTest {
         var corrected = channels
         guard epochSamples > 0 else { return corrected }
 
+        // Floor converts continuous onset seconds to the containing sample index.
+        // Only complete epochs contribute, keeping every template position equally weighted.
         let starts = onsetsSeconds.map { Int(($0 * samplingRate).rounded(.down)) }
 
         for channel in channels.indices {
@@ -70,8 +72,12 @@ nonisolated enum SelfTest {
         return corrected
     }
 
+    /// One named check and the measurement printed beside its expectation.
+    /// The CLI decides the exit status; collecting an outcome does not throw or abort.
     struct Outcome {
         var name: String
+        /// Historical field name: this is the check's numeric result, which may be an
+        /// SNR, error, correlation, count, or other quantity described by `expectation`.
         var snr: Double
         var passed: Bool
         var expectation: String
@@ -81,9 +87,17 @@ nonisolated enum SelfTest {
         var knownLimitation: String? = nil
     }
 
+    /// Runs deterministic model checks and returns their outcomes for the CLI to report.
+    /// The sequence covers timing and artifacts, forward models, scenario/file contracts,
+    /// source separation, ERP/group behavior, and numerical scoring. Nested helpers below
+    /// share the nearby fixture configuration; they are not general-purpose APIs.
+    /// Throwing checks catch errors into failed outcomes so later groups can still run.
     static func run() -> [Outcome] {
         var outcomes: [Outcome] = []
 
+        /// Builds a fixed-seed EEG + gradient recording and subtracts a simple volume template.
+        /// Only clock drift varies between calls; BCG and slow amplitude modulation are off.
+        /// Returns interior clean/corrected samples, excluding boundary volumes from scoring.
         func gradientOnlyRun(clockOffset: Double) -> (clean: [[Double]], corrected: [[Double]], config: SimulationConfig) {
             var config = SimulationConfig.default
             config.channelCount = 4
@@ -690,6 +704,9 @@ nonisolated enum SelfTest {
             // sweep, so the three standard parameterizations must be finite and
             // genuinely distinct — a more insulating skull (higher ratio) must
             // change the surface field, not silently collapse to one value.
+            /// Evaluates one fixed off-center dipole for the supplied head conductivity model.
+            /// Returns one value per electrode at infinity reference, keeping source and geometry
+            /// constant so differences between calls come from the skull-conductivity preset.
             func skullRatioField(_ head: SphericalHeadModel) throws -> [Double] {
                 let field = try SphericalForwardModel.leadField(
                     head: head, montage: montage, sources: [offCenter],
@@ -702,6 +719,9 @@ nonisolated enum SelfTest {
             let ratio20 = try skullRatioField(.highSkullConductivityThreeShell)
             let ratio40 = try skullRatioField(.standardThreeShell)
             let ratio80 = try skullRatioField(.rushDriscollThreeShell)
+            /// Measures the largest absolute difference relative to the first field's peak.
+            /// The equal-length fixture arrays are assumed; the small denominator floor prevents
+            /// division by zero without changing comparisons for normal nonzero fields.
             func relativeSpread(_ a: [Double], _ b: [Double]) -> Double {
                 var difference = 0.0
                 var peak = 0.0
@@ -736,6 +756,10 @@ nonisolated enum SelfTest {
                     offCenter.orientation.x, offCenter.orientation.y, offCenter.orientation.z
                 )
             )
+            /// Compares the numerical boundary-element solution with the analytic sphere.
+            /// Evaluates both at the same surface centroids, subtracts each field's mean to remove
+            /// reference offsets, and returns maximum error divided by the analytic peak.
+            /// Increasing subdivisions refines the mesh, so this error should decrease.
             func bemError(subdivisions: Int) throws -> Double {
                 let solution = try BEMForwardModel.solveSurfacePotentials(
                     head: bemHead, dipoles: [bemDipole],
@@ -760,6 +784,8 @@ nonisolated enum SelfTest {
                     bem.append(value)
                     ana.append(analytic.orientedMicrovoltsPerNanoampereMeter[index][0])
                 }
+                // Potentials have an arbitrary reference offset. Compare their spatial shape
+                // after centering both fields, rather than treating a constant offset as mesh error.
                 let bemMean = bem.reduce(0, +) / Double(bem.count)
                 let anaMean = ana.reduce(0, +) / Double(ana.count)
                 var difference = 0.0
@@ -793,6 +819,8 @@ nonisolated enum SelfTest {
             let montage = Montage.standard(count: sourceConfig.channelCount)
             let sources = DipoleEEGGenerator.makeSources(config: sourceConfig)
 
+            /// Checks harmonic-series convergence for one source at the requested relative depth.
+            /// Other head/montage settings stay fixed; `terms` controls the series truncation.
             func convergence(fraction: Double, terms: Int) throws -> LeadFieldConvergenceReport {
                 var config = sourceConfig
                 config.dipoleSourceCount = 1
@@ -2199,6 +2227,8 @@ nonisolated enum SelfTest {
             placementSweat.durationSeconds = 0.5
             placementSweat.allowOverlap = true
             placementSweat.frontalPreference = 1
+            /// Injects sweat into a zero-valued 20-channel fixture and returns samples plus truth.
+            /// The fixed seed/rate/duration make placement and montage changes directly comparable.
             func sweatPlacementRun(_ model: SweatConfig, montage: Montage) -> ([[Double]], [ArtifactEpisodeTruth]) {
                 var config = SimulationConfig.default
                 config.channelCount = 20
@@ -2227,6 +2257,10 @@ nonisolated enum SelfTest {
             let (_, narrowEpisodes) = sweatPlacementRun(placementSweat, montage: placementMontage)
             placementSweat.spreadDegrees = 180
             let (_, broadEpisodes) = sweatPlacementRun(placementSweat, montage: placementMontage)
+            /// Returns mean angular distance, in radians, from sweat centers to other affected sites.
+            /// Finds each center from its largest topography weight. Truth channel numbers start
+            /// at 1, while Swift array indices start at 0; subtracting 1 bridges those conventions.
+            /// Episodes without topographies are skipped; no usable neighbors yields zero.
             func meanSweatDistance(_ episodes: [ArtifactEpisodeTruth]) -> Double {
                 var total = 0.0
                 var count = 0
@@ -2236,6 +2270,8 @@ nonisolated enum SelfTest {
                           let center = weights.indices.max(by: { weights[$0] < weights[$1] }) else { continue }
                     for channel in episode.affectedChannels where channel - 1 != center {
                         let a = positions[channel - 1], b = positions[center]
+                        // Unit-position dot products are cosines of angular separation. Clamp tiny
+                        // floating-point excursions so acos never receives a value outside [-1, 1].
                         total += acos(max(-1, min(1, a.x * b.x + a.y * b.y + a.z * b.z)))
                         count += 1
                     }
@@ -2308,6 +2344,8 @@ nonisolated enum SelfTest {
             var reversedMontage = generatorMontage
             reversedMontage.electrodes.reverse()
 
+            /// Returns per-channel BCG amplitude summaries for the chosen spatial model/montage.
+            /// Restarts the same random stream on each call so electrode reordering is the variable.
             func bcgWeights(model: BCGSpatialModel, montage: Montage) -> [Double] {
                 var config = generatorConfig
                 config.bcgSpatialModel = model
@@ -2403,6 +2441,9 @@ nonisolated enum SelfTest {
             // cannot produce a low correlation. The zero-jitter arm is the
             // control: without it, a low correlation could just as well mean the
             // extraction window was misaligned.
+            /// Extracts channel 0 from 20 ms after a beat for a 450 ms duration.
+            /// Normalizes by absolute peak so correlation measures shape rather than amplitude.
+            /// Returns an empty array when this window reaches or crosses the recording boundary.
             func beatShape(
                 _ channels: [[Double]], beats: [Double], index: Int, config: SimulationConfig
             ) -> [Double] {
@@ -2464,6 +2505,8 @@ nonisolated enum SelfTest {
             ))
 
             // Both motional EMF and the Hall separation are linear in B0.
+            /// Injects BCG into otherwise zero data and returns the largest channel amplitude range.
+            /// The repeated seed isolates configuration changes such as magnetic-field strength.
             func peakToPeak(_ config: SimulationConfig) -> Double {
                 var channels = [[Double]](
                     repeating: [Double](repeating: 0, count: config.sampleCount),
@@ -2608,6 +2651,9 @@ nonisolated enum SelfTest {
                 for channel in topography.indices { probeMatrix[channel][probe] = topography[channel] }
             }
 
+            /// Returns the worst correlation between a probe dipole topography and its projection.
+            /// Probe columns share one channels-by-probes matrix; changing regularization or
+            /// artifact columns tests how much physiologically plausible spatial signal survives.
             func preservation(regularization: Double, artifacts: [[Double]] = []) throws -> Double {
                 let filter = try SurrogateSeparation.spatialFilter(
                     brain: surrogateBrain, artifactTopographies: artifacts,
@@ -2773,6 +2819,10 @@ nonisolated enum SelfTest {
             let separationCorrected = try SurrogateSeparation.apply(
                 filter: separationFilter, to: separationNoisy
             )
+            /// Compares a correction with the known clean, average-referenced recording.
+            /// Accumulates all available sample/channel energies, then returns the square root
+            /// of clean energy divided by residual energy (a linear amplitude ratio, not dB).
+            /// A negligible residual yields infinity.
             func broadbandSNR(_ corrected: [[Double]]) -> Double {
                 var cleanSquares = 0.0
                 var residualSquares = 0.0
@@ -2858,6 +2908,9 @@ nonisolated enum SelfTest {
             //
             // Pinned deterministically here rather than through the seeded sweep,
             // because the sweep's differences are close to its own spread.
+            /// Measures the fraction of one artifact topography that a brain/artifact filter retains.
+            /// Returns output norm / input norm: a larger value means more unwanted artifact
+            /// survives. A missing generator or effectively zero input yields zero.
             func artifactAbsorption(regionalSources: Int) throws -> Double {
                 let brain = try SurrogateSeparation.brainModel(
                     head: separationConfig.sphericalHeadModel, montage: separationMontage,
@@ -2903,6 +2956,9 @@ nonisolated enum SelfTest {
             placedConfig.recordingReference = .average
             let placedMontage = Montage.standard(count: placedConfig.channelCount)
 
+            /// Generates a fixed 20-trial ERP fixture with the supplied component locations.
+            /// Passing nil selects the legacy component path, allowing a direct placement comparison.
+            /// Returns injection metadata; the zero-initialized sample matrix is only a work buffer.
             func placedInjection(
                 _ components: [ERPComponentConfig]?
             ) throws -> ERPInjection? {
@@ -3168,6 +3224,8 @@ nonisolated enum SelfTest {
             cohortBase.erp = cohortDesign
             let cohortVariation = GroupVariation()
 
+            /// Draws subjects from one fixed population configuration and group seed.
+            /// Subject indices determine their draws, enabling the prefix-stability comparison below.
             func cohort(_ count: Int, seed: UInt64 = 20260822) -> [SubjectDraw] {
                 (0..<count).map {
                     GroupSimulation.draw(
@@ -3199,6 +3257,8 @@ nonisolated enum SelfTest {
             // would let a mixed-effects model estimate a variance component that
             // is zero by construction — and look like it worked.
             let spreadCohort = cohort(400)
+            /// Computes sample standard deviation using the n − 1 denominator.
+            /// Used only with fixture arrays containing at least two subject measurements.
             func spread(_ values: [Double]) -> Double {
                 let mean = values.reduce(0, +) / Double(values.count)
                 return (values.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) }
@@ -3365,6 +3425,9 @@ nonisolated enum SelfTest {
             compositeConfig.emg = EMGConfig()
             let compositeMontage = Montage.standard(count: compositeConfig.channelCount)
 
+            /// Builds the same seeded EEG/gradient/BCG/ocular/EMG mixture for either reference.
+            /// Applies the requested reference after combining the layers so the check covers
+            /// the complete recording, including artifacts, rather than neural data alone.
             func buildComposite(reference: EEGReference) -> [[Double]] {
                 var config = compositeConfig
                 config.recordingReference = reference
@@ -3502,6 +3565,8 @@ nonisolated enum SelfTest {
             var noise = GaussianSource(seed: 7)
             let base = SpectralNoise.bandLimited(
                 sampleCount: 4096, samplingRate: 250, lowHz: 8, highHz: 12, source: &noise)
+            /// Returns root-mean-square amplitude for this nonempty fixture. Unlike standard
+            /// deviation, RMS does not subtract the mean; it measures total sample energy.
             func rms(_ x: [Double]) -> Double { (x.reduce(0) { $0 + $1 * $1 } / Double(x.count)).squareRoot() }
             let baseKurtosis = NonGaussianSourceModel.excessKurtosis(base)
 
@@ -3541,11 +3606,16 @@ nonisolated enum SelfTest {
             var noise = GaussianSource(seed: 11)
             let raw = SpectralNoise.bandLimited(
                 sampleCount: 4096, samplingRate: 500, lowHz: 20, highHz: 200, source: &noise)
+            /// Returns population standard deviation of this nonempty carrier fixture,
+            /// subtracting its mean before dividing squared deviations by the sample count.
             func std(_ x: [Double]) -> Double { let m = x.reduce(0,+)/Double(x.count); return (x.reduce(0){$0+($1-m)*($1-m)}/Double(x.count)).squareRoot() }
+            /// Estimates one-sample-lag autocorrelation after removing the mean.
+            /// Normalizes adjacent-sample products by total centered energy; a flat signal returns zero.
             func lag1(_ x: [Double]) -> Double {
                 let m = x.reduce(0,+)/Double(x.count)
                 var num = 0.0, den = 0.0
                 for i in x.indices { den += (x[i]-m)*(x[i]-m) }
+                // Start at 1 because each term pairs sample i with the preceding sample i − 1.
                 for i in 1..<x.count { num += (x[i]-m)*(x[i-1]-m) }
                 return den > 1e-12 ? num/den : 0
             }

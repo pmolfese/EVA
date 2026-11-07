@@ -7,7 +7,7 @@
 #   mkdocs serve                             # preview at 127.0.0.1:8000/EVA/
 #   mkdocs build --strict                    # what CI runs
 #
-# The sync step mirrors ROADMAP.md, ROADMAP_COMPLETE.md and docs/design/ into
+# The sync step mirrors ROADMAP.md, ROADMAP_COMPLETE.md, docs/design/ and docs/developers/ into
 # docs/manual/development/, because MkDocs can only see files under `docs_dir`
 # and those files are authored at the repository root so GitHub renders them.
 # The mirrored copies are git-ignored; edit the root files, never the copies.
@@ -16,8 +16,8 @@
 # `python3 scripts/sync-planning-docs.py --check` verifies the copies are
 # current. .github/workflows/docs.yml runs sync + build and deploys to Pages.
 
-site_name: EVA User Manual
-site_description: User manual and tutorials for EVA, the Electrophysiology Viewer and Analysis app.
+site_name: EVA Documentation
+site_description: User and developer guides for EVA, the Electrophysiology Viewer and Analysis app.
 site_url: https://pmolfese.github.io/EVA/
 repo_url: https://github.com/pmolfese/EVA
 repo_name: pmolfese/EVA
@@ -52,7 +52,11 @@ markdown_extensions:
         kwds:
           case: lower
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   # The roadmap is ~700 task checkboxes; render them as checkboxes, not "[x]".
   - pymdownx.tasklist:
       custom_checkbox: true
@@ -92,6 +96,64 @@ nav:
       - EVA Helper: tools/eva-helper.md
       - MFF Timing Tool: tools/mff-timing-tool.md
       - Maintenance Scripts: tools/maintenance-scripts.md
+  - Developer Guide:
+      - Start Here: development/developers/index.md
+      - Setup: development/developers/setup.md
+      - First Change: development/developers/first-change.md
+      - Reading the Code: development/developers/getting-started.md
+      - Swift in EVA: development/developers/swift-in-eva.md
+      - Glossary: development/developers/glossary.md
+      - Feature Map: development/developers/features.md
+      - Data and Lifecycle: development/developers/data-and-lifecycle.md
+      - Architecture: development/developers/architecture.md
+      - State Ownership: development/developers/architecture-layers.md
+      - History and Replay: development/developers/history-and-replay.md
+      - Extension Recipes:
+          - Overview: development/developers/recipes/index.md
+          - Display Option: development/developers/recipes/display-option.md
+          - Persisted Parameter: development/developers/recipes/persisted-parameter.md
+          - Analysis Metric: development/developers/recipes/analysis-metric.md
+          - Recording Reader: development/developers/recipes/recording-reader.md
+      - Testing: development/developers/testing.md
+      - Debugging: development/developers/debugging.md
+      - Compatibility: development/developers/compatibility.md
+      - Release and Maintenance: development/developers/releasing-and-maintenance.md
+      - Documentation Maintenance: development/developers/documentation-maintenance.md
+      - Commenting: development/developers/commenting.md
+      - Source Reference:
+          - Full Inventory: development/developers/source-inventory.md
+          - Subsystem Overview: development/developers/subsystems/index.md
+          - Analysis: development/developers/subsystems/analysis.md
+          - App: development/developers/subsystems/app.md
+          - Artifacts: development/developers/subsystems/artifacts.md
+          - Cardiac: development/developers/subsystems/cardiac.md
+          - Channels: development/developers/subsystems/channels.md
+          - Combine and Compare: development/developers/subsystems/combine-compare.md
+          - Core: development/developers/subsystems/core.md
+          - Epoching: development/developers/subsystems/epoching.md
+          - EVACore I/O: development/developers/subsystems/evacore-io.md
+          - EVACore Simulation: development/developers/subsystems/evacore-simulation.md
+          - EVACore: development/developers/subsystems/evacore.md
+          - Filtering: development/developers/subsystems/filtering.md
+          - Gradient: development/developers/subsystems/gradient.md
+          - Health: development/developers/subsystems/health.md
+          - ICA: development/developers/subsystems/ica.md
+          - I/O: development/developers/subsystems/io.md
+          - Pipeline: development/developers/subsystems/pipeline.md
+          - Rhythmicity: development/developers/subsystems/rhythmicity.md
+          - Time-Frequency: development/developers/subsystems/timefrequency.md
+          - Trials: development/developers/subsystems/trials.md
+          - Waveform: development/developers/subsystems/waveform.md
+          - Wavelet: development/developers/subsystems/wavelet.md
+      - Delivery and Validation:
+          - Milestones: development/developers/onboarding-milestones.md
+          - M1 Validation: development/developers/onboarding-validation.md
+          - M2–M6 Validation: development/developers/guide-validation.md
+          - Acceptance Walkthrough: development/developers/acceptance-walkthrough.md
+      - Readability Review:
+          - Audit: development/developers/readability-audit-2026-11-06.md
+          - File Ratings: development/developers/readability-file-ratings-2026-11-06.md
+          - Comment Pass: development/developers/readability-comment-pass-2026-11-06.md
   - Development:
       - Roadmap: development/roadmap.md
       - Completed Work: development/roadmap-complete.md

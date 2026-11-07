@@ -91,3 +91,16 @@ averaging math in `PSAAveraging`/`SingleTrialAnalyzer` and the statistics in
 `Trials/`; the files here should stay UI + orchestration. PSA parameters are part
 of provenance, so thresholds flow into the processing script
 ([pipeline.md](pipeline.md)).
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [PSAAmplitudeRangeSlider.swift](../../../EVA/Epoching/PSAAmplitudeRangeSlider.swift) | Edits the displayed PSA amplitude range. |
+| [PSAConfigurationComponents.swift](../../../EVA/Epoching/PSAConfigurationComponents.swift) | Reusable controls for PSA configuration. |
+| [PSAEpochingViews.swift](../../../EVA/Epoching/PSAEpochingViews.swift) | Presents epoch-building settings and integrates segmentation with the window. |
+| [TrialChannelResidualAnalyzer.swift](../../../EVA/Epoching/TrialChannelResidualAnalyzer.swift) | Measures channel-level residuals across trials. |

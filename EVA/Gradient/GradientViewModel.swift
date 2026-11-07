@@ -30,6 +30,7 @@ enum GradientOBSSelection: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// Display name for the optimal-basis-set component-selection mode.
     var label: String {
         switch self {
         case .off: return "Off"
@@ -47,6 +48,7 @@ enum GradientDonorRanking: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// Short display name for the donor-ranking override.
     var label: String {
         switch self {
         case .methodDefault: return "Default"
@@ -54,6 +56,7 @@ enum GradientDonorRanking: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Explains the method-default and squared-correlation donor choices.
     var help: String {
         switch self {
         case .methodDefault:
@@ -73,6 +76,7 @@ enum GradientAcquisitionTimingMode: String, CaseIterable, Identifiable, Sendable
 
     var id: String { rawValue }
 
+    /// Names the source of acquisition timing within one scanner repetition (TR).
     var label: String {
         switch self {
         case .wholeVolume: return "Whole TR"
@@ -91,6 +95,7 @@ enum GradientSynchronizationProfile: String, CaseIterable, Identifiable, Sendabl
 
     var id: String { rawValue }
 
+    /// Names the clock-synchronization profile that chooses alignment defaults.
     var label: String {
         switch self {
         case .scannerSlaved: return "Scanner-slaved"
@@ -140,6 +145,7 @@ final class GradientViewModel {
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
 
+    /// Connects recording state and seeds method/backend choices from supplied or global defaults.
     init(store: RecordingStore, defaults: ProcessingDefaults? = nil) {
         self.store = store
         let defaults = defaults ?? .shared
@@ -176,10 +182,14 @@ final class GradientViewModel {
     var timingProbe: GradientTimingProbe?
     private var timingProbeSource: String?
 
+    /// Identifies timing-probe inputs by sample revision, marker code, and trim counts.
     func timingProbeKey(for signal: MFFSignalData?) -> String {
         "\(signal?.dataRevision.uuidString ?? "none")/\(trMarkerCode)/\(skipStart)/\(skipEnd)"
     }
 
+    /// Measures timing off MainActor when its key changes, forwarding cancellation
+    /// to the worker. Publishes only if the task is active and marker/trim settings
+    /// still match this input signal; the caller owns recording-session lifetime.
     func updateTimingProbe(for signal: MFFSignalData?) async {
         let key = timingProbeKey(for: signal)
         guard key != timingProbeSource else { return }
@@ -196,6 +206,8 @@ final class GradientViewModel {
         timingProbeSource = key
     }
 
+    /// Assesses measured timing against the active acquisition schedule and whether
+    /// the configured correction can represent fractional-sample timing.
     var timingAssessment: GradientTimingAssessment? {
         guard method.supportsSliceEpochs, let timingProbe else { return nil }
         let schedule: GradientAcquisitionSchedule?
@@ -252,7 +264,10 @@ final class GradientViewModel {
     /// thing asymmetry reliably buys is edge bias.
     private var templateDonorVolumes = GradientViewModel.defaultDonorVolumes
     private var fastrDonorEpochs = 30
+    /// Default count for the selected family: FASTR epochs or ordinary template volumes.
     var defaultDonorCount: Int { method.isFASTR ? 30 : Self.defaultDonorVolumes }
+    /// Routes the shared UI control to separate family-specific stored counts, preserving
+    /// each family’s setting when the user switches methods.
     var donorVolumes: Int {
         get { method.isFASTR ? fastrDonorEpochs : templateDonorVolumes }
         set {
@@ -280,6 +295,8 @@ final class GradientViewModel {
     /// Where the trigger sits inside its artifact epoch, as a fraction.
     private var templateTriggerPosition = 0.0
     private var fastrTriggerPosition = 0.0
+    /// Routes trigger position to the selected family’s stored value. It is a fraction
+    /// of an artifact epoch, not seconds or a recording sample index.
     var relativeTriggerPosition: Double {
         get { method.isFASTR ? fastrTriggerPosition : templateTriggerPosition }
         set {
@@ -413,6 +430,7 @@ final class GradientViewModel {
     var skipEnd = 0
     var trSeconds = 0.0
 
+    /// Whether a corrected EEG output is currently available to downstream processing.
     var isActive: Bool { correctedSignal != nil }
 
     /// Last method chosen in each family, so switching tabs and switching back
@@ -482,6 +500,7 @@ final class GradientViewModel {
         }
     }
 
+    /// Number of distinct artifact acquisition instants per TR, or zero if timing is unresolved.
     var effectiveAcquisitionGroupCount: Int {
         effectiveAcquisitionSchedule?.groupsPerVolume ?? 0
     }
@@ -521,6 +540,9 @@ final class GradientViewModel {
     /// Applies a small, human-readable JSON timing sidecar. Explicit offsets
     /// take precedence over count metadata; supplying both offset units is an
     /// error because their relationship cannot be inferred safely.
+    /// Validates candidate values before assigning model properties, so malformed JSON
+    /// does not partially replace timing settings. Standard SliceTiming repeats simultaneous
+    /// multiband times; those are deduplicated/sorted into acquisition groups.
     func applyAcquisitionTimingJSON(data: Data, sourceName: String) throws {
         let document = try JSONDecoder().decode(GradientAcquisitionTimingDocument.self, from: data)
         let secondsSources = [
@@ -534,6 +556,8 @@ final class GradientViewModel {
             )
         }
 
+        // Decode into temporary candidates first. Assignments at the end form the
+        // commit point after all timing validation succeeds.
         let candidateSlices = document.totalSlices ?? document.sliceTiming?.count ?? slicesPerVolume
         let candidateMB = document.multibandFactor
             ?? document.multibandAccelerationFactor
@@ -600,6 +624,9 @@ final class GradientViewModel {
         acquisitionTimingSourceName = sourceName
     }
 
+    /// Reads the file-import result under temporary security-scoped access, applies its
+    /// timing metadata, and reports decoding/validation failures in model status.
+    /// The defer releases file access even if reading or decoding throws.
     func handleAcquisitionTimingImport(_ result: Result<URL, Error>) {
         do {
             let url = try result.get()
@@ -617,7 +644,8 @@ final class GradientViewModel {
         }
     }
 
-    /// Clears the corrected outputs and run state (used by "Remove Correction").
+    /// Clears corrected outputs, audit lines, quality metrics, and coverage.
+    /// Processing flags, progress, and configuration are managed by the caller.
     func clearResults() {
         correctedSignal = nil
         correctedPNSSignal = nil
@@ -626,6 +654,8 @@ final class GradientViewModel {
         coverage = nil
     }
 
+    /// Clears recording results, progress, timing probes, and open-panel state.
+    /// Processing parameters and loaded motion data are not comprehensively reset here.
     func resetForClose() {
         timingProbe = nil
         timingProbeSource = nil
@@ -672,6 +702,8 @@ final class GradientViewModel {
     // MARK: - Engine configuration
 
     /// Config for the FASTR family.
+    /// Snapshots FASTR settings into engine configuration, translating UI choices
+    /// into alignment, donor, OBS, ANC, and channel-exclusion policies and clamping limits.
     private func sliceTemplateConfig() -> GradientCorrectionConfig {
         var config = GradientCorrectionConfig()
         let acquisitionSchedule = effectiveAcquisitionSchedule
@@ -758,6 +790,8 @@ final class GradientViewModel {
     }
 
     /// Config for the AAS family.
+    /// Starts from the selected Allen/local AAS preset, then applies timing, donor,
+    /// ANC, and motion-censor settings at this signal’s sampling rate.
     private func averageTemplateConfig(samplingRate: Double) -> GradientAAS.Config {
         var config: GradientAAS.Config
         switch method {
@@ -791,6 +825,8 @@ final class GradientViewModel {
     }
 
     /// Config for the AMRI-style local template family.
+    /// Builds local-template settings, converting distance-weighting seconds to samples
+    /// and choosing median/weighted reduction, scale fitting, and insufficient-donor behavior.
     private func localTemplateConfig(samplingRate: Double) -> LocalTemplateConfiguration {
         var config = LocalTemplateConfiguration()
         config.donorsBefore = donorSplit.before
@@ -840,6 +876,9 @@ final class GradientViewModel {
         return false
     }
 
+    /// Serializes settings relevant to the selected engine for processing history/replay.
+    /// Includes acquisition offsets and motion fingerprint metadata, not the motion samples
+    /// themselves. UI visibility, progress, and corrected sample buffers are omitted.
     var parameters: [String: String] {
         var params: [String: String] = [
             "engine": Self.engineToken,
@@ -959,16 +998,18 @@ final class GradientViewModel {
 
     /// Deserialization inverse of `parameters` for Copy Processing / replay.
     ///
-    /// Missing keys leave the current value untouched. Motion data itself is
-    /// subject-specific (loaded per-recording), so only the threshold and metric
-    /// are carried; exclusion no-ops gracefully when the target file has no
-    /// motion parameters.
+    /// Many missing keys leave current values untouched; compatibility defaults
+    /// are explicit below. Motion samples are recording-specific and must be
+    /// loaded separately when the chosen method or censoring requires them.
     ///
     /// A block written by EVA's previous gradient correctors is ignored in full.
     /// Those engines had different defaults and options that do not map onto
     /// these one-to-one — quietly applying the half that happens to share a name
     /// would produce a run the file does not describe. A block that is merely
     /// sparse, such as a hand-written processing script, is applied normally.
+    /// Restores recognized portable values and checks the loaded motion fingerprint.
+    /// Some absent keys deliberately restore historical defaults; this is not a reset
+    /// of the entire model. The later run validation refuses required missing motion.
     func apply(parameters p: [String: String]) {
         guard !Self.isLegacy(p) else {
             statusMessage = "This file's gradient settings were written by an earlier correction engine and could not be carried over; the current defaults are in use."
@@ -1104,15 +1145,9 @@ final class GradientViewModel {
     /// focused on its own domain, same pattern as
     /// `FilterViewModel.apply(to:pnsInput:onApplied:)`.
     ///
-    /// This method itself has no `recordingSessionID` staleness guard: it only
-    /// ever writes into `self`, which is safe regardless of caller. A caller
-    /// whose VM instance can outlive a single run (the interactive Apply
-    /// button, whose `GradientViewModel` survives a same-window "Close
-    /// Recording" while a Task may still be in flight) must still guard the
-    /// *outer* Task against that with its own session check before/after
-    /// awaiting this call — see `MRIGradientArtifactViews.applyGradientCorrection`
-    /// for that caller-side guard. A one-shot headless caller (`ProcessingCore`)
-    /// doesn't need one: its VMs are fresh per run and never "closed" mid-flight.
+    /// This method has cancellation checks but no recording-session identity check.
+    /// It publishes into this model before returning, so its owner must manage
+    /// cancellation/lifetime when reusing the model across recording sessions.
     func apply(
         to signal: MFFSignalData,
         pnsSignal: MFFSignalData?,
@@ -1123,6 +1158,9 @@ final class GradientViewModel {
 
     /// TR marker samples for `signal`, filtered to `trMarkerCode` and trimmed
     /// by `skipStart`/`skipEnd`.
+    /// Converts marker times to sorted sample indices at the requested rate, then
+    /// drops leading/trailing markers. Nonnegative trim counts are expected; too few
+    /// markers for those trims returns an empty list.
     private func trimmedTRMarkers(in signal: MFFSignalData, samplingRate: Double? = nil) -> [Int] {
         let rate = samplingRate ?? signal.samplingRate
         let all = signal.events
@@ -1139,6 +1177,10 @@ final class GradientViewModel {
     /// channels; everything around it — progress staging, cancellation, PNS
     /// handling, and cross-domain invalidation — is identical, so it lives here
     /// once rather than being duplicated per family.
+    /// Validates timing/motion/acquisition gaps, runs EEG and optional PNS correction
+    /// in a detached worker, and publishes outputs, coverage, metrics, and audit lines.
+    /// Cancellation is forwarded to the worker; errors become status without replacing
+    /// existing outputs. onApplied runs after successful output publication.
     private func runCorrection(
         from signal: MFFSignalData,
         pnsSignal: MFFSignalData?,
@@ -1167,6 +1209,8 @@ final class GradientViewModel {
         }
         let allTRCount = signal.events.filter { $0.code == trMarkerCode }.count
         let pnsInput = appliesToPNS ? pnsSignal : nil
+        // PNS may have a different sample rate. Use the same EEG event times but
+        // convert them onto the PNS sample axis rather than reusing EEG indices.
         let pnsTRSamples = pnsInput.map {
             trimmedTRMarkers(in: signal, samplingRate: $0.samplingRate)
         } ?? []
@@ -1239,6 +1283,8 @@ final class GradientViewModel {
                 }
                 return (corrected.channels, correctedPNSData, corrected.report, metrics, corrected.coverage)
             }
+            // Detached tasks do not inherit cancellation automatically. The handler
+            // explicitly cancels the worker and closes its progress stream.
             let result = try await withTaskCancellationHandler(
                 operation: { try await worker.value },
                 onCancel: {
@@ -1316,6 +1362,8 @@ final class GradientViewModel {
                     stageName: Self.operation
                 )
             )
+            // Coverage becomes duration-bearing events only when requested. Replace old
+            // unreliable markers instead of accumulating duplicate spans on repeated runs.
             let unreliableEvents = unreliablePolicy == .markEvents
                 ? coverage.unreliableEvents(samplingRate: signal.samplingRate)
                 : []
@@ -1347,6 +1395,9 @@ final class GradientViewModel {
     /// `(channels, triggers, progress) -> corrected channels` for the selected
     /// engine. Captured before the detached task so nothing touches the main
     /// actor's state off-actor.
+    /// Returns a Sendable closure with frozen engine configuration and method label.
+    /// Its common tuple return adapts the three engines’ different diagnostics/coverage
+    /// representations into the publication path above.
     private func correctionClosure(
         samplingRate: Double
     ) -> @Sendable ([[Float]], [Int], @escaping (Double) -> Void) throws -> (
@@ -1425,6 +1476,7 @@ final class GradientViewModel {
         }
     }
 
+    /// Chooses progress-phase text from the selected engine and optional residual stages.
     private func correctionPhaseDescription() -> String {
         switch method.engine {
         case .sliceTemplate:
@@ -1443,6 +1495,8 @@ final class GradientViewModel {
         }
     }
 
+    /// Formats the current model settings and supplied GPU/PNS flags for the completion
+    /// status. Detailed actual execution information lives in the engine audit report.
     private func summaryMessage(usesGPU: Bool, hasPNS: Bool) -> String {
         var parts: [String] = ["\(trMarkerCode) markers"]
         if method.isFASTR, effectiveAcquisitionGroupCount > 1 {
@@ -1514,6 +1568,8 @@ final class GradientViewModel {
     /// "templateScaleRejected x14" is the fact a reviewer needs, with the epoch
     /// numbers only useful for the handful of cases that are rare enough to
     /// chase individually.
+    /// Converts engine diagnostics to deterministic audit lines with counts and bounded
+    /// examples. Being nonisolated allows this pure formatter to run on the worker.
     nonisolated static func report(
         for diagnostics: GradientCorrectionDiagnostics,
         method: String
@@ -1564,6 +1620,8 @@ final class GradientViewModel {
     }
 
     /// Report for the local-template engine, whose diagnostics are per event.
+    /// Formats local-template event skips and rejected donors. This overload receives
+    /// no actual backend field; its result line currently uses a fixed cpu label.
     nonisolated static func report(
         for summaries: [LocalTemplateEventSummary],
         method: String,
@@ -1605,6 +1663,8 @@ final class GradientViewModel {
     }
 
     /// Warning kind plus the epoch it names, for grouping.
+    /// Maps a warning to its audit grouping key and optional numeric identifier.
+    /// The identifier is usually an epoch/chunk start, but ANC warnings use a channel.
     nonisolated private static func classify(_ warning: GradientCorrectionWarning) -> (String, Int?) {
         switch warning {
         case .epochOutOfBounds(let epoch): return ("epochOutOfBounds", epoch)
@@ -1624,6 +1684,7 @@ final class GradientViewModel {
         }
     }
 
+    /// Creates shared progress stages, including PNS only when it will be processed.
     private func beginOperationProgress(subtitle: String, hasPNS: Bool, phase: String) {
         var stages = ["Preparing", "EEG correction"]
         if hasPNS { stages.append("PNS correction") }
@@ -1637,6 +1698,9 @@ final class GradientViewModel {
         ).updating(fraction: 0.02, phase: phase, activeStage: 0)
     }
 
+    /// Maps worker fractions into 6–94% display progress, reserving room for preparation
+    /// and finalization. EEG/PNS split 70/30 when both run; channel counts shown are
+    /// estimates derived from phase progress, not individual completion callbacks.
     private func updateCorrectionProgress(
         _ workerFraction: Double,
         hasPNS: Bool,
@@ -1663,6 +1727,7 @@ final class GradientViewModel {
         )
     }
 
+    /// Moves progress to the final stage at 98% while corrected signals and reports are published.
     private func updateFinalizingProgress() {
         progress = 0.98
         guard let current = operationProgress else { return }

@@ -70,6 +70,7 @@ nonisolated enum SourceInformedOperatorError: Error, Equatable, LocalizedError, 
     case nonFiniteSignal
     case nonFiniteOutput
 
+    /// Translate numerical validation/solve failures into a diagnostic suitable for presentation.
     var errorDescription: String? {
         switch self {
         case .emptyBrainBasis:
@@ -113,6 +114,10 @@ nonisolated enum SourceInformedOperatorError: Error, Equatable, LocalizedError, 
 /// UI-free construction and application of the PCA-S/MSEC family operator.
 /// Artifact discovery is intentionally outside this type.
 nonisolated enum SourceInformedSeparation {
+    /// Build a fixed sensor-space filter that estimates brain activity after projecting out artifact patterns.
+    /// brainBasis is [electrode][brain column]; each artifact topography is one vector over electrodes.
+    /// Normalize brain columns, remove dependent artifact vectors and solve a regularized system.
+    /// Throws when dimensions, finite values or the remaining projected brain energy are invalid.
     static func makeOperator(
         brainBasis: [[Double]],
         artifactTopographies: [[Double]],
@@ -142,6 +147,8 @@ nonisolated enum SourceInformedSeparation {
             }
         }
 
+        // Scale each brain-basis column to unit length so ridge regularization is not
+        // dominated by arbitrary units or amplitude differences between basis columns.
         var normalizedBrain = [[Double]](
             repeating: [Double](repeating: 0, count: brainColumnCount),
             count: electrodeCount
@@ -177,6 +184,8 @@ nonisolated enum SourceInformedSeparation {
             artifactBasis.append(vector.map { $0 / norm })
         }
 
+        /// Subtract each orthonormal artifact component from an electrode-space vector.
+        /// The result is the part perpendicular to the retained artifact subspace.
         func projectOutArtifacts(_ vector: [Double]) -> [Double] {
             var result = vector
             for component in artifactBasis {
@@ -199,6 +208,9 @@ nonisolated enum SourceInformedSeparation {
             }
         }
 
+        // Let B be the normalized brain basis and P the artifact-removing projection.
+        // projectedBrain is P·B. Its Gram matrix (P·B)ᵀ(P·B) describes overlap between
+        // brain columns after artifact directions have been removed.
         var system = [[Double]](
             repeating: [Double](repeating: 0, count: brainColumnCount),
             count: brainColumnCount
@@ -219,6 +231,8 @@ nonisolated enum SourceInformedSeparation {
         guard meanColumnPower.isFinite, meanColumnPower > 1e-30 else {
             throw SourceInformedOperatorError.noProjectedBrainEnergy
         }
+        // Scale the diagonal penalty to the projected basis power. Even a requested
+        // zero penalty gets a tiny numerical floor to stabilize the positive-definite solve.
         let effectiveRidge = max(
             brainRegularization * meanColumnPower,
             1e-12 * meanColumnPower
@@ -228,11 +242,15 @@ nonisolated enum SourceInformedSeparation {
         guard let factor = LinearAlgebra.factorSymmetricPositiveDefinite(system) else {
             throw SourceInformedOperatorError.regularizedSystemNotPositiveDefinite
         }
+        // Solve all electrode right-hand sides together instead of forming an explicit
+        // matrix inverse: weights = (BᵀP B + ridge·I)⁻¹ BᵀP.
         let rightHandSides = LinearAlgebra.transpose(projectedBrain)
         guard let brainWeights = factor.solve(rightHandSides) else {
             throw SourceInformedOperatorError.regularizedSolveFailed
         }
 
+        // Map estimated brain-source weights back through B, yielding a square
+        // electrode-to-electrode operator that can be reused for every time sample.
         var matrix = [[Double]](
             repeating: [Double](repeating: 0, count: electrodeCount),
             count: electrodeCount
@@ -269,6 +287,8 @@ nonisolated enum SourceInformedSeparation {
         )
     }
 
+    /// Apply a constructed operator to channel-by-sample data through the shared validated matrix path.
+    /// Throws for incompatible/nonfinite data or cancellation between sample blocks.
     static func apply(
         _ sourceInformedOperator: SourceInformedOperator,
         to signal: [[Double]],
@@ -318,6 +338,8 @@ nonisolated enum SourceInformedSeparation {
         )
         progress?(0)
         for blockStart in stride(from: 0, to: sampleCount, by: blockSampleCount) {
+            // Check between bounded blocks so cancellation can stop long recordings
+            // without returning a partly filled output as a successful result.
             try Task.checkCancellation()
             let width = min(blockSampleCount, sampleCount - blockStart)
             var inputBlock = [Double](repeating: 0, count: electrodeCount * width)
@@ -334,6 +356,9 @@ nonisolated enum SourceInformedSeparation {
             }
 
             var outputBlock = [Double](repeating: 0, count: electrodeCount * width)
+            // Row-major BLAS computes outputBlock = matrix × inputBlock. Dimensions are
+            // [electrodes × electrodes] times [electrodes × block width]; leading dimensions
+            // are row lengths. The zero beta means overwrite the newly allocated output.
             cblas_dgemm(
                 CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 Int32(electrodeCount), Int32(width), Int32(electrodeCount),

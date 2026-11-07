@@ -24,6 +24,8 @@ struct ArtifactTemplateFieldLabel: View {
     let help: String
     @State private var showsHelp = false
 
+    /// Displays the label and a help button. @State owns the popover visibility;
+    /// $showsHelp passes SwiftUI a two-way binding so dismissal updates that state.
     var body: some View {
         HStack(spacing: 4) {
             Text(title)
@@ -57,6 +59,8 @@ struct ArtifactTemplateFieldLabel: View {
 struct OBSStrategyHelpButton: View {
     @State private var showsHelp = false
 
+    /// Builds a scrollable explanation of all OBS strategies and their shared reference.
+    /// Opening this popover changes presentation state only, not the cleaning method.
     var body: some View {
         Button {
             showsHelp.toggle()
@@ -134,6 +138,8 @@ struct HoverPinnedPreviewButton<PreviewContent: View>: View {
     @State private var isPopoverHovered = false
     @State private var hoverTask: Task<Void, Never>?
 
+    /// Connects popover presentation to local state and clears pin/hover state when
+    /// the system dismisses it. A custom Binding runs this cleanup on writes.
     private var previewPresentation: Binding<Bool> {
         Binding {
             showsPreview
@@ -146,6 +152,9 @@ struct HoverPinnedPreviewButton<PreviewContent: View>: View {
         }
     }
 
+    /// Combines a click-to-pin button with delayed hover presentation. The generic
+    /// PreviewContent closure supplies the actual view; this wrapper owns visibility
+    /// and cancels its pending hover task when the button disappears.
     var body: some View {
         Button {
             isPreviewPinned.toggle()
@@ -176,10 +185,15 @@ struct HoverPinnedPreviewButton<PreviewContent: View>: View {
         }
     }
 
+    /// Debounces hover transitions: wait 80 ms before opening and 220 ms before
+    /// closing, allowing the pointer to cross into the popover. Cancels the previous
+    /// delay and rechecks cancellation after suspension; pinned previews stay open.
     private func schedulePreviewVisibility() {
         hoverTask?.cancel()
         guard !isPreviewPinned else { return }
         let shouldShow = isButtonHovered || isPopoverHovered
+        // Task.sleep uses nanoseconds. The longer close delay bridges the small
+        // pointer gap between the button and its popover.
         let delay: UInt64 = shouldShow ? 80_000_000 : 220_000_000
         hoverTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: delay)
@@ -196,6 +210,8 @@ struct ArtifactCleaningPreviewButton: View {
     let layout: SensorLayout?
     var cleaningPreviewCache: [String: ArtifactCleaningPreviewData] = [:]
 
+    /// Opens the before/after artifact preview, passing any cached result for this
+    /// artifact, method and output signal. The parent owns the cache; this is a lookup.
     var body: some View {
         HoverPinnedPreviewButton(helpText: "Preview artifact cleanup") {
             ArtifactCleaningPreview(
@@ -226,6 +242,8 @@ struct WaveletCleaningPreviewButton: View {
     /// lookup instead of a fresh decompose-threshold-reconstruct pass.
     var precomputed: [String: WaveletCleaningPreviewResult] = [:]
 
+    /// Wraps a wavelet cleaning preview in the shared hover/pin interaction and
+    /// passes scan-time cached results through to avoid repeating the calculation.
     var body: some View {
         HoverPinnedPreviewButton(helpText: "Preview wavelet cleanup") {
             WaveletCleaningPreview(
@@ -271,10 +289,15 @@ struct WaveletCleaningPreview: View {
         ].joined(separator: "|")
     }
 
+    /// Identifies this candidate/settings preview for SwiftUI’s task(id:). A changed
+    /// ID cancels the old view task and launches a load for the new inputs.
     private var previewLoadID: String {
         Self.cacheKey(candidateID: candidate.id, configuration: configuration, signalDuration: signal.duration)
     }
 
+    /// Shows before/removed/after waveforms, metrics and per-channel removed energy.
+    /// Before and after share a scale; a much smaller removed trace may be magnified
+    /// with a label. Loading is attached to view identity rather than run inside body.
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -346,6 +369,9 @@ struct WaveletCleaningPreview: View {
         }
     }
 
+    /// Loads a cached preview or computes one in a detached worker from value inputs.
+    /// MainActor owns the view-state writes. Cancellation blocks publication after
+    /// the await; it does not automatically stop the detached numerical calculation.
     @MainActor
     private func loadPreview() async {
         if let cached = precomputed[previewLoadID] {
@@ -371,6 +397,8 @@ struct WaveletCleaningPreview: View {
         isLoadingPreview = false
     }
 
+    /// Lays out four complementary change measurements; none alone establishes that
+    /// cleaning removed only artifact or preserved all neural signal.
     private func metricsView(_ metrics: WaveletCleaningPreviewMetrics) -> some View {
         HStack(spacing: 8) {
             metricChip(
@@ -396,6 +424,7 @@ struct WaveletCleaningPreview: View {
         }
     }
 
+    /// Renders a compact title, formatted value and explanatory caption with equal width.
     private func metricChip(title: String, value: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -417,6 +446,8 @@ struct WaveletCleaningPreview: View {
         )
     }
 
+    /// Displays channel-index-ordered cells colored by normalized removed energy.
+    /// The grid is a channel list, not a spatial scalp layout; labels add one for display.
     private func removedEnergyHeatmap(_ channels: [WaveletCleaningChannelEnergy]) -> some View {
         let sortedChannels = channels.sorted { $0.channelIndex < $1.channelIndex }
         let columns = Array(repeating: GridItem(.fixed(22), spacing: 4), count: 24)
@@ -455,6 +486,7 @@ struct WaveletCleaningPreview: View {
         )
     }
 
+    /// Clamps normalized intensity to 0...1 and maps it to the preview’s color/opacity ramp.
     private func removedEnergyColor(_ intensity: Double) -> Color {
         let value = min(max(intensity, 0), 1)
         return Color(
@@ -465,6 +497,7 @@ struct WaveletCleaningPreview: View {
         )
     }
 
+    /// Summarizes the three highest-energy channels, breaking ties by channel index.
     private func strongestRemovedEnergyText(_ channels: [WaveletCleaningChannelEnergy]) -> String {
         let strongest = channels.sorted {
             if $0.normalizedRemovedEnergy == $1.normalizedRemovedEnergy {
@@ -478,6 +511,8 @@ struct WaveletCleaningPreview: View {
         return strongest.isEmpty ? "No removed energy" : strongest.joined(separator: " · ")
     }
 
+    /// Formats a cell tooltip with removed RMS, peak and local energy fraction.
+    /// The displayed fraction is capped; this formatter does not alter computed metrics.
     private func removedEnergyHelp(_ channel: WaveletCleaningChannelEnergy) -> String {
         [
             "Ch \(channel.channelIndex + 1)",
@@ -487,6 +522,8 @@ struct WaveletCleaningPreview: View {
         ].joined(separator: "\n")
     }
 
+    /// Draws one averaged waveform panel, emphasizing the candidate’s source channel.
+    /// An explicit amplitude scale makes comparisons meaningful across adjacent panels.
     private func waveformPreview(
         title: String,
         subtitle: String? = nil,
@@ -517,6 +554,7 @@ struct WaveletCleaningPreview: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Reserves a stable placeholder area with progress text while reconstruction runs.
     private var loadingPreview: some View {
         RoundedRectangle(cornerRadius: 6)
             .fill(Color.secondary.opacity(0.08))
@@ -532,6 +570,8 @@ struct WaveletCleaningPreview: View {
             .frame(height: 170)
     }
 
+    /// Finds one positive amplitude limit across all supplied traces. Returns nil
+    /// for all-zero/empty data so the plot can use its own fallback scale.
     nonisolated private static func waveformScale(_ averages: [ArtifactTemplateAverage]) -> Float? {
         let maxAbs = averages
             .flatMap { $0.allChannelSamples }
@@ -540,6 +580,8 @@ struct WaveletCleaningPreview: View {
         return maxAbs > 0 ? maxAbs : nil
     }
 
+    /// Labels magnification only when the shared scale exceeds the removed trace’s
+    /// scale by more than 1.5×. nil tells the caller to keep the shared scale.
     nonisolated private static func removedScaleSubtitle(sharedScale: Float?, removedScale: Float?) -> String? {
         guard let sharedScale,
               let removedScale,
@@ -551,6 +593,7 @@ struct WaveletCleaningPreview: View {
         return String(format: "%.1fx", sharedScale / removedScale)
     }
 
+    /// Formats nonnegative amplitude summaries in microvolts, with more decimals at small values.
     nonisolated private static func microvoltString(_ value: Float) -> String {
         if value >= 100 {
             return String(format: "%.0f µV", value)
@@ -561,6 +604,7 @@ struct WaveletCleaningPreview: View {
         return String(format: "%.2f µV", value)
     }
 
+    /// Formats seconds as seconds-with-milliseconds or minutes:seconds for longer times.
     nonisolated private static func timeString(_ seconds: Double) -> String {
         if seconds >= 60 {
             let minutes = Int(seconds) / 60
@@ -577,6 +621,7 @@ struct WaveletScalogramButton: View {
 
     @State private var showsScalogram = false
 
+    /// Opens a candidate’s time-frequency view on click; the child computes its scalogram.
     var body: some View {
         Button {
             showsScalogram.toggle()
@@ -599,10 +644,15 @@ struct WaveletScalogramPopoverView: View {
     @State private var result: WaveletScalogramResult?
     @State private var isLoading = false
 
+    /// Combines candidate identity, channel and signal duration for the current load task.
+    /// This is a UI task key, not a hash of every recorded sample.
     private var loadID: String {
         "\(candidate.id)|\(candidate.channelIndex)|\(signal.duration)"
     }
 
+    /// Presents the scalogram, legend and timing metadata, with loading/empty states.
+    /// Its identity-scoped task snapshots inputs, computes off the UI actor and checks
+    /// cancellation before publishing the result.
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
@@ -668,6 +718,7 @@ struct WaveletScalogramPopoverView: View {
         }
     }
 
+    /// Samples the same color function as the heatmap so the legend matches its ramp.
     private var scalogramColorLegend: some View {
         LinearGradient(
             colors: (0...8).map { WaveletScalogramCanvas.color(forNormalizedPower: Double($0) / 8) },
@@ -687,6 +738,9 @@ struct WaveletScalogramPopoverView: View {
 struct WaveletScalogramCanvas: View {
     let result: WaveletScalogramResult
 
+    /// Draws power[frequency][time] as colored rectangles using the available view size.
+    /// Log compression shows weaker features; the highest power defines this plot’s scale.
+    /// Rows are flipped vertically because screen y grows downward but frequency grows upward.
     var body: some View {
         GeometryReader { geo in
             let rows = result.power.count
@@ -707,6 +761,8 @@ struct WaveletScalogramCanvas: View {
                         let value = result.power[row][column]
                         let logValue = log10(value + 1e-12)
                         let normalized = max(0, min(1, (logValue - logFloor) / (logMax - logFloor)))
+                        // Subtract the cell’s bottom edge from the height to put low frequencies
+                        // at the bottom. The extra drawing pixel below prevents hairline gaps.
                         let y = size.height - CGFloat(row + 1) * cellHeight
                         let rect = CGRect(x: CGFloat(column) * cellWidth, y: y, width: cellWidth + 1, height: cellHeight + 1)
                         context.fill(Path(rect), with: .color(Self.color(forNormalizedPower: normalized)))
@@ -732,6 +788,7 @@ struct WaveletScalogramCanvas: View {
         }
     }
 
+    /// Formats frequency-axis labels in Hz, retaining a decimal below 10 Hz.
     private static func frequencyLabel(_ hz: Double) -> String {
         hz >= 10 ? String(format: "%.0f Hz", hz) : String(format: "%.1f Hz", hz)
     }
@@ -759,6 +816,8 @@ struct ArtifactOBSOptionsButton: View {
 
     @State private var showsOptions = false
 
+    /// Presents OBS options with bindings to the parent’s artifact and report cache.
+    /// The child edits shared settings directly; this button owns only sheet visibility.
     var body: some View {
         Button("Options...") {
             showsOptions = true
@@ -785,6 +844,8 @@ struct ArtifactPCASOptionsButton: View {
 
     @State private var showsOptions = false
 
+    /// Opens PCA-S settings, supplying available input/geometry/beat information
+    /// so the sheet can explain whether the selected configuration is ready.
     var body: some View {
         Button("Options...") {
             showsOptions = true
@@ -813,20 +874,27 @@ struct ArtifactPCASOptionsSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// Reads resolved PCA-S settings, including the reviewed-event anchor policy.
     private var settings: BCGSurrogateSettings {
         artifact.effectivePCASSettings
     }
 
+    /// Selects the count corresponding to the current anchor source: R-waves or artifact events.
     private var selectedBeatCount: Int {
         settings.beatSource == .rWaves ? rWaveCount : artifact.eventCount
     }
 
+    /// Checks geometry, minimum anchor count and requested broadband availability.
+    /// This is a UI readiness summary, not a replacement for numerical input validation.
     private var isReady: Bool {
         hasCompleteGeometry
             && selectedBeatCount >= settings.minimumAcceptedBeats
             && (settings.inputSource != .broadband || hasBroadbandInput)
     }
 
+    /// Creates a two-way connection to any PCA-S setting selected by a writable key path.
+    /// The generic Value keeps the field’s type. Writes copy/update the settings struct,
+    /// clear the old fitted report and notify the owning workflow of the change.
     private func settingBinding<Value>(
         _ keyPath: WritableKeyPath<BCGSurrogateSettings, Value>
     ) -> Binding<Value> {
@@ -834,6 +902,8 @@ struct ArtifactPCASOptionsSheet: View {
             settings[keyPath: keyPath]
         } set: { value in
             var updated = settings
+            // A writable key path addresses a typed field without a switch for every
+            // setting. Assign the updated value back because settings is a struct.
             updated[keyPath: keyPath] = value
             artifact.pcaSSettings = updated
             artifact.pcaSReport = nil
@@ -841,6 +911,8 @@ struct ArtifactPCASOptionsSheet: View {
         }
     }
 
+    /// Edits anchor source while protecting reviewed event selections. Switching to
+    /// R-waves also replaces reviewed-exemplar search with iterative search when needed.
     private var beatSourceBinding: Binding<BCGSurrogateBeatSource> {
         Binding {
             settings.beatSource
@@ -857,6 +929,8 @@ struct ArtifactPCASOptionsSheet: View {
         }
     }
 
+    /// Clamps the low cutoff above 0.1 Hz and below the high cutoff with a 0.5 Hz gap.
+    /// Any accepted write invalidates the previous PCA-S report and notifies the parent.
     private var lowBandBinding: Binding<Double> {
         Binding {
             settings.bandLowHz
@@ -869,6 +943,8 @@ struct ArtifactPCASOptionsSheet: View {
         }
     }
 
+    /// Bounds the high cutoff by the low cutoff and the sampling-rate-derived Nyquist
+    /// limit. Clears the fitted report because the artifact model’s input band changed.
     private var highBandBinding: Binding<Double> {
         Binding {
             settings.bandHighHz
@@ -882,6 +958,9 @@ struct ArtifactPCASOptionsSheet: View {
         }
     }
 
+    /// Assembles input, artifact-model and source-separation controls plus the last-run
+    /// report. Bindings save edits immediately; Done dismisses the sheet. onAppear
+    /// initializes missing settings and repairs an unavailable R-wave selection.
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -1090,6 +1169,9 @@ struct ArtifactLocalTemplateOptionsButton: View {
 
     @State private var showsOptions = false
 
+    /// Shows local-template options in a popover, including BCG preprocessing, donor
+    /// weighting, edge handling and variable duration. Each custom binding updates the
+    /// parent-owned definition and calls onSettingsChange; no cleaning runs here.
     var body: some View {
         Button("Options...") {
             showsOptions = true
@@ -1278,16 +1360,21 @@ private struct AlwaysVisibleSlider: View {
 
     @State private var isHovered = false
 
+    /// Bounds the current value for rendering without writing back to the binding.
     private var clampedValue: Double {
         min(max(value, range.lowerBound), range.upperBound)
     }
 
+    /// Maps the bounded value into 0...1 along the track; a zero-width range maps to zero.
     private var fraction: Double {
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return 0 }
         return (clampedValue - range.lowerBound) / span
     }
 
+    /// Draws a persistent slider thumb and converts local drag coordinates into values.
+    /// GeometryReader supplies actual width; accessibility adjustments use the same
+    /// snapping rule as dragging, and hover changes appearance only.
     var body: some View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
@@ -1356,6 +1443,7 @@ private struct AlwaysVisibleSlider: View {
         .help("Drag to adjust edge taper")
     }
 
+    /// Uses the platform control background for the slider thumb, with a white fallback.
     private var thumbFill: Color {
         #if os(macOS)
         Color(nsColor: .controlBackgroundColor)
@@ -1364,12 +1452,16 @@ private struct AlwaysVisibleSlider: View {
         #endif
     }
 
+    /// Converts a drag’s x coordinate into a clamped fraction of the track, then
+    /// writes a snapped value through the parent-provided binding.
     private func updateValue(from locationX: CGFloat, trackStart: CGFloat, trackWidth: CGFloat) {
         let rawFraction = min(max((locationX - trackStart) / trackWidth, 0), 1)
         let rawValue = range.lowerBound + Double(rawFraction) * (range.upperBound - range.lowerBound)
         value = snapped(rawValue)
     }
 
+    /// Rounds to steps measured from the range’s lower bound and clamps again.
+    /// A nonpositive step disables quantization while retaining bounds.
     private func snapped(_ rawValue: Double) -> Double {
         let clamped = min(max(rawValue, range.lowerBound), range.upperBound)
         guard step > 0 else { return clamped }
@@ -1388,15 +1480,19 @@ struct ArtifactOBSOptionsSheet: View {
     @State private var report: OBSPCAVarianceReport?
     @State private var isLoadingReport = false
 
+    /// Distinguishes temporal OBS controls from the SSP/PCA controls sharing this sheet.
     private var showsOBSVarianceOptions: Bool {
         artifact.cleaningMethod == .obs
     }
 
+    /// Shows the channel-wise variance estimate only for compatible OBS geometries.
+    /// Virtual-channel and joint spatiotemporal bases need a different interpretation.
     private var showsOBSVarianceReport: Bool {
         guard showsOBSVarianceOptions else { return false }
         return artifact.obsStrategy != .virtualChannel && artifact.obsStrategy != .spatiotemporal
     }
 
+    /// Whether the definition carries the scalp map required by some OBS strategies.
     private var hasTopography: Bool {
         artifact.topography != nil
     }
@@ -1409,6 +1505,8 @@ struct ArtifactOBSOptionsSheet: View {
         return "\(strategy.rawValue) (run topography scan first)"
     }
 
+    /// Edits strategy, substituting standard OBS when the requested map is missing.
+    /// Notifies the owner only when the effective selection actually changes.
     private var obsStrategyBinding: Binding<ArtifactOBSStrategy> {
         Binding {
             artifact.obsStrategy
@@ -1420,6 +1518,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Clamps residual PCA component count to the supported range and notifies on change.
     private var componentCountBinding: Binding<Int> {
         Binding {
             artifact.obsPCAComponentCount
@@ -1431,10 +1530,13 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Reads cumulative variance for the chosen count, or zero while no report is loaded.
     private var selectedCumulativeVariance: Double {
         report?.cumulativeVariance(for: artifact.obsPCAComponentCount) ?? 0
     }
 
+    /// Edits the maximum alignment lag in seconds within supported bounds.
+    /// A small change tolerance avoids redundant notifications from floating-point controls.
     private var alignmentSearchBinding: Binding<Double> {
         Binding {
             artifact.obsAlignmentSearchSeconds
@@ -1446,6 +1548,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Edits the 0...1 blend between uniform and scalp-map-weighted correction.
     private var topographyWeightBinding: Binding<Double> {
         Binding {
             artifact.obsTopographyWeightStrength
@@ -1457,6 +1560,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Clamps amplitude-cluster count to the supported integer range before notifying.
     private var clusterCountBinding: Binding<Int> {
         Binding {
             artifact.obsClusterCount
@@ -1468,6 +1572,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Edits taper duration in seconds with a supported maximum and change tolerance.
     private var edgeTaperBinding: Binding<Double> {
         Binding {
             artifact.obsEdgeTaperSeconds
@@ -1479,6 +1584,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Updates the baseline-preservation toggle and notifies only on a changed value.
     private var preservesLocalBaselineBinding: Binding<Bool> {
         Binding {
             artifact.obsPreservesLocalBaseline
@@ -1489,6 +1595,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Updates whether overlapping corrections are combined before subtraction.
     private var usesOverlapAddBinding: Binding<Bool> {
         Binding {
             artifact.obsUsesOverlapAdd
@@ -1499,6 +1606,8 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Updates experimental per-electrode alignment; its strategy eligibility is handled
+    /// by supportsPerChannelAlignment and the visibility of the control.
     private var perChannelAlignmentBinding: Binding<Bool> {
         Binding {
             artifact.obsPerChannelAlignment
@@ -1521,6 +1630,9 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Combines the stored report inputs/settings used by this cache. Component count
+    /// is not included: one report estimates up to the supported maximum and the UI
+    /// selects a prefix. This key is not a content hash of the signal or event array.
     private var reportCacheKey: String {
         [
             artifact.id.uuidString,
@@ -1541,6 +1653,9 @@ struct ArtifactOBSOptionsSheet: View {
         ].joined(separator: "|")
     }
 
+    /// Composes OBS/SSP component controls, edge handling and optional variance report.
+    /// Settings bindings update the parent immediately. A task keyed by report inputs
+    /// loads the numerical estimate separately from constructing the view hierarchy.
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -1680,6 +1795,8 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Builds the strategy picker and only the controls relevant to the selected case.
+    /// ViewBuilder lets branches with different concrete view types form one result.
     @ViewBuilder
     private var obsStrategyControls: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1777,6 +1894,8 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Displays cumulative variance and per-component contributions from an existing
+    /// report. Checkmarks reflect the selected component count; this view does not refit.
     private func obsVarianceReportView(_ report: OBSPCAVarianceReport) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
@@ -1827,6 +1946,7 @@ struct ArtifactOBSOptionsSheet: View {
         }
     }
 
+    /// Renders one short report count with a caption and monospaced value.
     private func obsReportChip(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -1838,6 +1958,9 @@ struct ArtifactOBSOptionsSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Loads a cached variance report or fits one in a detached worker. Captures the
+    /// cache key and input values before awaiting, then checks cancellation before
+    /// writing UI state or cache. Unsupported strategies clear the visible report.
     @MainActor
     private func loadReport() async {
         guard showsOBSVarianceReport else {
@@ -1868,6 +1991,7 @@ struct ArtifactOBSOptionsSheet: View {
         isLoadingReport = false
     }
 
+    /// Formats a fraction as a percentage with one decimal place.
     private static func percent(_ value: Double) -> String {
         String(format: "%.1f%%", value * 100)
     }
@@ -1897,14 +2021,18 @@ struct ArtifactCleaningReductionMetrics: Sendable {
     var beforeRMSMicrovolts: Float
     var afterRMSMicrovolts: Float
 
+    /// Fractional peak decrease, using the same bounded reduction rule as RMS.
     var peakReduction: Double? {
         reduction(before: beforePeakMicrovolts, after: afterPeakMicrovolts)
     }
 
+    /// Fractional RMS decrease, or nil when the original RMS is too small for a ratio.
     var rmsReduction: Double? {
         reduction(before: beforeRMSMicrovolts, after: afterRMSMicrovolts)
     }
 
+    /// Computes 1 − after/before and clamps to 0...1 for the reduction display.
+    /// An increase displays as zero reduction; near-zero input returns nil.
     private func reduction(before: Float, after: Float) -> Double? {
         guard before > 1e-6 else { return nil }
         return max(0, min(1, 1 - Double(after / before)))
@@ -1936,6 +2064,7 @@ struct ArtifactCleaningPreview: View {
         ].joined(separator: "-")
     }
 
+    /// Chooses applied method when available so the preview describes committed cleaning.
     private var previewLoadID: String {
         Self.cacheKey(
             artifactID: artifact.id,
@@ -1944,12 +2073,17 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Reserves panel height for the definition’s expected content: continuous metrics,
+    /// CRD verification, or averaged waveforms with optional scalp maps.
     private var previewHeight: CGFloat {
         if artifact.isMovementPCADefinition || artifact.isMuscleBSSCCADefinition { return 190 }
         if artifact.isCorneoRetinalDefinition { return 390 }
         return artifact.topography != nil && layout != nil ? 540 : 285
     }
 
+    /// Presents cached/computed before-and-after evidence without applying cleaning.
+    /// Selects waveform versus whole-signal metrics by method; the residual magnification
+    /// toggle changes only plot scaling. Its task loads data when preview identity changes.
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
@@ -2077,6 +2211,9 @@ struct ArtifactCleaningPreview: View {
         }
     }
 
+    /// Uses apply-time cached data when supplied; otherwise snapshots inputs and
+    /// computes preview summaries off the UI actor. A cancelled view task cannot publish
+    /// the completed worker result, even if that detached worker continues running.
     @MainActor
     private func loadPreview() async {
         if let cachedPreviewData {
@@ -2102,6 +2239,7 @@ struct ArtifactCleaningPreview: View {
         isLoadingPreview = false
     }
 
+    /// Uses the shared scale normally, or the residual’s own scale when magnification is enabled.
     private var afterWaveformScale: Float? {
         guard magnifiesResidual else {
             return previewData?.waveformScaleMicrovolts
@@ -2109,11 +2247,13 @@ struct ArtifactCleaningPreview: View {
         return previewData?.afterScaleMicrovolts ?? previewData?.waveformScaleMicrovolts
     }
 
+    /// Labels a comparable before/after scale when both traces exist and magnification is off.
     private var sharedScaleSubtitle: String? {
         guard !magnifiesResidual, previewData?.afterAverage != nil else { return nil }
         return "Shared scale"
     }
 
+    /// Labels a materially magnified residual (over 1.1×), falling back to the shared-scale label.
     private var afterWaveformSubtitle: String? {
         guard magnifiesResidual,
               let sharedScale = previewData?.waveformScaleMicrovolts,
@@ -2125,6 +2265,7 @@ struct ArtifactCleaningPreview: View {
         return String(format: "%.1fx residual scale", sharedScale / afterScale)
     }
 
+    /// Shows before/after peak and RMS together with their bounded reduction fractions.
     private func reductionMetricsView(_ metrics: ArtifactCleaningReductionMetrics) -> some View {
         HStack(spacing: 8) {
             metricChip(
@@ -2140,6 +2281,7 @@ struct ArtifactCleaningPreview: View {
         }
     }
 
+    /// Renders one metric and an optional reduction badge; nil omits the percentage.
     private func metricChip(title: String, value: String, reduction: Double?) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
@@ -2165,6 +2307,8 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Draws an averaged waveform panel highlighting the definition’s selected channels.
+    /// The caller supplies a shared or explicitly magnified amplitude scale.
     private func waveformPreview(
         title: String,
         subtitle: String?,
@@ -2195,6 +2339,7 @@ struct ArtifactCleaningPreview: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Keeps the After panel’s layout visible while explaining that cleaning has not been applied.
     private func missingPreview(title: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -2212,6 +2357,8 @@ struct ArtifactCleaningPreview: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Draws a scalp map using the supplied channel values and shared color limit.
+    /// The saved reference time is display metadata; values are prepared by the preview helpers.
     private func topographyPreview(title: String, layout: SensorLayout, values: [Double], scale: Double?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -2236,6 +2383,7 @@ struct ArtifactCleaningPreview: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// Creates a titled placeholder of fixed height while preview data is prepared.
     private func loadingPreview(title: String, height: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -2261,6 +2409,9 @@ struct ArtifactCleaningPreview: View {
     /// button becomes a cache lookup instead of a live recompute. See
     /// `applyArtifactCleaning(to:)` in WaveletReductionSheetViews.swift and
     /// `ArtifactTemplateViewModel.cleaningPreviewCache`.
+    /// Assembles event averages, before-minus-after traces, scales and change summaries.
+    /// Uses the saved average as a before fallback; missing after data leaves comparisons
+    /// absent. Continuous-method summaries compare complete traces, not just event averages.
     nonisolated static func makePreviewData(
         artifact: DefinedArtifact,
         beforeSignal: MFFSignalData,
@@ -2268,6 +2419,8 @@ struct ArtifactCleaningPreview: View {
     ) -> ArtifactCleaningPreviewData {
         let beforeAverage = average(in: beforeSignal, artifact: artifact)
             ?? artifact.average.map(baselineAlignedAverage)
+        // Optional.flatMap propagates nil from either missing afterSignal or a
+        // failed average, instead of creating a nested Optional.
         let afterAverage = afterSignal.flatMap { average(in: $0, artifact: artifact) }
         let removedAverage = difference(beforeAverage, afterAverage)
         let beforeTopographyValues = beforeAverage.flatMap(centerValues(from:))
@@ -2304,6 +2457,9 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Measures finite before-minus-after samples over matching channel lengths.
+    /// Uses valid preferred channels, falling back to all compatible rows. Returns nil
+    /// when dimensions or data cannot support a comparison; no samples are modified.
     nonisolated private static func continuousRemovalMetrics(
         before: MFFSignalData,
         after: MFFSignalData,
@@ -2345,6 +2501,9 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Subtracts compatible averages sample-by-sample and rebuilds peak/RMS summaries.
+    /// Returns nil for missing inputs or differing shapes. Timing/channel correspondence
+    /// is assumed from the paired preview inputs, not independently aligned here.
     nonisolated private static func difference(
         _ before: ArtifactTemplateAverage?,
         _ after: ArtifactTemplateAverage?
@@ -2392,6 +2551,8 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Finds a shared absolute peak across any number of optional averages.
+    /// The variadic parameter accepts before/after directly; nil inputs are ignored.
     nonisolated private static func waveformScale(_ averages: ArtifactTemplateAverage?...) -> Float? {
         let maxAbs = averages.compactMap { $0 }.flatMap { average in
             average.allChannelSamples.flatMap { $0.map(abs) }
@@ -2399,6 +2560,7 @@ struct ArtifactCleaningPreview: View {
         return maxAbs > 0 ? maxAbs : nil
     }
 
+    /// Computes paired peak/RMS summaries on preferred channels when both averages exist.
     nonisolated private static func reductionMetrics(
         beforeAverage: ArtifactTemplateAverage?,
         afterAverage: ArtifactTemplateAverage?,
@@ -2415,6 +2577,9 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Aggregates peak and RMS across valid preferred channels, falling back to all
+    /// channels. RMS pools samples rather than averaging channel RMS values. Empty
+    /// data yields zeros; this helper does not discard nonfinite values.
     nonisolated private static func waveformMetrics(
         for average: ArtifactTemplateAverage,
         preferredChannels: [Int]
@@ -2439,6 +2604,7 @@ struct ArtifactCleaningPreview: View {
         return (peak, rms)
     }
 
+    /// Formats amplitude summaries with precision adapted to their size, in microvolts.
     nonisolated private static func microvoltString(_ value: Float) -> String {
         if value >= 100 {
             return String(format: "%.0f µV", value)
@@ -2449,16 +2615,21 @@ struct ArtifactCleaningPreview: View {
         return String(format: "%.2f µV", value)
     }
 
+    /// Formats a reduction fraction as a whole-number percentage label.
     nonisolated private static func percentString(_ value: Double) -> String {
         String(format: "%.0f%% reduction", value * 100)
     }
 
+    /// Chooses one absolute color limit for two scalp maps; returns nil unless both exist
+    /// and their combined peak is positive.
     nonisolated private static func topographyScale(_ before: [Double]?, _ after: [Double]?) -> Double? {
         guard let before, let after else { return nil }
         let maxAbs = (before + after).map(abs).max() ?? 0
         return maxAbs > 0 ? maxAbs : nil
     }
 
+    /// Takes the middle sample of each channel’s average for the scalp map.
+    /// Uses the first row’s midpoint; a shorter row contributes zero.
     nonisolated private static func centerValues(from average: ArtifactTemplateAverage) -> [Double]? {
         guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 0 else { return nil }
         let center = sampleCount / 2
@@ -2467,6 +2638,10 @@ struct ArtifactCleaningPreview: View {
         }
     }
 
+    /// Builds baseline-aligned, event-centered preview averages in parallel by channel.
+    /// CRD uses blink-mask events. Only complete windows count; the same accepted-event
+    /// divisor is used for every channel. Returns nil when timing/data/events provide no
+    /// complete window. This is display preparation, not a cleaning operation.
     nonisolated private static func average(in signal: MFFSignalData, artifact: DefinedArtifact) -> ArtifactTemplateAverage? {
         let events = artifact.isCorneoRetinalDefinition
             ? (artifact.corneoRetinalBlinkEvents ?? [])
@@ -2523,6 +2698,8 @@ struct ArtifactCleaningPreview: View {
                     guard channelData.count >= window.end else { continue }
                     let firstMean = mean(channelData, start: window.start, count: edgeSamples)
                     let lastMean = mean(channelData, start: window.end - edgeSamples, count: edgeSamples)
+                    // Edge means are anchored at the centers of their sample groups. Interpolate
+                    // a line between those centers, then subtract it before averaging events.
                     let slope = (lastMean - firstMean) / baselineDenominator
                     for offset in 0..<windowSamples {
                         let baseline = firstMean + slope * (Double(offset) - firstCenter)
@@ -2532,6 +2709,8 @@ struct ArtifactCleaningPreview: View {
                 out[channelIndex] = accumulated
             }
         }
+        // The event-level divisor is deliberately shared across channels. A short
+        // channel row skips a window’s contribution but does not change this count.
         let divisor = Float(accepted)
         for channelIndex in averages.indices {
             for sample in averages[channelIndex].indices {
@@ -2573,6 +2752,9 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Detrends a saved average using short means at both edges, then rebuilds its
+    /// channel summaries. Used when current-signal event averaging is unavailable.
+    /// The saved input value is preserved; the returned copy contains aligned samples.
     nonisolated private static func baselineAlignedAverage(_ average: ArtifactTemplateAverage) -> ArtifactTemplateAverage {
         guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 1 else {
             return average
@@ -2630,6 +2812,8 @@ struct ArtifactCleaningPreview: View {
         )
     }
 
+    /// Chooses a short averaging region near each edge: about 10% of the window,
+    /// limited by one quarter of its length and 100 ms, with a small usable minimum.
     nonisolated private static func previewBaselineEdgeSamples(windowSamples: Int, samplingRate: Double) -> Int {
         let maximumByWindow = max(1, windowSamples / 4)
         let fractionCount = max(1, Int((Double(windowSamples) * 0.10).rounded()))
@@ -2640,6 +2824,7 @@ struct ArtifactCleaningPreview: View {
         return min(max(fractionCount, minimumUsefulCount), maximumByWindow, maximumByTime)
     }
 
+    /// Averages a bounded slice without allocating a subarray; invalid bounds/count return zero.
     nonisolated private static func mean(_ samples: [Float], start: Int, count: Int) -> Double {
         guard count > 0, start >= 0, start + count <= samples.count else { return 0 }
         var sum = 0.0

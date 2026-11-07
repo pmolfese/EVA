@@ -42,6 +42,9 @@ nonisolated struct SeededGenerator: RandomNumberGenerator {
         state = seed &+ 0x9E37_79B9_7F4A_7C15
     }
 
+    // &+ and &* deliberately wrap at UInt64 width instead of trapping on overflow.
+    // Shifts/xor mix those bits. Constants and operation order define the seeded
+    // sequence, so arithmetic that looks algebraically equivalent is not a free refactor.
     mutating func next() -> UInt64 {
         state &+= 0x9E37_79B9_7F4A_7C15
         var z = state

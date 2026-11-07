@@ -59,3 +59,18 @@ plus result types in `RhythmicityModels`/`WTPLModels`, a runner in
 coefficient providers are hot loops with a direct and an FFT path that must agree;
 validate new kernels against the Python oracle in
 `Tools/RhythmicityReference/`.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [RhythmicBurstDetector.swift](../../../EVA/Rhythmicity/RhythmicBurstDetector.swift) | Detects rhythmic bursts from signal/time-frequency inputs. |
+| [RhythmicBurstExport.swift](../../../EVA/Rhythmicity/RhythmicBurstExport.swift) | Serializes rhythmic-burst results for export. |
+| [RhythmicBurstRunner.swift](../../../EVA/Rhythmicity/RhythmicBurstRunner.swift) | Coordinates rhythmic-burst detection requests and result publication. |
+| [RhythmicBurstView.swift](../../../EVA/Rhythmicity/RhythmicBurstView.swift) | Displays rhythmic-burst configuration and results. |
+| [RhythmicityMetalBackend.swift](../../../EVA/Rhythmicity/RhythmicityMetalBackend.swift) | Implements Metal-backed rhythmicity computation. |
+| [RhythmicityPersistence.swift](../../../EVA/Rhythmicity/RhythmicityPersistence.swift) | Saves and restores rhythmicity configuration/results. |

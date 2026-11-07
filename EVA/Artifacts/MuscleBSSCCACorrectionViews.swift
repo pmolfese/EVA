@@ -24,19 +24,28 @@ struct MuscleBSSCCADetectionSheet: View {
     let onAddMarkers: () -> Void
     let onClose: () -> Void
 
+    /// Read-only shorthand for the observable detection settings; controls edit the model directly.
     private var configuration: MuscleBSSCCAConfiguration { viewModel.configuration }
+    /// Reviewable windows with an automatic suggestion or a manual override.
+    /// Keeping overridden windows visible lets users revisit unchecked suggestions.
     private var candidateWindows: [MuscleBSSCCAWindowDiagnostic] {
         viewModel.result?.windows.filter { window in
             window.skippedReason == nil
                 && window.components.contains { $0.automaticallyRemoved || $0.wasOverridden }
         } ?? []
     }
+    /// Number of markers implied by the current component choices.
     private var activeEventCount: Int { viewModel.detectedEvents.count }
+    /// Finds the selected candidate by stable ID, falling back to the first candidate
+    /// when a settings/result change removes the old selection.
     private var selectedWindow: MuscleBSSCCAWindowDiagnostic? {
         guard let selectedWindowID = viewModel.selectedWindowID else { return candidateWindows.first }
         return candidateWindows.first(where: { $0.id == selectedWindowID }) ?? candidateWindows.first
     }
 
+    /// Builds the detection sheet from observable model state and injected actions.
+    /// @Bindable exposes writable bindings such as $viewModel.configuration;
+    /// callbacks let the parent coordinate navigation and artifact definitions.
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 5) {
@@ -102,6 +111,8 @@ struct MuscleBSSCCADetectionSheet: View {
         .onChange(of: viewModel.configuration) { oldValue, newValue in
             var oldDetectionSettings = oldValue
             var newDetectionSettings = newValue
+            // A checkbox override changes a decision on an existing decomposition.
+            // Ignore those overrides when deciding whether the detector itself must rerun.
             oldDetectionSettings.componentOverrides = []
             newDetectionSettings.componentOverrides = []
             guard oldDetectionSettings != newDetectionSettings,
@@ -114,6 +125,8 @@ struct MuscleBSSCCADetectionSheet: View {
         }
     }
 
+    /// Builds range and frequency controls. Editing these parameters invalidates
+    /// existing diagnostics through the body’s onChange handler.
     private var settings: some View {
         GroupBox("Detection settings") {
             VStack(alignment: .leading, spacing: 12) {
@@ -181,6 +194,8 @@ struct MuscleBSSCCADetectionSheet: View {
         .disabled(viewModel.isAnalyzing)
     }
 
+    /// Shows whether the recording bandwidth supports the EMG classifier band.
+    /// Upstream ICA labels are context only and do not decide whether analysis runs.
     @ViewBuilder
     private var evidenceSummary: some View {
         GroupBox("Input checks") {
@@ -216,6 +231,8 @@ struct MuscleBSSCCADetectionSheet: View {
         }
     }
 
+    /// Shows phase, progress, throughput, and a periodically updated remaining-time estimate.
+    /// ViewBuilder permits the entire section to be absent when analysis is idle.
     @ViewBuilder
     private var analysisProgress: some View {
         if viewModel.isAnalyzing, let progress = viewModel.analysisProgress {
@@ -259,6 +276,8 @@ struct MuscleBSSCCADetectionSheet: View {
         }
     }
 
+    /// Builds the candidate-window list and selected window’s component checkboxes.
+    /// Checkboxes select future removal; this view does not alter signal samples.
     @ViewBuilder
     private var reviewResults: some View {
         if let result = viewModel.result {
@@ -378,6 +397,9 @@ struct MuscleBSSCCADetectionSheet: View {
         }
     }
 
+    /// Connects a checkbox to the latest component decision by window/component ID.
+    /// Writes are delegated to the parent action, which updates both saved overrides
+    /// and diagnostics. The supplied component is a fallback if results disappeared.
     private func componentRemovalBinding(
         window: MuscleBSSCCAWindowDiagnostic,
         component: MuscleBSSCCAComponentDiagnostic
@@ -391,6 +413,8 @@ struct MuscleBSSCCADetectionSheet: View {
         )
     }
 
+    /// Selects a neighboring candidate and asks the parent to show it on the waveform.
+    /// Invalid offsets are ignored rather than wrapping around the list.
     private func selectAdjacentWindow(from index: Int, offset: Int) {
         let target = index + offset
         guard candidateWindows.indices.contains(target) else { return }
@@ -399,17 +423,21 @@ struct MuscleBSSCCADetectionSheet: View {
         onNavigate(window)
     }
 
+    /// Builds a numeric text field with up to three decimal places, writing through its Binding.
     private func numberField(_ value: Binding<Double>) -> some View {
         TextField("", value: value, format: .number.precision(.fractionLength(0...3)))
             .textFieldStyle(.roundedBorder)
             .frame(width: 66)
     }
 
+    /// Checks whether Nyquist or the active low-pass falls below the EMG band ceiling.
+    /// Optional.map checks a cutoff only when present; a missing cutoff adds no conflict.
     private var hasKnownBandwidthConflict: Bool {
         signal.samplingRate / 2 < configuration.emgBandHighHz
             || (activeLowPassHz.map { $0 < configuration.emgBandHighHz } ?? false)
     }
 
+    /// Explains how the selected mode uses stored epochs or overlapping continuous windows.
     private var rangeModeExplanation: String {
         switch configuration.rangeMode {
         case .automatic:
@@ -425,6 +453,8 @@ struct MuscleBSSCCADetectionSheet: View {
         }
     }
 
+    /// Turns the engine’s phase into explanatory progress text. Window-sample counts
+    /// include repeated samples in overlapping windows; they are work counts.
     private func progressDetail(_ progress: MuscleBSSCCAProgress) -> String {
         switch progress.phase {
         case .preparing:
@@ -438,6 +468,7 @@ struct MuscleBSSCCADetectionSheet: View {
         }
     }
 
+    /// Builds a compact label/value tile for the progress grid.
     private func progressMetric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
@@ -448,6 +479,7 @@ struct MuscleBSSCCADetectionSheet: View {
         .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
     }
 
+    /// Builds a larger label/value tile for the completed-analysis summary.
     private func resultMetric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
@@ -458,6 +490,8 @@ struct MuscleBSSCCADetectionSheet: View {
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
     }
 
+    /// Formats half-open sample-range boundaries as recording times in seconds.
+    /// The upper time is the boundary after the final included sample.
     private func rangeText(_ range: Range<Int>) -> String {
         String(
             format: "%.3f–%.3f s",
@@ -466,6 +500,8 @@ struct MuscleBSSCCADetectionSheet: View {
         )
     }
 
+    /// Formats the largest EMG/EEG power ratio among selected removals, falling back
+    /// to automatic suggestions and then zero when neither set has components.
     private func ratioText(_ window: MuscleBSSCCAWindowDiagnostic) -> String {
         let ratio = window.components.filter(\.removed).map(\.emgToEEGPowerRatio).max()
             ?? window.components.filter(\.automaticallyRemoved).map(\.emgToEEGPowerRatio).max()
@@ -473,24 +509,32 @@ struct MuscleBSSCCADetectionSheet: View {
         return String(format: "%.3f", ratio)
     }
 
+    /// Formats a finite positive windows-per-second rate; otherwise shows an em dash.
     private func rateText(_ value: Double) -> String {
         guard value.isFinite, value > 0 else { return "—" }
         return String(format: "%.1f/s", value)
     }
 
+    /// Counts down from the engine’s latest estimate between progress updates.
+    /// Uses the analysis start time when available and never displays a negative duration.
     private func remainingText(_ progress: MuscleBSSCCAProgress, now: Date) -> String {
         guard let seconds = progress.estimatedSecondsRemaining else { return "—" }
         let currentElapsed = viewModel.analysisStartedAt.map { now.timeIntervalSince($0) } ?? progress.elapsedSeconds
+        // TimelineView ticks even if the engine has not reported another window.
+        // Subtract that elapsed gap from the latest estimate for a live countdown.
         let sinceUpdate = max(currentElapsed - progress.elapsedSeconds, 0)
         return durationText(max(seconds - sinceUpdate, 0))
     }
 
+    /// Formats a finite nonnegative duration as seconds or minutes:seconds.
+    /// Invalid values display an em dash rather than misleading numeric text.
     private func durationText(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "—" }
         let rounded = Int(seconds.rounded())
         return rounded < 60 ? "\(rounded)s" : String(format: "%d:%02d", rounded / 60, rounded % 60)
     }
 
+    /// Uses the system’s compact number formatting for large progress counters.
     private func formattedSampleCount(_ count: Int) -> String {
         count.formatted(.number.notation(.compactName))
     }
@@ -509,10 +553,13 @@ struct MuscleBSSCCAOptionsButton: View {
     @State private var isAnalyzing = false
     @State private var analysisMessage: String?
 
+    /// Reads the artifact’s saved settings, using defaults for older/unconfigured definitions.
     private var configuration: MuscleBSSCCAConfiguration {
         artifact.muscleBSSCCAConfiguration ?? .default
     }
 
+    /// Builds the Options button and its settings/review popover. @State holds
+    /// transient popover analysis; @Binding writes accepted settings to the parent artifact.
     var body: some View {
         Button("Options...") { showsOptions = true }
             .font(.caption)
@@ -534,6 +581,7 @@ struct MuscleBSSCCAOptionsButton: View {
             }
     }
 
+    /// Builds the saved definition’s range-mode, window-length, and overlap controls.
     private var rangeControls: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("Processing ranges")
@@ -573,6 +621,7 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Builds the saved definition’s frequency-band, power-ratio, and analysis-rate fields.
     private var spectralControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Component classifier")
@@ -609,6 +658,7 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Shows bandwidth conflicts and upstream ICA context inside the options popover.
     @ViewBuilder
     private var evidenceSummary: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -640,6 +690,7 @@ struct MuscleBSSCCAOptionsButton: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// Starts asynchronous component analysis from a button and displays its local status.
     private var analysisControls: some View {
         HStack {
             Button(isAnalyzing ? "Analyzing..." : "Analyze Components") {
@@ -658,6 +709,7 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Displays analyzed windows, skipped-window explanations, and editable component decisions.
     @ViewBuilder
     private var componentReview: some View {
         if let diagnostics {
@@ -707,23 +759,31 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Builds the popover’s narrow numeric field with up to three decimal places.
     private func compactNumberField(_ value: Binding<Double>) -> some View {
         TextField("", value: value, format: .number.precision(.fractionLength(0...3)))
             .textFieldStyle(.roundedBorder)
             .frame(width: 62)
     }
 
+    /// Disables analysis when the sample rate or active low-pass cannot cover the EMG band.
     private var hasKnownBandwidthConflict: Bool {
         signal.samplingRate / 2 < configuration.emgBandHighHz
             || (activeLowPassHz.map { $0 < configuration.emgBandHighHz } ?? false)
     }
 
+    /// Adapts a writable configuration key path into a SwiftUI Binding. A key path
+    /// identifies which property to read/write while Value preserves its type.
+    /// Changing a detector setting clears component overrides and local diagnostics,
+    /// then notifies the parent that any applied result needs refreshing.
     private func binding<Value>(_ keyPath: WritableKeyPath<MuscleBSSCCAConfiguration, Value>) -> Binding<Value> {
         Binding {
             configuration[keyPath: keyPath]
         } set: { newValue in
             var updated = configuration
             updated[keyPath: keyPath] = newValue
+            // Changing the fitting settings can change component identities, so old
+            // per-range decisions cannot safely be reused with the new decomposition.
             updated.componentOverrides = []
             artifact.muscleBSSCCAConfiguration = updated
             diagnostics = nil
@@ -732,6 +792,7 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Supplies explanatory text for the definition’s range mode and available epoch metadata.
     private var rangeModeExplanation: String {
         switch configuration.rangeMode {
         case .automatic:
@@ -747,6 +808,10 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Analyzes the current artifact’s selected channels in a detached worker.
+    /// Snapshots inputs before awaiting, then publishes only if the task is still
+    /// active and settings still match. Errors produce a local failure message.
+    /// MainActor keeps the surrounding SwiftUI state updates on the UI actor.
     @MainActor
     private func analyzeComponents() async {
         isAnalyzing = true
@@ -786,6 +851,9 @@ struct MuscleBSSCCAOptionsButton: View {
         isAnalyzing = false
     }
 
+    /// Binds a popover checkbox to a per-window component decision. Stores only
+    /// choices that differ from the automatic classifier, updates the displayed
+    /// diagnostic immediately, and notifies the parent about the changed definition.
     private func removalBinding(
         window: MuscleBSSCCAWindowDiagnostic,
         component: MuscleBSSCCAComponentDiagnostic
@@ -818,6 +886,7 @@ struct MuscleBSSCCAOptionsButton: View {
         }
     }
 
+    /// Formats a window’s start/end boundaries in seconds and its usable-channel count.
     private func windowTitle(_ window: MuscleBSSCCAWindowDiagnostic) -> String {
         String(
             format: "%.2f–%.2f s · %d channels",
@@ -829,6 +898,9 @@ struct MuscleBSSCCAOptionsButton: View {
 }
 
 extension WaveformView {
+    /// Cancels any prior review task and opens a fresh detection sheet. Restores
+    /// settings/channels from an existing muscle definition when available; otherwise
+    /// uses defaults and all channels. Previous diagnostics are cleared.
     func openMuscleBSSCCASheet(for signal: MFFSignalData) {
         muscleBSSCCA.analysisTask?.cancel()
         muscleBSSCCA.analysisTask = nil
@@ -853,6 +925,8 @@ extension WaveformView {
         muscleBSSCCA.showsSheet = true
     }
 
+    /// Connects the standalone detection sheet to recording-specific actions and context.
+    /// Restore/close callbacks also reset progress and request appropriate overlay updates.
     func muscleBSSCCASheet(for signal: MFFSignalData) -> some View {
         MuscleBSSCCADetectionSheet(
             viewModel: muscleBSSCCA,
@@ -885,6 +959,10 @@ extension WaveformView {
         )
     }
 
+    /// Snapshots settings and usable channels, plans progress, and runs BSS-CCA
+    /// classification off the UI actor. Forwards cancellation to the worker and accepts
+    /// results only for the original recording/settings. Publishes review diagnostics
+    /// and overlay refreshes; cleaning is a later operation.
     private func analyzeMuscleBSSCCA(in signal: MFFSignalData) {
         let configuration = muscleBSSCCA.configuration
         let selected = Set(muscleBSSCCA.selectedChannelIndices.filter(signal.data.indices.contains))
@@ -943,6 +1021,8 @@ extension WaveformView {
                     }
                 }
             }
+            // Detached tasks do not automatically inherit parent cancellation.
+            // Forward it explicitly and close the progress stream so the bridge can finish.
             let outcome = await withTaskCancellationHandler(
                 operation: { await worker.value },
                 onCancel: {
@@ -952,6 +1032,8 @@ extension WaveformView {
             )
             await ProgressBridge.finishAndWait(progressContinuation, task: progressTask)
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            // A result can be mathematically valid yet obsolete if settings changed
+            // while its worker was running. Do not attach it to the new configuration.
             guard configuration == muscleBSSCCA.configuration else {
                 muscleBSSCCA.isAnalyzing = false
                 muscleBSSCCA.analysisTask = nil
@@ -981,6 +1063,9 @@ extension WaveformView {
         }
     }
 
+    /// Saves a component override only when it differs from the automatic suggestion.
+    /// Updates the in-memory diagnostic, refreshes event overlays, and navigates to
+    /// the revised window without rerunning decomposition.
     private func updateMuscleBSSCCAComponent(
         window: MuscleBSSCCAWindowDiagnostic,
         component: MuscleBSSCCAComponentDiagnostic,
@@ -1013,6 +1098,9 @@ extension WaveformView {
         }
     }
 
+    /// Creates a temporary onset-anchored event for the window, centers it in the
+    /// waveform, and highlights it in purple. This is navigation metadata, not a
+    /// new persisted cleaning definition.
     private func navigateToMuscleBSSCCAWindow(_ window: MuscleBSSCCAWindowDiagnostic, in signal: MFFSignalData) {
         let onset = Double(window.sampleRange.lowerBound) / signal.samplingRate
         let event = MFFEvent(
@@ -1032,11 +1120,17 @@ extension WaveformView {
         highlightedArtifactColor = .purple
     }
 
+    /// Invalidates cached displayed events and increments the refresh token so the
+    /// waveform rebuilds its overlays from current detection state.
     private func clearMuscleBSSCCADetectionOverlays() {
         recordingStore.events.displayedEventsCache = .empty
         artifactVM.detectionRefreshToken += 1
     }
 
+    /// Converts reviewed diagnostics to markers and adds/replaces the muscle artifact
+    /// definition, including configuration and component overrides. Registers it for
+    /// PSA rejection, invalidates prior cleaning, and closes the sheet. No markers
+    /// means nothing is added; sample correction still requires the later Apply action.
     private func addMuscleBSSCCAResult(for signal: MFFSignalData) {
         guard let diagnostics = muscleBSSCCA.result else { return }
         let events = MuscleBSSCCAArtifactMarkerBuilder.events(
@@ -1066,6 +1160,8 @@ extension WaveformView {
         } else {
             template.definedArtifacts.append(artifact)
         }
+        // PSA epoch rejection consumes these markers separately from waveform
+        // cleaning; registering the definition makes its reviewed intervals available.
         registerPSADefinedArtifactForRejection(artifact.id)
         muscleBSSCCA.definedArtifactID = artifact.id
         artifactVM.events = definedArtifactEventList()
@@ -1075,6 +1171,8 @@ extension WaveformView {
         muscleBSSCCA.showsSheet = false
     }
 
+    /// Summarizes the definition’s effective epoch/window mode for the cleaning UI,
+    /// resolving automatic mode using this signal’s stored epoch metadata.
     func muscleBSSCCARangeSummary(_ artifact: DefinedArtifact, signal: MFFSignalData) -> String {
         let configuration = artifact.muscleBSSCCAConfiguration ?? .default
         let usesEpochs = configuration.rangeMode == .epochSegments
@@ -1087,6 +1185,8 @@ extension WaveformView {
         )
     }
 
+    /// Counts existing ICA label suggestions named Muscle, ignoring case. Nil means
+    /// no decomposition is available; zero means a decomposition exists with no such labels.
     var upstreamICAMuscleComponentCount: Int? {
         guard let decomposition = ica.decomposition else { return nil }
         return decomposition.labelSuggestions.values.count {
