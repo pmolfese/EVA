@@ -19,7 +19,7 @@ import UniformTypeIdentifiers
 extension UTType {
     /// EGI MFF recording package. EGI/Philips owns the format; EVA reads it.
     static var mff: UTType {
-        UTType(importedAs: "com.egi.mff")
+        UTType(importedAs: "com.egi.mffrecording")
     }
 }
 
