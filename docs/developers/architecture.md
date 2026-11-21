@@ -1,13 +1,13 @@
 # EVA Architecture Map
 
 > **Audience:** maintainers who need to find *where* a feature lives and *how* to
-> change it — not end users. This page is the entry point to `docs/developers/`.
+> change it — not end users. Start at the [developer guide](README.md) for setup and a first-change tutorial.
 > It is deliberately distinct from `docs/manual/` (user-facing) and
 > `docs/provenance/` (method specifications).
 >
 > **Status:** DEV-1a (architecture map). The per-subsystem deep dives (DEV-1b)
 > and the feature→code index (DEV-1c) are separate pages; see
-> [What's next](#whats-next).
+> [Continue through the guide](#continue-through-the-developer-guide).
 
 ## How to read this page
 
@@ -20,67 +20,80 @@ Each subsystem gets one paragraph: its **purpose**, the **entry-point types** a
 newcomer starts from, and the **key functions** where the real work happens — so
 you can jump from "I need to change BCG detection" to the exact
 `RWaveDetector.detect(...)` call without reading the tree first. Types are named
-as they appear in source; files are given relative to their module directory.
+as they appear in source; files are given relative to their source-group directory.
 
-A note on modules before the subsystems: EVA is **not** one target.
+A note on build organization before the subsystems: EVA is **not** one target.
 
 ---
 
-## Module topology
+## Source groups and build targets
 
-EVA is a macOS SwiftUI app plus a UI-free computational core and a handful of
-satellite targets. Knowing which target a file lives in tells you what it may
-depend on.
+EVA is a macOS SwiftUI app with companion apps, Finder extensions, tests, and
+command-line tools. A **target** produces a build product. A **source group** is
+an organization of files that one or more targets compile. In particular,
+`EVACore/` and `EVAPreviewKit/` are shared source groups, not standalone library
+targets or separately imported Swift modules in this project.
 
 ```mermaid
 graph TD
-    subgraph App["EVA (app target)"]
-        UI["Feature subsystems<br/>Waveform · Epoching · Trials · ICA · …"]
-    end
-    subgraph Core["EVACore (UI-free library)"]
-        IO["IO: MFF / FIF / NIfTI / GIFTI"]
-        DSP["Core: DSP · LinearAlgebra · Forward models"]
-        SIM["Simulation · Geometry · Channels"]
-        PROV["Pipeline: EVAProcessingScript (eva.xml)"]
-    end
-    Resolve["EVAResolve<br/>(head model / coregistration app)"]
-    QL["EVAQuickLook · EVAThumbnail<br/>EVAPreviewKit<br/>(Finder extensions)"]
-    Tools["Tools/*<br/>(CLI: EVASimulate, EVABIDS, …)"]
-
-    App --> Core
-    Resolve --> Core
-    QL --> Core
-    Tools --> Core
+    App["EVA app target"]
+    Resolve["EVAResolve app target"]
+    QL["EVAQuickLook / EVAThumbnail targets"]
+    Tools["EVASimulate target / other CLI build scripts"]
+    Core["EVACore shared sources"]
+    Preview["EVAPreviewKit shared sources"]
+    App -->|compiles| Core
+    Resolve -->|compiles| Core
+    QL -->|compiles| Core
+    Tools -->|compile shared source selections| Core
+    App -->|compiles| Preview
+    QL -->|compiles| Preview
 ```
 
-| Target | Role | Depends on |
-|---|---|---|
-| **`EVA/`** | The macOS app: every feature subsystem, view model, and SwiftUI view. | `EVACore` |
-| **`EVACore/`** | Pure computation + file I/O + data types. **No UI.** This is the reusable heart — MFF/FIF/NIfTI/GIFTI readers, DSP, the forward model, the simulator, and the `eva.xml` schema all live here. | Accelerate / Metal only |
-| **`EVAResolve/`** | A separate window/app for head-model work: MRI slice viewing, coregistration, BEM import. See `EVAResolve/HeadModel/`. | `EVACore` |
-| **`EVAQuickLook` / `EVAThumbnail` / `EVAPreviewKit`** | Finder QuickLook previews and thumbnails for `.mff`, `.fif`, and `.gii` files. | `EVACore` |
-| **`Tools/`** | Command-line helpers: `EVASimulate` (headless scalp-EEG generator), `EVABIDS`, `forward-compare`, `resolve-validate`, `RhythmicityReference` (Python oracle), `fif-import`, `mffTimingTool`, `EVAHelper`. | `EVACore` |
+| Source group / product | Role | Build relationship |
+| --- | --- | --- |
+| `EVA/` → `EVA` | Main application: feature engines, state models, and SwiftUI views. | Also compiles `EVACore/` and `EVAPreviewKit/`; embeds the simulator and Finder extensions. |
+| `EVACore/` | Shared computation, format I/O, geometry, simulator models, and `eva.xml` schema. | Compiled into multiple targets. Uses frameworks such as Foundation, Accelerate, Compression, and simd; does not own UI. |
+| `EVAResolve/` → `EVAResolve` | Separate head-model/coregistration app. | Also compiles `EVACore/`. |
+| `EVAQuickLook/`, `EVAThumbnail/` | Finder preview and thumbnail extension products. | Compile their own entry points plus shared `EVAPreviewKit/` and `EVACore/` sources. |
+| `EVAPreviewKit/` | Shared preview readers and views. | Compiled into EVA and its Finder extensions; it is not itself an extension product. |
+| `Tools/` | CLI programs such as EVASimulate, EVABIDS, EVAHelper, and format/validation tools. | EVASimulate is an Xcode target. Other tools may compile explicit source lists in their build scripts. |
+| `EVATests/`, `EVAUITests/`, `EVAResolveTests/` | App unit/integration tests, UI automation, and Resolve tests. | Separate test targets, selected through the shared EVA and EVAResolve schemes. |
 
-**Rule of thumb:** anything that must be testable in isolation, run headless in a
-CLI, or reused by QuickLook belongs in `EVACore`. Anything that touches SwiftUI,
-menus, or the recording window belongs in `EVA/`.
+The [setup guide](setup.md#2-open-the-checkout-and-understand-the-build-choices)
+lists the eight native targets. Target membership and exception lists in
+`EVA.xcodeproj/project.pbxproj`, plus standalone CLI build scripts, determine
+which files actually compile into each product; a directory name alone is not
+a dependency declaration.
+
+**Placement guidance:** code reused by several products belongs in an appropriate
+shared group. App-only engines can remain UI-independent within `EVA/` and be
+tested through `EVATests`; testability alone does not require moving them.
+SwiftUI recording-window behavior belongs in the app layer. When adding shared
+code, verify every consuming target and applicable CLI source list.
 
 ---
 
 ## The central data model
 
-Five types carry state through the entire app. Learn these first.
+These types explain the main data and state boundaries. Learn these first.
 
 - **`MFFSignalData`** — `EVACore/IO/MFFReader.swift`. The in-memory
   multichannel signal: sample buffers, sample rate, channel metadata, events. It
   is the currency every cleaning stage consumes and produces. `MFFReader` parses
   the `.mff` package into an `MFFPackage` / `MFFSignalData` / `[MFFEvent]`;
   `MFFWriter` (`EVACore/IO/MFFWriter.swift`) serializes it back out.
-- **`MFFRecording`** — `EVA/IO/MFFRecording.swift`. The app-level document that
-  *wraps* a recording: channel roles, edits, and the association to a history
-  tree. This is the object a recording window is built around.
-- **`ChannelModel`** — `EVA/Channels/ChannelModel.swift`. The per-recording
-  observable UI model. Besides channel/interpolation state it defines the many
+- **`MFFRecording`** — `EVA/IO/MFFRecording.swift`. An observable loaded/loading
+  recording with file identity, metadata, EEG/peripheral signals, channel-role
+  overrides, and security-scoped access. It is not a SwiftUI `FileDocument`:
+  EVA uses a normal `WindowGroup` and explicit import/export flows.
+- **`RecordingStore`** — `EVA/App/RecordingStore.swift`. Per-window state owner:
+  channel state, selection, event/physio display, viewport, status, processing
+  history, progress, and export/history task runners. It owns the
+  `RecordingHistoryModel`; do not infer history ownership from the recording's
+  file identity. See [state ownership](architecture-layers.md).
+- **`ChannelModel`** — `EVA/Channels/ChannelModel.swift`. Observable channel state
+  owned by `RecordingStore`. Besides channel/interpolation state, this file defines the many
   SwiftUI **environment "command keys"** (`MFFExportRequestKey`,
   `PSAViewControlsKey`, `ArtifactMenuControlsKey`, …) that wire menu bar commands
   to whatever recording is frontmost.
@@ -113,12 +126,15 @@ Five types carry state through the entire app. Learn these first.
 
 1. **Load.** `SignalImportReader` / `MFFReader` (and the FIF/NIfTI/GIFTI readers)
    produce an `MFFSignalData`, wrapped by an `MFFRecording`.
-2. **Clean.** Each cleaning stage reads the current signal and produces a new
-   one. Every application is recorded as a **new node** in the
-   `RecordingHistoryModel` and appended to the `EVAProcessingScript`, so cleaning
-   is undoable and reproducible.
-3. **Epoch.** `PSAAveraging.commit(...)` cuts the cleaned continuous signal into
-   `EpochSegment`s and builds condition averages.
+2. **Clean.** A committed cleaning stage reads the current signal and produces
+   a result. Its integration must invalidate downstream work, record the
+   appropriate history node/snapshot, and encode a replayable processing step.
+   Previews and progress updates are not committed history. See the
+   [filtering trace](getting-started.md#follow-a-filter-from-click-to-history)
+   and [history/replay contracts](history-and-replay.md).
+3. **Epoch.** `EpochingViewModel` prepares and applies a build job that cuts
+   event-aligned segments from the signal. `PSAAveraging.commit(...)` commits
+   an average of already-built epochs; segmentation and averaging are distinct steps.
 4. **Analyze.** Trial-level analyzers (cluster permutation, RIDE, Woody, CWT
    ridges) and the spectral/connectivity engine run over epochs or averages.
 5. **View / export.** The Waveform, PSA, Time-Frequency, and Analysis views
@@ -282,7 +298,8 @@ Scoring channel and time-segment quality.
 ### Epoching & PSA — `EVA/Epoching`
 
 Cutting the cleaned continuous signal into epochs and building condition
-averages ("PSA" = Peristimulus Averaging).
+averages (PSA, called post-stimulus averaging in the source). Epoch windows can
+also include a pre-event baseline.
 
 - `EpochingViewModel` is the hub (category grouping via `CategoryGroupMode` /
   `CategoryRegexMatchField`, display modes, topomap scaling). `PSAAveraging`
@@ -430,17 +447,15 @@ truth struct, or nothing downstream can be evaluated.
 
 ---
 
-## What's next
+## Continue through the developer guide
 
-This page is DEV-1a. The developer tree continues with:
+Use the [feature-to-code-and-tests map](features.md) for a user-visible task,
+[subsystem pages](subsystems/README.md) for responsibilities, and
+[the checked source inventory](source-inventory.md) for complete file coverage.
+Read [data and lifecycle](data-and-lifecycle.md) before changing shared state.
 
-- **DEV-1b — per-subsystem pages** ([subsystems/](subsystems/README.md)): one
-  page per top-level group with a one-line synopsis of *every* file and a "how to
-  extend this" note. **Done.**
-- **DEV-1c — feature→code map** (`docs/developers/features.md`): a table from a
-  user-facing feature (BCG detection, PCA-S/OBS correction, wavelet denoising,
-  gradient/FASTR, ICA labelling, cluster-permutation stats, trial diagnostics,
-  history/undo, batch/replay, MFF QuickLook, figure export, …) straight to the
-  files and entry points that implement it.
-
-See `ROADMAP.md` §12 for the full plan.
+The [extension recipes](recipes/README.md) walk through concrete changes; the
+[onboarding milestones](onboarding-milestones.md) and
+[validation record](guide-validation.md) distinguish delivered material from
+manual acceptance still outstanding. The parent plan remains
+[ROADMAP §13](../../ROADMAP.md#13-developer-documentation).

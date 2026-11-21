@@ -31,6 +31,7 @@ nonisolated enum EventTrackConstants {
 }
 
 private enum WaveformTimeMarkers {
+    /// Draw whole-second grid lines in viewport coordinates, subtracting the horizontal content offset.
     static func drawLocal(
         in context: inout GraphicsContext,
         size: CGSize,
@@ -53,6 +54,7 @@ private enum WaveformTimeMarkers {
         context.stroke(path, with: .color(color(for: style)), style: stroke(for: style))
     }
 
+    /// Draw whole-second grid lines in full-content coordinates, limited to the visible horizontal range.
     static func drawContent(
         in context: inout GraphicsContext,
         visibleRange: ClosedRange<CGFloat>,
@@ -75,6 +77,7 @@ private enum WaveformTimeMarkers {
         context.stroke(path, with: .color(color(for: style)), style: stroke(for: style))
     }
 
+    /// Normalize stored style components before constructing the time-marker color.
     private static func color(for style: WaveformTimeMarkerStyle) -> Color {
         let normalized = style.normalized()
         return Color(
@@ -85,6 +88,7 @@ private enum WaveformTimeMarkers {
         )
     }
 
+    /// Normalize line width and choose solid or dashed time-marker strokes.
     private static func stroke(for style: WaveformTimeMarkerStyle) -> StrokeStyle {
         let normalized = style.normalized()
         return StrokeStyle(
@@ -117,6 +121,8 @@ nonisolated struct EventTrackEventSignature: Equatable {
 
     static let empty = EventTrackEventSignature(events: [])
 
+    /// Create a lightweight change signature from count and first/middle/last event metadata.
+    /// This is not a complete hash: changes to other events may leave the signature unchanged.
     init(events: [MFFEvent]) {
         count = events.count
         let middleIndex = events.isEmpty ? nil : events.index(events.startIndex, offsetBy: events.count / 2)
@@ -147,6 +153,7 @@ nonisolated struct EventTrackSourceSummary: Equatable {
 
     static let empty = EventTrackSourceSummary(events: [])
 
+    /// Count distinct event sources and reuse the supplied signature when its count matches.
     init(events: [MFFEvent], signature: EventTrackEventSignature = EventTrackEventSignature(events: [])) {
         let resolvedSignature = signature.count == events.count ? signature : EventTrackEventSignature(events: events)
         self.signature = resolvedSignature
@@ -155,6 +162,7 @@ nonisolated struct EventTrackSourceSummary: Equatable {
 }
 
 nonisolated struct EventTrackMarker: Identifiable {
+    /// Use the underlying event identity for SwiftUI marker updates.
     var id: MFFEvent.ID { event.id }
     let event: MFFEvent
     let globalX: CGFloat
@@ -170,6 +178,7 @@ nonisolated struct EventTrackOverlapCluster: Identifiable {
 }
 
 private struct EventTrackHoverStack: Identifiable {
+    /// Identify an overlapping hover stack by its ordered event IDs.
     var id: String { markers.map(\.event.id).joined(separator: "|") }
     let location: CGPoint
     let markers: [EventTrackMarker]
@@ -197,6 +206,8 @@ nonisolated struct EventTrackIndex {
     let key: Key
     let markers: [EventTrackMarker]
 
+    /// Convert event times to sorted content-space x positions and assign source colors/lanes.
+    /// The key records scale inputs so the view can reuse an unchanged index.
     init(
         events: [MFFEvent],
         samplingRate: Double,
@@ -247,19 +258,24 @@ nonisolated struct EventTrackIndex {
         self.init(key: key, markers: markers)
     }
 
+    /// Store an already-computed index key and sorted markers, including the empty-index case.
     private init(key: Key, markers: [EventTrackMarker]) {
         self.key = key
         self.markers = markers
     }
 
+    /// Use two binary searches to return markers inside the inclusive content-space viewport range.
     func visibleMarkers(in visibleRange: ClosedRange<CGFloat>) -> [EventTrackMarker] {
         guard !markers.isEmpty else { return [] }
+        // Half-open array slicing uses the first marker after the right endpoint, so
+        // markers exactly on either visible boundary remain included.
         let lower = lowerBound(for: visibleRange.lowerBound)
         let upper = upperBound(for: visibleRange.upperBound)
         guard lower < upper else { return [] }
         return Array(markers[lower..<upper])
     }
 
+    /// Find the first sorted marker at or to the right of x, or the end index if none exists.
     private func lowerBound(for x: CGFloat) -> Int {
         var low = 0
         var high = markers.count
@@ -274,6 +290,7 @@ nonisolated struct EventTrackIndex {
         return low
     }
 
+    /// Find the first sorted marker strictly right of x, allowing events exactly at the upper bound.
     private func upperBound(for x: CGFloat) -> Int {
         var low = 0
         var high = markers.count
@@ -313,6 +330,8 @@ struct WaveformPlot: View {
     /// `EVAGeneralPreferences.traceClipIndicatorsKey`.
     var showsClipIndicators = false
 
+    /// Draw the visible waveform, baseline, optional time grid and clipping indicators.
+    /// When plotted samples are narrower than a point, switch to a min/max envelope.
     var body: some View {
         Canvas { context, size in
             let safeSampleStride = max(sampleStride, 1)
@@ -378,6 +397,7 @@ struct WaveformPlot: View {
         /// one-sample gaps inside a single excursion do not fragment it.
         private static let mergeGap: CGFloat = 3
 
+        /// Record a sample’s x position if its y lies above or below the drawable area.
         mutating func record(x: CGFloat, y: CGFloat) {
             guard isEnabled else { return }
             if y < 0 {
@@ -395,6 +415,7 @@ struct WaveformPlot: View {
             record(x: x, y: maxY)
         }
 
+        /// Merge a monotonically increasing x hit into the last nearby clipping span, or start a new span.
         private static func append(x: CGFloat, to spans: inout [ClosedRange<CGFloat>]) {
             if let last = spans.last, x - last.upperBound <= mergeGap {
                 spans[spans.count - 1] = last.lowerBound...max(last.upperBound, x)
@@ -403,6 +424,7 @@ struct WaveformPlot: View {
             }
         }
 
+        /// Whether neither edge has any recorded clipping spans.
         var isEmpty: Bool { above.isEmpty && below.isEmpty }
     }
 
@@ -417,6 +439,7 @@ struct WaveformPlot: View {
         // Minimum drawn length, so a single-column clip is still visible.
         let minimumLength: CGFloat = 3
 
+        /// Draw clipping spans along one canvas edge, giving isolated hits a minimum visible length.
         func stroke(_ spans: [ClosedRange<CGFloat>], atY y: CGFloat) {
             var path = Path()
             for span in spans {
@@ -432,6 +455,8 @@ struct WaveformPlot: View {
         stroke(tally.below, atY: size.height - inset)
     }
 
+    /// Connect stride-selected samples within the visible range plus a small edge buffer.
+    /// Coordinates remain in full-content space, matching the waveform scroll container.
     private func drawSamplePath(
         in context: inout GraphicsContext,
         xScale: CGFloat,
@@ -466,6 +491,9 @@ struct WaveformPlot: View {
         context.stroke(path, with: .color(color), lineWidth: 1)
     }
 
+    /// Draw a finite-value min/max envelope for each visible horizontal point column.
+    /// This preserves excursions among stride-selected samples that would be hidden by
+    /// picking only one value per column.
     private func drawPixelAdaptiveTrace(
         in context: inout GraphicsContext,
         size: CGSize,
@@ -526,6 +554,7 @@ struct WaveformPlot: View {
         context.stroke(envelope, with: .color(color), lineWidth: 1)
     }
 
+    /// Draw the zero-amplitude baseline across the visible content range using the configured color.
     private func strokeBaseline(in context: inout GraphicsContext, midY: CGFloat) {
         var baseline = Path()
         baseline.move(to: CGPoint(x: visibleRange.lowerBound, y: midY))
@@ -539,6 +568,7 @@ struct WaveformPlot: View {
         context.stroke(baseline, with: .color(color), lineWidth: 0.75)
     }
 
+    /// Convert microvolts to screen y; positive signal values move upward because screen y increases downward.
     private func yPosition(for value: Float, midY: CGFloat, pointsPerMicrovolt: CGFloat) -> CGFloat {
         midY - CGFloat(value) * pointsPerMicrovolt
     }
@@ -554,6 +584,7 @@ struct OverlaidCategoryChannelPlot: View {
     let amplitudeScale: Double
     var highlightRelativeSample: Int? = nil
 
+    /// Overlay category segments for one channel using the first segment’s epoch axis.
     var body: some View {
         Canvas { context, size in
             guard channelIndex < data.count, let first = segments.first else { return }
@@ -618,10 +649,11 @@ struct OverlaidCategoryChannelPlot: View {
     }
 }
 
-/// Compact wrapping legend of colored category labels.
+/// Compact colored category legend with horizontal scrolling when it does not fit.
 struct FlowLegend: View {
     let items: [(String, Color)]
 
+    /// Use a single legend row when it fits, otherwise provide horizontal scrolling.
     var body: some View {
         ViewThatFits(in: .horizontal) {
             legendRow
@@ -629,6 +661,7 @@ struct FlowLegend: View {
         }
     }
 
+    /// Lay out colored dots and category names in input order.
     private var legendRow: some View {
         HStack(spacing: 12) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
@@ -663,6 +696,7 @@ struct ButterflyConditionPlot: View {
 
     @State private var hoveredTrace: ButterflyTraceHit?
 
+    /// Wrap the butterfly canvas with nearest-trace hover/tap detection and a value badge.
     var body: some View {
         GeometryReader { proxy in
             plotCanvas
@@ -715,6 +749,7 @@ struct ButterflyConditionPlot: View {
         }
     }
 
+    /// Draw visible channels for one epoch with optional noise shading and latency cursor.
     private var plotCanvas: some View {
         Canvas { context, size in
             guard segment.startSample >= 0,
@@ -800,12 +835,14 @@ private struct ButterflyTraceHit {
     let valueMicrovolts: Float
 }
 
+/// Convert an epoch-local sample to event-relative time for a hover label; invalid rate gives nil.
 private func butterflyLatencyText(localSample: Int, stimulusOffsetSamples: Int, samplingRate: Double) -> String? {
     guard samplingRate > 0 else { return nil }
     let seconds = Double(localSample - stimulusOffsetSamples) / samplingRate
     return "Latency \(formatButterflyLatency(seconds))"
 }
 
+/// Choose milliseconds, seconds or signed minutes:seconds based on latency magnitude.
 private func formatButterflyLatency(_ seconds: Double) -> String {
     let magnitude = abs(seconds)
     if magnitude < 1 {
@@ -864,6 +901,7 @@ struct ButterflyChannelBadge: View {
     var valueMicrovolts: Double? = nil
     var detail: String? = nil
 
+    /// Show channel name, optional amplitude and optional latency in a compact hover badge.
     var body: some View {
         VStack(alignment: .trailing, spacing: 1) {
             Text(name)
@@ -885,6 +923,7 @@ struct ButterflyChannelBadge: View {
             .shadow(radius: 2, y: 1)
     }
 
+    /// Format a hover amplitude with two decimal places.
     private func format(_ value: Double) -> String {
         String(format: "%.2f", value)
     }
@@ -906,6 +945,7 @@ struct TopomapScaleControl: View {
     @Binding var zSD: Double
     let onAutoZ: () -> Void
 
+    /// Edit topomap microvolt bounds or z-score parameters through bindings owned by the parent.
     var body: some View {
         let limit = Swift.max(autoScale * 3, 1)
         VStack(spacing: 8) {
@@ -946,6 +986,7 @@ struct TopomapScaleControl: View {
         .help("Adjust the topomap color scale. µV min/max (tighter = more intense) or a Z-score ±SD scale.")
     }
 
+    /// Build a small labeled numeric editor for one bound scale value.
     @ViewBuilder
     private func numField(_ label: String, _ value: Binding<Double>) -> some View {
         VStack(spacing: 1) {
@@ -963,6 +1004,7 @@ struct VerticalSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
 
+    /// Rotate a standard horizontal slider while reserving vertical layout space.
     var body: some View {
         Slider(value: $value, in: range)
             .frame(width: 130)
@@ -992,6 +1034,8 @@ struct OverlayButterflyPlot: View {
     @State private var hoveredTrace: ButterflyTraceHit?
     @State private var liveScrubRelativeSample: Int?
 
+    /// Add trace inspection and optional latency scrubbing to a multi-condition butterfly plot.
+    /// Preview the drag locally and notify the parent only when the drag ends.
     var body: some View {
         GeometryReader { proxy in
             plotCanvas
@@ -1060,6 +1104,7 @@ struct OverlayButterflyPlot: View {
         }
     }
 
+    /// Overlay visible channels from all segments on the first segment’s epoch axis.
     private var plotCanvas: some View {
         Canvas { context, size in
             guard let first = segments.first, !data.isEmpty else { return }
@@ -1110,6 +1155,7 @@ struct OverlayButterflyPlot: View {
         }
     }
 
+    /// Convert a local x coordinate to the nearest clamped sample on the first epoch’s axis.
     private func relativeSample(forX x: CGFloat, width: CGFloat) -> Int {
         guard let first = segments.first else { return 0 }
         let epochLength = max(first.endSample - first.startSample + 1, 1)
@@ -1127,6 +1173,7 @@ struct ArtifactTemplateAveragePlot: View {
     var maximumBackgroundChannels: Int = .max
     var usesAmplitudeWeightedOpacity = false
 
+    /// Draw artifact-template traces with primary/highlighted emphasis and optional background limits.
     var body: some View {
         Canvas { context, size in
             guard let sampleCount = average.allChannelSamples.first?.count, sampleCount > 1 else { return }
@@ -1214,6 +1261,8 @@ struct ICATimeCoursePreview: View {
     @State private var isExpanded = false
     @State private var hoverTask: Task<Void, Never>?
 
+    /// Show a compact ICA trace and expand it after a sustained hover.
+    /// Cancel the pending hover task on exit/disappearance so it cannot open a stale popover.
     var body: some View {
         ICATimeCoursePlot(samples: samples, visibleRange: visibleRange, scaleSamples: scaleSamples)
             .frame(height: 64)
@@ -1253,6 +1302,7 @@ struct ICATimeCoursePlot: View {
     let visibleRange: ClosedRange<Int>?
     var scaleSamples: [Double]? = nil
 
+    /// Draw a robustly scaled ICA activation preview by averaging clipped finite values per display bin.
     var body: some View {
         Canvas { context, size in
             guard samples.count > 1,
@@ -1262,6 +1312,8 @@ struct ICATimeCoursePlot: View {
             let midY = size.height / 2
             let scale = robustScale(samples, comparison: scaleSamples, in: range)
             let yScale = (size.height * WaveformScaleUnits.traceRowFraction) / CGFloat(scale.amplitude)
+            // Preview bins summarize display columns; this visual reduction does not alter
+            // the source samples or the fitted ICA decomposition.
             let binCount = max(Int(size.width.rounded(.down)), 2)
             let visibleCount = range.upperBound - range.lowerBound + 1
 
@@ -1307,6 +1359,7 @@ struct ICATimeCoursePlot: View {
         }
     }
 
+    /// Clamp the requested inclusive preview range to samples, defaulting to the whole trace.
     private func clippedRange(_ range: ClosedRange<Int>?, count: Int) -> ClosedRange<Int>? {
         guard count > 1 else { return nil }
         let fallback = 0...(count - 1)
@@ -1316,6 +1369,9 @@ struct ICATimeCoursePlot: View {
         return lower...upper
     }
 
+    /// Estimate a shared center and amplitude from sampled finite values in the visible interior.
+    /// Combine an optional comparison trace, then use the median and 2nd/98th percentiles
+    /// so isolated peaks do not dominate preview scale.
     private func robustScale(
         _ values: [Double],
         comparison: [Double]?,
@@ -1363,6 +1419,7 @@ struct ICATimeCoursePlot: View {
         return (center, amplitude)
     }
 
+    /// Bound a preview value to the supplied closed interval.
     private func clamp(_ value: Double, to range: ClosedRange<Double>) -> Double {
         min(max(value, range.lowerBound), range.upperBound)
     }
@@ -1393,10 +1450,13 @@ struct PhysioTrackView: View {
     @State private var hoveredSample: Int?
     @State private var hoverLocation: CGPoint = .zero
 
+    /// Draw pinned physiology rows against the EEG time axis, with local scaling and sample-value hover.
     var body: some View {
         Canvas { context, size in
             guard signal.samplingRate > 0, eegSamplingRate > 0, sampleStride > 0,
                   size.width > 0 else { return }
+            // Both tracks share seconds-to-points scaling even when EEG and PNS sampling
+            // rates differ; each PNS sample is positioned by its own timestamp.
             let pxPerSecond = eegSamplingRate / Double(sampleStride) * timeScale
             guard pxPerSecond > 0 else { return }
 
@@ -1512,12 +1572,15 @@ struct PhysioTrackView: View {
         }
     }
 
+    /// Convert viewport y to a physiology row index, returning nil outside valid rows.
     private func rowIndex(atY y: CGFloat) -> Int? {
         guard rowHeight > 0 else { return nil }
         let idx = Int(y / rowHeight)
         return (0..<signal.numberOfChannels).contains(idx) ? idx : nil
     }
 
+    /// Convert viewport x through EEG pixels-per-second into the physiology signal’s sample index.
+    /// The caller checks whether that index exists in the hovered channel.
     private func sampleIndex(atX x: CGFloat) -> Int? {
         guard eegSamplingRate > 0, sampleStride > 0, signal.samplingRate > 0 else { return nil }
         let pxPerSecond = eegSamplingRate / Double(sampleStride) * timeScale
@@ -1527,6 +1590,7 @@ struct PhysioTrackView: View {
         return Int((t * signal.samplingRate).rounded())
     }
 
+    /// Show the hovered physiology sample’s original value and label without intercepting mouse events.
     @ViewBuilder
     private var hoverTooltip: some View {
         if let hoveredChannel, let hoveredSample,
@@ -1580,6 +1644,8 @@ struct EventTrackView: View {
     @State private var hoveredEventStack: EventTrackHoverStack?
     @State private var eventIndex = EventTrackIndex.empty
 
+    /// Resolve a cached event index, cull to the visible range and draw flags or dense stems.
+    /// Option-hover offers a chooser when several marker hit regions overlap.
     var body: some View {
         let signature = EventTrackEventSignature(events: events)
         let key = EventTrackIndex.Key(
@@ -1668,10 +1734,12 @@ struct EventTrackView: View {
         }
     }
 
+    /// Use individual labeled flags only while visible marker count stays below the density cutoff.
     nonisolated static func drawsEventFlags(visibleMarkerCount: Int) -> Bool {
         visibleMarkerCount <= EventTrackConstants.denseMarkerThreshold
     }
 
+    /// Rebuild cached marker positions only when the supplied event/scale key changes.
     private func updateEventIndexIfNeeded(key: EventTrackIndex.Key, signature: EventTrackEventSignature) {
         guard eventIndex.key != key else { return }
         eventIndex = EventTrackIndex(
@@ -1684,16 +1752,19 @@ struct EventTrackView: View {
         )
     }
 
+    /// Translate a marker from scroll-content x to pinned-track viewport x.
     private func localXPosition(for marker: EventTrackMarker) -> CGFloat {
         // Position relative to the true scroll offset (not the buffered
         // culling range) so markers align with the waveform cursor.
         marker.globalX - contentOffset
     }
 
+    /// Translate an arbitrary content-space x by the same true scroll offset.
     private func localXPosition(forGlobalX globalX: CGFloat) -> CGFloat {
         globalX - contentOffset
     }
 
+    /// Draw one stem per event from its source lane down to the track baseline.
     private func drawIndividualMarkers(
         _ markers: [EventTrackMarker],
         in context: inout GraphicsContext,
@@ -1709,6 +1780,8 @@ struct EventTrackView: View {
         }
     }
 
+    /// Batch dense event stems by source and deduplicate rounded x positions within each source.
+    /// This reduces drawing work while retaining the source color of coincident events.
     private func drawDenseMarkers(
         _ markers: [EventTrackMarker],
         in context: inout GraphicsContext,
@@ -1722,6 +1795,7 @@ struct EventTrackView: View {
             let x = localXPosition(for: marker)
             guard x >= 0, x <= viewportWidth else { continue }
             let roundedX = Int(x.rounded())
+            // Deduplicate per source rather than globally, so one source cannot hide another.
             let pixel = DenseMarkerPixel(sourceIndex: marker.style.sourceIndex, x: roundedX)
             guard drawnPixels.insert(pixel).inserted else { continue }
 
@@ -1746,6 +1820,8 @@ struct EventTrackView: View {
         let event = marker.event
         let x = localXPosition(for: marker)
         let style = marker.style
+        // Only one event is stored as open. This Bool binding adapts that identity
+        // to SwiftUI’s popover API and clears it when the popover closes.
         let isPopped = Binding(
             get: { poppedEvent == event },
             set: { if !$0 { poppedEvent = nil } }
@@ -1768,6 +1844,7 @@ struct EventTrackView: View {
             .offset(x: min(max(x + 4, 0), max(viewportWidth - 70, 0)), y: style.laneY)
     }
 
+    /// Show a noninteractive count badge for nearby same-source events.
     @ViewBuilder
     private func overlapBadge(_ cluster: EventTrackOverlapCluster) -> some View {
         let x = localXPosition(forGlobalX: cluster.globalX)
@@ -1787,6 +1864,7 @@ struct EventTrackView: View {
             .accessibilityHidden(true)
     }
 
+    /// Build a horizontally scrollable chooser that selects one overlapping event through the parent callback.
     @ViewBuilder
     private func inlineEventStackChooser(_ stack: EventTrackHoverStack) -> some View {
         let offset = inlineChooserOffset(for: stack)
@@ -1824,6 +1902,7 @@ struct EventTrackView: View {
         .zIndex(30)
     }
 
+    /// Prefer labels for defined artifact events; otherwise show the event code.
     private func ribbonLabel(for event: MFFEvent) -> String {
         if isDefinedArtifactEvent(event), let label = event.label {
             return label
@@ -1831,6 +1910,7 @@ struct EventTrackView: View {
         return event.code
     }
 
+    /// Recognize artifact-generated event sources by the naming prefixes used by their producers.
     private func isDefinedArtifactEvent(_ event: MFFEvent) -> Bool {
         event.sourceFile.hasPrefix("Template ")
             || event.sourceFile.hasPrefix("Topography ")
@@ -1871,6 +1951,7 @@ struct EventTrackView: View {
         .frame(minWidth: 220, alignment: .leading)
     }
 
+    /// Show a selectable label/value row only when the optional event field is nonempty.
     @ViewBuilder
     private func eventDetailRow(_ label: String, _ value: String?) -> some View {
         if let value, !value.isEmpty {
@@ -1912,6 +1993,8 @@ struct EventTrackView: View {
             : String(format: "%.0f ms", duration * 1000)
     }
 
+    /// Group same-source markers within four points of each group’s first marker.
+    /// Return count badges only for groups with multiple events, ordered horizontally.
     private func overlapClusters(for markers: [EventTrackMarker]) -> [EventTrackOverlapCluster] {
         let tolerance: CGFloat = 4
         var clusters: [EventTrackOverlapCluster] = []
@@ -1950,6 +2033,8 @@ struct EventTrackView: View {
         return clusters.sorted { $0.globalX < $1.globalX }
     }
 
+    /// While Option is held, find and order marker hits beneath the pointer.
+    /// Keep an existing chooser alive while the pointer is inside it and avoid replacing an unchanged stack.
     private func updateHoveredEventStack(at location: CGPoint, visibleMarkers: [EventTrackMarker]) {
         guard isOptionKeyPressed else {
             hoveredEventStack = nil
@@ -1985,6 +2070,7 @@ struct EventTrackView: View {
         hoveredEventStack = EventTrackHoverStack(location: chooserAnchor(for: sorted), markers: sorted)
     }
 
+    /// Hit-test the event stem’s horizontal tolerance or its estimated label rectangle.
     private func markerContains(_ location: CGPoint, marker: EventTrackMarker) -> Bool {
         let x = localXPosition(for: marker)
         let stemHit = abs(location.x - x) <= 12
@@ -1994,6 +2080,7 @@ struct EventTrackView: View {
         return stemHit || labelRect.contains(location)
     }
 
+    /// Position the chooser near its anchor while keeping it within track/viewport margins where possible.
     private func inlineChooserOffset(for stack: EventTrackHoverStack) -> CGSize {
         let width = inlineChooserWidth(for: stack.markers)
         let trackHeight = Self.baseTrackHeight + CGFloat(max(laneCount - 1, 0)) * Self.laneSpacing
@@ -2002,6 +2089,7 @@ struct EventTrackView: View {
         return CGSize(width: x, height: y)
     }
 
+    /// Anchor overlapping-event choices at their mean viewport x and highest source lane.
     private func chooserAnchor(for markers: [EventTrackMarker]) -> CGPoint {
         let markerXs = markers.map { localXPosition(for: $0) }
         let anchorX = markerXs.isEmpty
@@ -2011,6 +2099,7 @@ struct EventTrackView: View {
         return CGPoint(x: anchorX, y: anchorY)
     }
 
+    /// Estimate combined button widths and cap the chooser to the available viewport width.
     private func inlineChooserWidth(for markers: [EventTrackMarker]) -> CGFloat {
         let naturalWidth = markers.reduce(CGFloat(8)) { partial, marker in
             partial + inlineChooserLabelWidth(for: marker.event) + 4
@@ -2018,10 +2107,12 @@ struct EventTrackView: View {
         return min(max(naturalWidth, 60), max(viewportWidth - 8, 60))
     }
 
+    /// Estimate a bounded button width from the displayed event-label character count.
     private func inlineChooserLabelWidth(for event: MFFEvent) -> CGFloat {
         min(max(CGFloat(ribbonLabel(for: event).count) * 7 + 18, 44), 140)
     }
 
+    /// Return the chooser’s positioned rectangle with a hover tolerance margin.
     private func inlineChooserRect(for stack: EventTrackHoverStack) -> CGRect {
         let offset = inlineChooserOffset(for: stack)
         return CGRect(x: offset.width, y: offset.height, width: inlineChooserWidth(for: stack.markers), height: 30)

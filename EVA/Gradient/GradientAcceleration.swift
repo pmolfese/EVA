@@ -66,13 +66,27 @@ nonisolated struct GradientBatchPlan: Sendable {
     let upsampleFactor: Int
     let epochCount: Int
     /// Epoch window length, `layout.length`.
-    let windowLength: Int
+    var windowLength: Int
     /// First upsampled sample of each epoch's window, or -1 when the shifted
     /// window falls outside the recording.
-    let windowStarts: [Int]
+    var windowStarts: [Int]
     /// Per-epoch sub-sample offset, already zeroed when sub-sample alignment is
     /// off, so a backend never has to consult the configuration.
     let fractionalShifts: [Double]
+    var correlationFeature: GradientCorrelationFeature = .rawWaveform
+
+    /// Absolute ownership intervals. Extraction may extend beyond these to
+    /// support alignment, but each output sample belongs to only one group.
+    var outputRanges: [Range<Int>]? = nil
+
+    func outputRange(of epoch: Int) -> Range<Int> {
+        let start = windowStarts[epoch]
+        guard start >= 0 else { return 0..<0 }
+        let support = start..<(start + windowLength)
+        guard let ranges = outputRanges else { return support }
+        let lower = max(start, ranges[epoch].lowerBound)
+        return lower..<max(lower, min(support.upperBound, ranges[epoch].upperBound))
+    }
 
     var upsampledCount: Int { sampleCount * upsampleFactor }
 
@@ -383,7 +397,7 @@ nonisolated final class GradientCPUBackend: GradientBackend {
                         let a = windows.base + channelBase + Int(pairs[index].target) * length
                         let b = windows.base + channelBase + Int(pairs[index].candidate) * length
                         out.base[channel * pairCount + index] =
-                            GradientDonorSelection.pearsonCorrelation(a, b, count: length)
+                            GradientDonorSelection.pearsonCorrelation(a, b, count: length, feature: plan.correlationFeature)
                     }
                 }
             }
@@ -613,9 +627,9 @@ nonisolated final class GradientCPUBackend: GradientBackend {
                         let start = plan.windowStarts[epoch]
                         guard start >= 0 else { continue }
                         let base = slot * length
-                        for index in 0..<length {
-                            artifact[start + index] += estimates[base + index]
-                            coverage[start + index] += 1
+                        for position in plan.outputRange(of: epoch) {
+                            artifact[position] += estimates[base + position - start]
+                            coverage[position] += 1
                         }
                     }
 
@@ -629,8 +643,8 @@ nonisolated final class GradientCPUBackend: GradientBackend {
                             let start = plan.windowStarts[epoch]
                             guard start >= 0 else { continue }
                             let base = slot * length
-                            for index in 0..<length {
-                                artifact[start + index] += obsContributions[base + index]
+                            for position in plan.outputRange(of: epoch) {
+                                artifact[position] += obsContributions[base + position - start]
                             }
                         }
                     }

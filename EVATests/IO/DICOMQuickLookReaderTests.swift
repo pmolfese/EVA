@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  DICOMQuickLookReaderTests.swift
 //  EVATests
@@ -11,6 +18,9 @@ import UniformTypeIdentifiers
 @testable import EVA
 
 struct DICOMQuickLookReaderTests {
+    // The fixture stores pixels 0...11 with rescale slope 2 and intercept -10.
+    // The expected values therefore test physical-value conversion as well as
+    // byte decoding. Its window center/width independently produce -50...150.
     @Test func readsExplicitVRLittleEndianPart10Image() throws {
         let fixture = DICOMFixture.part10(
             syntaxUID: "1.2.840.10008.1.2.1",

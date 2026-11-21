@@ -80,6 +80,7 @@ nonisolated final class GradientMetalBackend: GradientBackend, @unchecked Sendab
         let epochs: [Int32]
         let maxCover: Int
         let windowStarts: [Int]
+        let windowLength: Int
         let sampleCount: Int
         let upsampleFactor: Int
     }
@@ -318,24 +319,26 @@ nonisolated final class GradientMetalBackend: GradientBackend, @unchecked Sendab
     private func coverTable(plan: GradientBatchPlan) -> CoverTable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
+        if plan.outputRanges != nil { cachedCover = nil }
         if let cached = cachedCover,
            cached.sampleCount == plan.sampleCount,
            cached.upsampleFactor == plan.upsampleFactor,
-           cached.windowStarts == plan.windowStarts {
+           cached.windowStarts == plan.windowStarts,
+           cached.windowLength == plan.windowLength {
             return cached
         }
 
         let sampleCount = plan.sampleCount
         let factor = plan.upsampleFactor
-        let length = plan.windowLength
-
         // Only positions that survive decimation are ever read, so the table
         // covers output samples rather than the upsampled axis.
         func range(of epoch: Int) -> ClosedRange<Int>? {
             let start = plan.windowStarts[epoch]
             guard start >= 0 else { return nil }
-            let first = (start + factor - 1) / factor
-            let last = min((start + length - 1) / factor, sampleCount - 1)
+            let ownership = plan.outputRange(of: epoch)
+            guard !ownership.isEmpty else { return nil }
+            let first = (ownership.lowerBound + factor - 1) / factor
+            let last = min((ownership.upperBound - 1) / factor, sampleCount - 1)
             guard first <= last else { return nil }
             return first...last
         }
@@ -349,9 +352,9 @@ nonisolated final class GradientMetalBackend: GradientBackend, @unchecked Sendab
         guard maxCover > 0 else {
             let table = CoverTable(
                 epochs: [], maxCover: 0, windowStarts: plan.windowStarts,
-                sampleCount: sampleCount, upsampleFactor: factor
+                windowLength: plan.windowLength, sampleCount: sampleCount, upsampleFactor: factor
             )
-            cachedCover = table
+            cachedCover = plan.outputRanges == nil ? table : nil
             return table
         }
 
@@ -367,9 +370,9 @@ nonisolated final class GradientMetalBackend: GradientBackend, @unchecked Sendab
 
         let table = CoverTable(
             epochs: epochs, maxCover: maxCover, windowStarts: plan.windowStarts,
-            sampleCount: sampleCount, upsampleFactor: factor
+            windowLength: plan.windowLength, sampleCount: sampleCount, upsampleFactor: factor
         )
-        cachedCover = table
+        cachedCover = plan.outputRanges == nil ? table : nil
         return table
     }
 
@@ -462,6 +465,8 @@ nonisolated final class GradientMetalBackend: GradientBackend, @unchecked Sendab
         encoder.setBuffer(means, offset: 0, index: 1)
         encoder.setBuffer(norms, offset: 0, index: 2)
         encoder.setBytes(&parameters, length: MemoryLayout<Parameters>.stride, index: 3)
+        var difference: UInt32 = plan.correlationFeature == .firstDifference ? 1 : 0
+        encoder.setBytes(&difference, length: MemoryLayout<UInt32>.stride, index: 4)
         dispatch(encoder, statsPipeline, threads: slotCount)
 
         encoder.setBuffer(source.buffer, offset: 0, index: 0)
@@ -470,6 +475,7 @@ nonisolated final class GradientMetalBackend: GradientBackend, @unchecked Sendab
         encoder.setBuffer(try makeBuffer(flatPairs, label: "gradient.pairs"), offset: 0, index: 3)
         encoder.setBuffer(output, offset: 0, index: 4)
         encoder.setBytes(&parameters, length: MemoryLayout<Parameters>.stride, index: 5)
+        encoder.setBytes(&difference, length: MemoryLayout<UInt32>.stride, index: 6)
         dispatch(encoder, correlatePipeline, threads: total)
 
         encoder.endEncoding()

@@ -1,0 +1,213 @@
+--- a/EVA/Filtering/FilterViewModel.swift
++++ b/EVA/Filtering/FilterViewModel.swift
+@@ -46,7 +46,7 @@
+         case let .invalidCutoff(field, value):
+             return "\(field) cutoff '\(value)' is not a valid number. Leave it blank to turn that cutoff off."
+         case .noFilterOperation:
+-            return "Enter a high-pass or low-pass cutoff, enable line-noise filtering, or enable average reference."
++            return "Enter a high-pass or low-pass cutoff, enable line-noise filtering, average reference, or EEG polarity inversion."
+         }
+     }
+ }
+@@ -125,6 +125,8 @@
+     var lineNoiseStrength = 1.0
+     var averageReference = false
+     var filterPNS = true
++    /// Teaching example: invert EEG samples after filtering; PNS is unchanged.
++    var invertEEGPolarity = false
+     var precision = FilterPrecision.auto
+ 
+     /// The preset most recently applied from the Presets pop-up.
+@@ -273,6 +275,7 @@
+     /// mechanics — EEGLAB and MNE-Python currently do — and in that case the
+     /// honest title is the one chosen, not whichever sorts first.
+     var activePreset: FilterApproximationPreset? {
++        guard !invertEEGPolarity else { return nil }
+         guard let lastAppliedPreset, matchesApproximation(lastAppliedPreset) else { return nil }
+         return lastAppliedPreset
+     }
+@@ -356,6 +359,7 @@
+         if averageReference {
+             parts.append("average reference")
+         }
++        if invertEEGPolarity { parts.append("invert EEG polarity") }
+         return parts.isEmpty ? "No filter" : parts.joined(separator: " + ")
+     }
+ 
+@@ -389,6 +393,7 @@
+         lineNoiseStrength = 1
+         averageReference = false
+         precision = .auto
++        invertEEGPolarity = false
+     }
+ 
+     // MARK: - eva.xml / replay bridge
+@@ -458,6 +463,7 @@
+         // apply paths (`ProcessingCore` and `FilteringViews`) and visible in the
+         // exported PNS samples.
+         params["filterPNS"] = "\(filterPNS)"
++        params["invertEEGPolarity"] = "\(invertEEGPolarity)"
+         params["precision"] = precision.rawValue
+         return params
+     }
+@@ -511,6 +517,9 @@
+         if let w = p["lineNoiseWindowSeconds"].flatMap(Double.init) { lineNoiseWindowSeconds = w }
+         if let s = p["lineNoiseStrength"].flatMap(Double.init) { lineNoiseStrength = s }
+         if let v = p["filterPNS"] { filterPNS = (v == "true") }
++        // Old scripts predate this operation: absence means no inversion, even
++        // when a reused model previously had the option enabled.
++        invertEEGPolarity = p["invertEEGPolarity"] == "true"
+         // Read but no longer written: the `reference` step owns this now, and
+         // a pre-`reference` eva.xml still replays correctly from the old key.
+         if let v = p["averageReference"] { averageReference = (v == "true") }
+@@ -538,7 +547,7 @@
+         let cutoffs: FilterCutoffs
+         do {
+             cutoffs = try currentCutoffs()
+-            guard cutoffs.hasFrequencyFilter || activeLineNoiseMode != .off || averageReference else {
++            guard cutoffs.hasFrequencyFilter || activeLineNoiseMode != .off || averageReference || invertEEGPolarity else {
+                 throw FilterViewModelError.noFilterOperation
+             }
+         } catch {
+@@ -588,6 +597,7 @@
+         let lineNoiseWindowSeconds = self.lineNoiseWindowSeconds
+         let lineNoiseStrength = self.lineNoiseStrength
+         let averageReference = self.averageReference
++        let invertEEGPolarity = self.invertEEGPolarity
+         let precision = self.precision
+         let filterSummary = activeFilterSummary
+         let pnsEnabled = pnsInput != nil
+@@ -640,6 +650,7 @@
+                         lineNoiseWindowSeconds: lineNoiseWindowSeconds,
+                         lineNoiseStrength: lineNoiseStrength,
+                         averageReference: averageReference,
++                        invertEEGPolarity: invertEEGPolarity,
+                         precision: precision,
+                         excludedChannels: excludedChannels,
+                         recordedRanges: signal.acquisitionSkipRanges.isEmpty ? nil
+@@ -887,6 +898,7 @@
+         lineNoiseWindowSeconds: Double,
+         lineNoiseStrength: Double,
+         averageReference: Bool,
++        invertEEGPolarity: Bool = false,
+         precision: FilterPrecision = .auto,
+         excludedChannels: Set<Int>,
+         recordedRanges: [Range<Int>]? = nil,
+@@ -922,6 +934,7 @@
+                     lineNoiseWindowSeconds: lineNoiseWindowSeconds,
+                     lineNoiseStrength: lineNoiseStrength,
+                     averageReference: averageReference,
++                    invertEEGPolarity: invertEEGPolarity,
+                     precision: precision,
+                     excludedChannels: excludedChannels,
+                     progress: { fraction in
+@@ -977,6 +990,10 @@
+         if averageReference {
+             Rereferencing.applyInPlace(&bandPassed, excluding: excludedChannels)
+         }
++        if invertEEGPolarity {
++            // Preserve channel order and timeline; acquisition gaps were handled above.
++            bandPassed = bandPassed.map { channel in channel.map { -$0 } }
++        }
+         return bandPassed
+     }
+ 
+--- a/EVA/Filtering/FilteringViews.swift
++++ b/EVA/Filtering/FilteringViews.swift
+@@ -449,6 +449,8 @@
+                 .disabled(lineNoiseMode == .off)
+             }
+ 
++            Toggle("Invert EEG polarity", isOn: $filter.invertEEGPolarity)
++                .help("Invert EEG sample signs after filtering; leaves PNS polarity unchanged.")
+             Toggle("Average reference", isOn: $filter.averageReference)
+                 .help("Re-reference to the common average: subtract the mean across all channels at each time point. Removes shared reference signal.")
+ 
+--- a/EVA/Pipeline/HistoryStepSummary.swift
++++ b/EVA/Pipeline/HistoryStepSummary.swift
+@@ -75,6 +75,7 @@
+                 break
+             }
+             if p["averageReference"] == "true" { parts.append("avg ref") }
++            if p["invertEEGPolarity"] == "true" { parts.append("invert EEG polarity") }
+ 
+         case .mriGradientCorrection:
+             if let method = p["method"] { parts.append(method) }
+--- /dev/null
++++ b/EVATests/Filtering/GuideFilterParameterTests.swift
+@@ -0,0 +1,75 @@
++//  Developed by P. Molfese, National Institutes of Health (NIH).
++//
++//  This software is a "work of the United States Government" prepared by a federal
++//  employee as part of official duties. As such, it is not subject to copyright
++//  protection within the United States (17 U.S.C. § 105). International copyrights
++//  may apply.
++
++import Foundation
++import Testing
++@testable import EVA
++
++@MainActor
++struct GuideFilterParameterTests {
++    private func signal(_ data: [[Float]]) -> MFFSignalData {
++        MFFSignalData(signalURL: URL(fileURLWithPath: "/tmp/guide.raw"),
++            signalType: "EEG", numberOfChannels: data.count, samplingRate: 1000,
++            duration: Double(data[0].count) / 1000, recordingStartTime: nil,
++            events: [], data: data)
++    }
++
++    @Test func xmlRoundTripAndMissingLegacyKey() throws {
++        let model = FilterViewModel(store: RecordingStore())
++        model.invertEEGPolarity = true
++        var script = EVAProcessingScript()
++        script.append(EVAProcessingStep(operation: .filter, parameters: model.parameters))
++        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
++        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
++        defer { try? FileManager.default.removeItem(at: folder) }
++        try EVAProcessingScriptXML.write(script, toPackage: folder)
++        let saved = try #require(EVAProcessingScriptXML.read(fromPackage: folder))
++        let parameters = try #require(saved.steps.first?.parameters)
++        let restored = FilterViewModel(store: RecordingStore())
++        restored.apply(parameters: parameters)
++        #expect(restored.invertEEGPolarity)
++        #expect(restored.parameters == model.parameters)
++        restored.apply(parameters: [:])
++        #expect(!restored.invertEEGPolarity)
++        restored.invertEEGPolarity = true
++        restored.resetToDefaults()
++        #expect(!restored.invertEEGPolarity)
++    }
++
++    @Test func liveAndRestoredSettingsProduceIdenticalSamples() async throws {
++        let input = signal([[1, -2, 3, -4], [4, 3, 2, 1]])
++        let live = FilterViewModel(store: RecordingStore())
++        live.highPassCutoffText = ""
++        live.lowPassCutoffText = ""
++        live.averageReference = false
++        live.lineNoiseMode = .off
++        live.invertEEGPolarity = true
++        live.filterPNS = true
++        var committed = 0
++        await live.apply(to: input, pnsInput: input, onApplied: { committed += 1 })
++        let output = try #require(live.output)
++        #expect(committed == 1)
++        #expect(live.pnsOutput?.data == input.data)
++        #expect(output.data == [[-1, 2, -3, 4], [-4, -3, -2, -1]])
++        #expect(output.dataRevision != input.dataRevision)
++        let restored = FilterViewModel(store: RecordingStore())
++        restored.apply(parameters: live.parameters)
++        await restored.apply(to: input, pnsInput: nil, onApplied: {})
++        #expect(restored.output?.data == output.data)
++        #expect(input.data[0] == [1, -2, 3, -4])
++    }
++
++    @Test func recordedRunsCarryTheOptionAndPreserveGaps() async throws {
++        let output = try await FilterViewModel.filteredChannels(
++            [[1, 2, 99, 3, 4]], samplingRate: 1000,
++            lowCutoff: nil, highCutoff: nil, lineNoiseMode: .off,
++            notchFrequency: 60, lineNoiseHarmonics: 2, lineNoiseWindowSeconds: 4,
++            lineNoiseStrength: 1, averageReference: false, invertEEGPolarity: true,
++            excludedChannels: [], recordedRanges: [0..<2, 3..<5], progress: { _ in })
++        #expect(output == [[-1, -2, 0, -3, -4]])
++    }
++}

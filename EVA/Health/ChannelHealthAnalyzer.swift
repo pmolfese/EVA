@@ -45,6 +45,7 @@ nonisolated enum ChannelHealthGrade: String, Codable, Sendable, Equatable {
     case watch
     case poor
 
+    /// Label shown in the UI rather than the lowercase persisted enum value.
     var displayName: String {
         switch self {
         case .good: return "Good"
@@ -61,6 +62,7 @@ nonisolated struct ChannelHealthMetric: Codable, Identifiable, Sendable, Equatab
     var detail: String
     var weight: Double
 
+    /// Use the metric name as its identity when SwiftUI updates a metric list.
     var id: String { name }
 }
 
@@ -71,6 +73,7 @@ nonisolated struct ChannelHealthResult: Codable, Identifiable, Sendable, Equatab
     var summary: String
     var metrics: [ChannelHealthMetric]
 
+    /// Keep row identity tied to the recording channel, even when its score changes.
     var id: Int { channelIndex }
 }
 
@@ -112,6 +115,8 @@ nonisolated struct ChannelHealthBaselines: Codable, Sendable {
     var medianDriftRatio: Double
     var medianLineNoisePower: Double
 
+    /// Build recording-wide reference values from positive, finite channel statistics.
+    /// These medians make ratios describe a channel relative to this recording.
     fileprivate init(summaries: [ChannelSummary]) {
         medianP95AbsMicrovolts = ChannelHealthAnalyzer.median(summaries.map(\.p95Abs))
         medianP99AbsMicrovolts = ChannelHealthAnalyzer.median(summaries.map(\.p99Abs))
@@ -153,6 +158,7 @@ nonisolated struct ChannelSpectralResult: Identifiable, Sendable {
     var isOutlier: Bool
     var score: Double
 
+    /// Identify this spectral result by its channel index.
     var id: Int { channelIndex }
 }
 
@@ -183,6 +189,7 @@ nonisolated struct ChannelRansacResult: Identifiable, Sendable {
     var isBad: Bool
     var score: Double
 
+    /// Identify this neighbor-prediction result by its channel index.
     var id: Int { channelIndex }
 }
 
@@ -213,6 +220,8 @@ nonisolated struct ChannelImpedanceSettings: Codable, Sendable {
 
     static let defaults = ChannelImpedanceSettings()
 
+    /// Convert impedance in kilo-ohms to a quality score using the configured band edges.
+    /// Invalid or negative measurements score zero; values between edges interpolate.
     func score(forKOhm kOhm: Double) -> Double {
         guard kOhm.isFinite, kOhm >= 0 else { return 0 }
         switch kOhm {
@@ -238,6 +247,7 @@ nonisolated struct ChannelImpedanceSettings: Codable, Sendable {
         }
     }
 
+    /// Map a value between two input edges onto two output scores, clamping at the edges.
     private static func interpolate(_ x: Double, fromLow: Double, fromHigh: Double, toLow: Double, toHigh: Double) -> Double {
         let t = (x - fromLow) / max(fromHigh - fromLow, 1e-9)
         return toLow + min(max(t, 0), 1) * (toHigh - toLow)
@@ -296,6 +306,7 @@ private nonisolated final class ConcurrentProgressCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
 
+    /// Atomically increment and return the completion count. `defer` releases the lock on return.
     func increment() -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -304,7 +315,13 @@ private nonisolated final class ConcurrentProgressCounter: @unchecked Sendable {
     }
 }
 
+/// Stateless CPU analysis helpers. `nonisolated` allows callers outside the main actor;
+/// results are values that the UI can publish after background computation.
 nonisolated enum ChannelHealthAnalyzer {
+    /// Build per-channel features and explainable quality scores without changing the signal.
+    /// First summarize sampled data, then compare channels and optionally add spectral
+    /// and neighbor-prediction metrics. Progress callbacks may run on worker threads;
+    /// UI callers must marshal updates to the main actor. Invalid input returns an empty analysis.
     static func analyze(
         signal: MFFSignalData,
         layout: SensorLayout?,
@@ -340,6 +357,7 @@ nonisolated enum ChannelHealthAnalyzer {
         }
         let channelSummaries = summaries
 
+        // Compare against the whole recording only after every channel summary exists.
         let baselines = ChannelHealthBaselines(summaries: channelSummaries)
         let neighborScores = neighborAgreementScores(summaries: channelSummaries, layout: layout) { fraction in
             progress?(0.60 + 0.30 * fraction)
@@ -434,6 +452,8 @@ nonisolated enum ChannelHealthAnalyzer {
             storage.deinitialize(count: count)
             storage.deallocate()
         }
+        // Each worker owns one initialized slot. The synchronous worker pool finishes
+        // before this buffer is read and before the deferred deallocation.
         let sendableStorage = HealthUnsafeSendableBuffer(base: storage)
         evaConcurrentPerform(iterations: count) { index in
             sendableStorage.base[index] = body(index)
@@ -441,6 +461,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return (0..<count).map { storage[$0]! }
     }
 
+    /// Return an analysis copy with each available wavelet-burden metric replaced or added.
+    /// Recompute channel totals; channels absent from the original analysis are skipped.
     static func addingWaveletMetrics(
         to analysis: ChannelHealthAnalysis,
         waveletResults: [Int: WaveletChannelGoodnessResult],
@@ -535,6 +557,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return results
     }
 
+    /// Merge spectral outlier scores into existing channel results and recompute their grades.
+    /// Replacing by metric name prevents repeated updates from counting the same metric twice.
     static func addingSpectralMetrics(
         to analysis: ChannelHealthAnalysis,
         spectralResults: [Int: ChannelSpectralResult],
@@ -727,6 +751,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return best
     }
 
+    /// Estimate a spectrum and return mean power in the requested frequency band.
+    /// Return zero if the channel cannot produce a spectrum.
     private static func welchBandPower(
         _ samples: [Float],
         samplingRate: Double,
@@ -841,6 +867,8 @@ nonisolated enum ChannelHealthAnalyzer {
             )
             guard !correlations.isEmpty else { return nil }
 
+            // The shared median helper discards zeros: only positive correlations contribute,
+            // and its default fallback is one if no positive values remain.
             let medianCorrelation = median(correlations.map { max($0, 0) })
             let badWindows = correlations.filter { $0 < configuration.minimumCorrelation }.count
             let badFraction = Double(badWindows) / Double(correlations.count)
@@ -867,6 +895,7 @@ nonisolated enum ChannelHealthAnalyzer {
         return results
     }
 
+    /// Add or replace neighbor-prediction evidence in an analysis copy and recalculate totals.
     static func addingRansacMetrics(
         to analysis: ChannelHealthAnalysis,
         ransacResults: [Int: ChannelRansacResult],
@@ -889,6 +918,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return analysis
     }
 
+    /// Keep every `stride`th sample for inexpensive comparisons. Nonfinite samples reuse
+    /// the last finite value (initially zero), preserving the sampled time positions.
     private static func downsampledSeries(_ channel: [Float], stride: Int) -> [Double] {
         guard !channel.isEmpty else { return [] }
         var values: [Double] = []
@@ -906,6 +937,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return values
     }
 
+    /// Blend neighboring channel series using their supplied weights.
+    /// The denominator includes every neighbor weight, even beyond a shorter series end.
     private static func reconstruct(
         from weightedNeighbors: [(series: [Double], weight: Double)],
         length: Int
@@ -927,6 +960,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return predicted
     }
 
+    /// Compare matching, nonoverlapping full windows with Pearson correlation.
+    /// If a full window cannot be used, compare the whole common prefix when long enough.
     private static func windowedCorrelations(
         _ lhs: [Double],
         _ rhs: [Double],
@@ -945,17 +980,23 @@ nonisolated enum ChannelHealthAnalyzer {
         return values
     }
 
+    /// Format a finite value with an explicit sign and two decimals, or return "nan".
     private static func formatSigned(_ value: Double) -> String {
         guard value.isFinite else { return "nan" }
         return String(format: "%+.2f", value)
     }
 
+    /// Choose the larger stride needed for the target rate or a 30,000-sample budget.
+    /// This controls feature-sampling cost; it does not filter or resample the recording.
     private static func analysisStride(sampleCount: Int, samplingRate: Double) -> Int {
         let targetRateStride = Downsampler.factor(sourceRate: samplingRate, targetRate: 250)
         let sampleBudgetStride = max(Int((Double(sampleCount) / 30_000.0).rounded(.up)), 1)
         return max(targetRateStride, sampleBudgetStride)
     }
 
+    /// Collect amplitude, temporal-change, drift, line-noise and distribution statistics
+    /// from one sampled channel. Keep finite-value statistics separate from the filled
+    /// series used for timing-sensitive comparisons.
     private static func summary(
         for channel: [Float],
         channelIndex: Int,
@@ -981,6 +1022,8 @@ nonisolated enum ChannelHealthAnalyzer {
 
         for sample in stride(from: 0, to: channel.count, by: sampleStride) {
             let value = Double(channel[sample])
+            // Keep a placeholder in the time series but exclude invalid values from amplitude
+            // statistics. The finite fraction still records that these samples were invalid.
             guard value.isFinite else {
                 nonFiniteCount += 1
                 sampledValues.append(previousFinite ?? 0)
@@ -1016,6 +1059,8 @@ nonisolated enum ChannelHealthAnalyzer {
         let p99Abs = SignalStatistics.percentile(absValues, fraction: 0.99)
         let maxAbs = absValues.last ?? 0
         let differenceRMS = SignalStatistics.rootMeanSquare(differences)
+        // Use a channel-relative tolerance with a small absolute floor when judging
+        // whether successive sampled values are effectively unchanged.
         let flatlineThreshold = max(p95Abs * 0.0001, 1e-7)
         let flatlineFraction = differences.isEmpty
             ? 1
@@ -1059,6 +1104,9 @@ nonisolated enum ChannelHealthAnalyzer {
         )
     }
 
+    /// Turn raw channel statistics into enabled quality metrics, weighted percentage and grade.
+    /// The two weakest metrics supply the review message; neighbor agreement is retained
+    /// as a feature elsewhere rather than scored here.
     private static func result(
         for summary: ChannelSummary,
         baselines: ChannelHealthBaselines,
@@ -1206,6 +1254,8 @@ nonisolated enum ChannelHealthAnalyzer {
         )
     }
 
+    /// Rebuild a channel summary after metrics change: sort weakest first, take a weighted
+    /// mean and name up to two metrics below the review threshold.
     private static func recomputedResult(channelIndex: Int, metrics: [ChannelHealthMetric]) -> ChannelHealthResult {
         let sortedMetrics = metrics.sorted { $0.score < $1.score }
         let weightedTotal = sortedMetrics.reduce(0) { $0 + $1.score * $1.weight }
@@ -1230,6 +1280,7 @@ nonisolated enum ChannelHealthAnalyzer {
         )
     }
 
+    /// Clamp a metric score to 0...1 and attach its display grade, explanation and weight.
     private static func metric(name: String, score: Double, detail: String, weight: Double) -> ChannelHealthMetric {
         let boundedScore = min(max(score, 0), 1)
         return ChannelHealthMetric(
@@ -1241,6 +1292,8 @@ nonisolated enum ChannelHealthAnalyzer {
         )
     }
 
+    /// Package raw measurements and ratios to recording medians for downstream consumers.
+    /// An unavailable line-noise baseline or neighbor comparison remains optional.
     private static func channelFeatures(
         for summary: ChannelSummary,
         baselines: ChannelHealthBaselines,
@@ -1275,6 +1328,8 @@ nonisolated enum ChannelHealthAnalyzer {
         )
     }
 
+    /// Find the strongest absolute correlation among up to six nearby sensors per channel.
+    /// Missing geometry yields no score; cancellation returns scores gathered so far.
     private static func neighborAgreementScores(
         summaries: [ChannelSummary],
         layout: SensorLayout?,
@@ -1311,12 +1366,15 @@ nonisolated enum ChannelHealthAnalyzer {
         return scores
     }
 
+    /// Measure squared distance in the layout’s x/y plane; no square root is needed to sort.
     private static func squaredDistance(_ lhs: SensorPosition, _ rhs: SensorPosition) -> Double {
         let dx = lhs.x - rhs.x
         let dy = lhs.y - rhs.y
         return dx * dx + dy * dy
     }
 
+    /// Calculate Pearson correlation over the common prefix after subtracting each mean.
+    /// Return zero for fewer than four paired samples or effectively zero variance.
     private static func correlation(_ lhs: [Double], _ rhs: [Double]) -> Double {
         let count = min(lhs.count, rhs.count)
         guard count > 3 else { return 0 }
@@ -1339,6 +1397,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return numerator / denominator
     }
 
+    /// Measure slow drift as the standard deviation of roughly two-second block means.
+    /// Require at least two full blocks; include a trailing partial block when present.
     private static func blockMeanRMS(values: [Double], samplingRate: Double) -> Double {
         guard values.count > 10, samplingRate > 0 else { return 0 }
         let blockSize = max(Int((samplingRate * 2.0).rounded()), 8)
@@ -1357,6 +1417,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return sqrt(max(variance, 0))
     }
 
+    /// Project samples onto sine and cosine at one frequency and normalize by total energy.
+    /// This is a line-noise proxy, not a full spectrum; inadequate rate or energy returns zero.
     private static func sinusoidPower(values: [Double], effectiveSamplingRate: Double, frequency: Double) -> Double {
         guard values.count > 20,
               effectiveSamplingRate > frequency * 2.2 else {
@@ -1377,6 +1439,8 @@ nonisolated enum ChannelHealthAnalyzer {
         return 2.0 * (cosineProjection * cosineProjection + sineProjection * sineProjection) / (Double(values.count) * energy)
     }
 
+    /// Return the median of strictly positive, finite values, floored at 1e-9.
+    /// If none remain, return the supplied fallback, which defaults to one.
     fileprivate static func median(_ values: [Double], fallback: Double = 1) -> Double {
         var finite = values.filter { $0.isFinite && $0 > 0 }
         guard !finite.isEmpty else { return fallback }

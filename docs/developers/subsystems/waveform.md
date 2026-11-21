@@ -37,12 +37,29 @@ window and its panels share. `WaveformUIModels` holds the small observable model
 
 ## How to extend this
 
-Most features add a **sheet**: define it in your subsystem as an
-`extension WaveformView`, add a case to `ActiveRecordingSheet` in
-`WaveformSheetHost`, and present it. Add shared value types to
-`WaveformSupportingTypes` and shared state to `WaveformUIModels` rather than
-growing `WaveformView` itself (already very large). New plots belong in
-`WaveformPlotViews`; keep them pure SwiftUI reading from the UI models, with any
-math in the owning subsystem. Menu commands flow through `FocusedValues` keys
-declared on `ChannelModel` ([channels.md](channels.md)) and transport commands
-here.
+For a new sheet, prefer a standalone `View` in the owning subsystem with
+explicit input values, bindings, and action closures. Existing features often
+use `extension WaveformView`; a small adapter there can connect a new child view
+to current state without making the entire sheet depend on the window's internals.
+Add the appropriate `ActiveRecordingSheet` case and presentation wiring in
+`WaveformSheetHost`. See [state ownership](../architecture-layers.md) before
+choosing where a new setting lives.
+
+Keep feature-specific values and computation with their subsystem. Put genuinely
+shared value types in an appropriate shared file; shared per-window state should
+have an explicit owner in `RecordingStore` or its child models. Existing shared
+UI models live in `WaveformUIModels`. Keep plot math in the owning engine and pass
+results into the view. Menu commands use `FocusedValues` keys declared in the
+`ChannelModel` file ([channels.md](channels.md)) and transport commands here.
+Verify presentation, bindings, menu focus, close/reopen, and cancellation where
+applicable; adding a sheet case alone does not establish those behaviors.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [WaveformDensityLayout.swift](../../../EVA/Waveform/WaveformDensityLayout.swift) | Calculates waveform layout density and spacing. |

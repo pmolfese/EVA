@@ -524,6 +524,11 @@ final class FilterViewModel {
     /// `async` so the replay coordinator can await filter completion before the
     /// next pipeline step; the interactive caller wraps it in a `Task`. Both use
     /// this one method — there is no separate replay path.
+    /// Run lifecycle: validate → snapshot settings → launch worker → publish if current.
+    /// The local settings below are the request's inputs; later UI edits must not
+    /// change a worker already in flight. activeRequestID protects publication,
+    /// while cancellation asks superseded work to stop. They solve different problems.
+    /// onApplied lets the caller invalidate other domains after a successful commit.
     func apply(
         to signal: MFFSignalData,
         pnsInput: MFFSignalData?,

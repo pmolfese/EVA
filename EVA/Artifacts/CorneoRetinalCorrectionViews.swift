@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  CorneoRetinalCorrectionViews.swift
 //  EVA
@@ -5,7 +12,13 @@
 
 import SwiftUI
 
+/// Owns the corneo-retinal dipole (CRD) setup and review interface. CRD models
+/// slow eye-position fields; blink spans are excluded while estimating those fields.
+/// Analysis prepares a result for review; Use Result adds a cleaning definition.
 extension WaveformView {
+    /// Resets the previous analysis, suggests EOG channel roles from the sensor layout,
+    /// and opens the sheet. Bad/interpolated channels are excluded from automatic
+    /// selection. Selection failures appear as a status message in the open sheet.
     func openCorneoRetinalSheet(for signal: MFFSignalData) {
         corneoRetinal.result = nil
         corneoRetinal.analysisProgress = nil
@@ -29,6 +42,9 @@ extension WaveformView {
         corneoRetinal.showsSheet = true
     }
 
+    /// Builds channel selection, estimator settings, progress, blink review, and map
+    /// quality controls. SwiftUI reevaluates this view when observed state changes;
+    /// the expensive analysis starts only from an action, not from view construction.
     func corneoRetinalSheet(for signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 5) {
@@ -230,6 +246,8 @@ extension WaveformView {
         .onChange(of: corneoRetinal.lowerVEOGChannels) { _, _ in invalidateCorneoRetinalAnalysis() }
     }
 
+    /// Builds a labeled text field whose Binding reads and writes its parent’s channel text.
+    /// The ViewBuilder attribute lets SwiftUI assemble the returned view hierarchy.
     @ViewBuilder
     private func corneoRetinalChannelRow(_ title: String, text: Binding<String>, placeholder: String) -> some View {
         HStack {
@@ -238,6 +256,9 @@ extension WaveformView {
         }
     }
 
+    /// Parses the user-facing channel lists into zero-based indices and validates
+    /// the EOG role selection. Analysis channels are all channels except the excluded
+    /// set; invalid role assignments throw so the caller can show an explanation.
     private func currentCorneoRetinalSelection(
         signal: MFFSignalData,
         excluding excluded: Set<Int>
@@ -252,10 +273,13 @@ extension WaveformView {
         ).validated(channelCount: signal.numberOfChannels)
     }
 
+    /// Formats zero-based indices as a comma-separated, one-based list for editing.
     private func corneoRetinalChannelList(_ indices: [Int]) -> String {
         indices.map { String($0 + 1) }.joined(separator: ", ")
     }
 
+    /// Discards a completed estimate after settings change and requires reanalysis.
+    /// Does nothing while analysis is active or when there is no completed result.
     private func invalidateCorneoRetinalAnalysis() {
         guard !corneoRetinal.isAnalyzing, corneoRetinal.result != nil else { return }
         corneoRetinal.result = nil
@@ -266,6 +290,10 @@ extension WaveformView {
         corneoRetinal.statusMessage = "Settings changed. Analyze again before using the correction."
     }
 
+    /// Validates channel roles, then detects preliminary blinks and estimates the
+    /// horizontal/vertical eye fields off the UI actor. Publishes diagnostics and
+    /// editable blink spans when the original recording is still active. Errors
+    /// become status text; this preview does not install a cleaning definition.
     private func analyzeCorneoRetinalCorrection(in signal: MFFSignalData) {
         let excluded = channels.bad.union(channels.interpolated.keys)
         let selection: CorneoRetinalChannelSelection
@@ -277,6 +305,8 @@ extension WaveformView {
             return
         }
 
+        // Capture the settings used by this run before starting asynchronous work.
+        // The task reads this snapshot rather than changing UI controls mid-analysis.
         let configuration = corneoRetinal.configuration
         corneoRetinal.analysisTask?.cancel()
         corneoRetinal.isAnalyzing = true
@@ -294,6 +324,10 @@ extension WaveformView {
         let (progressContinuation, progressTask) = ProgressBridge.make { (update: CorneoRetinalAnalysisProgress) in
             corneoRetinal.analysisProgress = update.preservingMetrics(from: corneoRetinal.analysisProgress)
         }
+        // Task inherits the UI actor for state updates. Task.detached runs the heavy
+        // calculation separately; Result packages either its value or its thrown error.
+        // Cancelling the outer task prevents publishing a result, but does not by
+        // itself stop the detached calculation.
         corneoRetinal.analysisTask = Task {
             let outcome = await Task.detached(priority: .userInitiated) {
                 Result { () throws -> CorneoRetinalAnalysisResult in
@@ -326,6 +360,8 @@ extension WaveformView {
                     )
                 }
             }.value
+            // Drain pending progress updates before publishing completion. The session
+            // check prevents a result from an old recording appearing on a new one.
             await ProgressBridge.finishAndWait(progressContinuation, task: progressTask)
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             switch outcome {
@@ -362,6 +398,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds the editable blink-mask list and controls for the selected span.
+    /// Inclusion and boundary edits update the overlay immediately, but a separate
+    /// Update Estimate action recomputes the spatial regression before use.
     @ViewBuilder
     private func corneoRetinalBlinkMaskReview(in signal: MFFSignalData) -> some View {
         let items = corneoRetinal.blinkReviewItems
@@ -513,6 +552,9 @@ extension WaveformView {
         }
     }
 
+    /// Connects a toggle to one blink’s inclusion flag using its stable event ID.
+    /// The setter commits the edited mask and marks the estimate stale; a missing
+    /// item reads as false and ignores writes rather than using an outdated index.
     private func corneoRetinalBlinkInclusionBinding(id: MFFEvent.ID) -> Binding<Bool> {
         Binding(
             get: {
@@ -526,6 +568,9 @@ extension WaveformView {
         )
     }
 
+    /// Connects the start-time stepper to a blink in seconds. The item’s setter
+    /// clamps the span to the recording and preserves at least one sample of duration;
+    /// committing the edit invalidates the existing map estimate.
     private func corneoRetinalBlinkOnsetBinding(id: MFFEvent.ID, signal: MFFSignalData) -> Binding<Double> {
         Binding(
             get: { corneoRetinal.blinkReviewItems.first(where: { $0.id == id })?.onsetSeconds ?? 0 },
@@ -541,6 +586,9 @@ extension WaveformView {
         )
     }
 
+    /// Connects the end-time stepper to a blink in seconds, with recording bounds
+    /// and a one-sample minimum duration enforced by the review item. Missing IDs
+    /// read as zero and ignore writes, which can happen as the list is replaced.
     private func corneoRetinalBlinkEndBinding(id: MFFEvent.ID, signal: MFFSignalData) -> Binding<Double> {
         Binding(
             get: { corneoRetinal.blinkReviewItems.first(where: { $0.id == id })?.endSeconds ?? 0 },
@@ -556,8 +604,14 @@ extension WaveformView {
         )
     }
 
+    /// Copies included review spans into the result in onset order and invalidates
+    /// its map estimate. Clears the displayed-event cache, requests an overlay refresh,
+    /// and updates the selected highlight so the waveform reflects edits immediately.
     private func commitCorneoRetinalBlinkMaskEdits() {
         guard var result = corneoRetinal.result else { return }
+        // Key paths such as \.isIncluded and \.event select properties from each item.
+        // Only checked spans become the estimation mask; unchecked items stay in
+        // the review list so the user can include them again.
         result.blinkEvents = corneoRetinal.blinkReviewItems
             .filter(\.isIncluded)
             .map(\.event)
@@ -574,6 +628,8 @@ extension WaveformView {
         }
     }
 
+    /// Makes blink events visible, centers the waveform on this event, and highlights
+    /// its span in orange. It changes navigation state without changing the event.
     private func navigateToCorneoRetinalBlink(_ event: MFFEvent, in signal: MFFSignalData) {
         selectedEventCodes.insert(EyeArtifactKind.blink.eventCode)
         jumpToEvent(event, in: signal)
@@ -581,6 +637,8 @@ extension WaveformView {
         highlightedArtifactColor = .orange
     }
 
+    /// Moves selection by an offset in the review list and navigates to that blink.
+    /// Out-of-range moves are ignored instead of wrapping around the list.
     private func selectAdjacentCorneoRetinalBlink(from index: Int, offset: Int, signal: MFFSignalData) {
         let target = index + offset
         guard corneoRetinal.blinkReviewItems.indices.contains(target) else { return }
@@ -589,6 +647,9 @@ extension WaveformView {
         navigateToCorneoRetinalBlink(item.event, in: signal)
     }
 
+    /// Recomputes CRD diagnostics using the reviewed mask and existing channel roles.
+    /// It reuses the blink detection result rather than detecting the blinks again.
+    /// Only a successful result for the same recording clears the stale-mask flag.
     private func updateCorneoRetinalEstimate(in signal: MFFSignalData) {
         guard let current = corneoRetinal.result, corneoRetinal.maskEstimateIsStale else { return }
         let blinkEvents = current.blinkEvents
@@ -661,19 +722,27 @@ extension WaveformView {
         }
     }
 
+    /// Formats an absolute recording time in seconds with millisecond precision.
     private static func crdReviewTime(_ seconds: Double) -> String {
         String(format: "%.3f s", seconds)
     }
 
+    /// Formats short spans in milliseconds and spans of at least one second in seconds.
     private static func crdReviewDuration(_ seconds: Double) -> String {
         seconds < 1
             ? String(format: "%.0f ms", seconds * 1_000)
             : String(format: "%.3f s", seconds)
     }
 
+    /// Adds or replaces the CRD cleaning definition from a current reviewed estimate,
+    /// invalidates previously applied cleaning, and opens the cleaning sheet.
+    /// The definition stores the mask and estimator settings for later application;
+    /// this action does not directly replace the recording’s sample arrays.
     private func useCorneoRetinalResult() {
         guard let result = corneoRetinal.result, !corneoRetinal.maskEstimateIsStale else { return }
         let artifact = DefinedArtifact(
+            // Reuse the existing definition ID when revising an earlier CRD setup.
+            // A new UUID is needed only the first time this correction is added.
             id: corneoRetinal.definedArtifactID ?? UUID(),
             type: .corneoRetinal,
             name: "Corneo-Retinal Dipole",
@@ -703,6 +772,7 @@ extension WaveformView {
         artifactVM.showsCleaningSheet = true
     }
 
+    /// Builds a small label/value card for a progress or quality-control measurement.
     private func corneoRetinalMetric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
@@ -713,6 +783,9 @@ extension WaveformView {
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
     }
 
+    /// Draws one CRD regression-weight map using the recording’s sensor positions.
+    /// Float weights are converted to Double for TopomapView; automatic scaling
+    /// is local to this map, so its colors do not imply the other map’s numeric scale.
     private func corneoRetinalTopomap(_ title: String, values: [Float], layout: SensorLayout) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)

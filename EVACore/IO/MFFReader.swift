@@ -43,6 +43,7 @@ nonisolated struct MFFAntiAliasTimingCorrection: Sendable, Equatable {
     let acquisitionVersion: String?
     let evidence: Set<Evidence>
 
+    /// Status text shown when metadata indicates an acquisition-side anti-alias timing correction.
     var loadingMessage: String {
         "Corrected for anti-alias timing bug at recording"
     }
@@ -64,6 +65,10 @@ nonisolated enum EEGReferenceState: String, Sendable, Equatable {
     case average
 }
 
+/// Shared in-memory signal representation used by readers, algorithms and views.
+/// `data[channel][sample]` uses zero-based indices. Metadata and optional per-channel
+/// arrays refer to the same channel order. Initializers store supplied values;
+/// algorithms must validate the shape and sample rate required by their operation.
 nonisolated struct MFFSignalData: Sendable {
     /// Identity of this exact sample-data version. Copies preserve the revision;
     /// constructing/replacing sample data creates a new one. Derived-signal
@@ -77,6 +82,10 @@ nonisolated struct MFFSignalData: Sendable {
     let duration: TimeInterval
     let recordingStartTime: Date?
     let events: [MFFEvent]
+    /// Sample rows in channel order. EEG and peripheral signals can have different
+    /// physical units; consult the reader convention and `channelUnits`, rather
+    /// than treating every row as EEG microvolts. A URL does not identify this
+    /// particular processed version: use `dataRevision` for derived-data caches.
     let data: [[Float]]
     let channelNames: [String]?
     /// Pre-segmented epochs declared on disk (`epochs.xml` + `categories.xml`),
@@ -117,6 +126,8 @@ nonisolated struct MFFSignalData: Sendable {
         return Self.acquisitionSkipRanges(events: events, samplingRate: samplingRate, sampleCount: count)
     }
 
+    /// Convert BAD_ACQ_SKIP event spans to bounded half-open sample ranges.
+    /// Discard invalid intervals, then merge overlapping or adjacent gaps.
     static func acquisitionSkipRanges(events: [MFFEvent], samplingRate: Double, sampleCount: Int) -> [Range<Int>] {
         guard samplingRate > 0, sampleCount > 0 else { return [] }
         let ranges = events.filter { $0.code == "BAD_ACQ_SKIP" }.compactMap { event -> Range<Int>? in
@@ -136,6 +147,8 @@ nonisolated struct MFFSignalData: Sendable {
         return merged
     }
 
+    /// Return the complement of sorted, bounded gap intervals within 0..<sampleCount.
+    /// Callers normally pass the merged ranges produced by acquisitionSkipRanges.
     static func recordedRanges(sampleCount: Int, excluding gaps: [Range<Int>]) -> [Range<Int>] {
         var cursor = 0
         var result: [Range<Int>] = []
@@ -147,6 +160,8 @@ nonisolated struct MFFSignalData: Sendable {
         return result
     }
 
+    /// Store a signal snapshot and its metadata without validating shape or units.
+    /// A fresh data revision is created unless explicitly supplied for a metadata-only copy.
     init(
         dataRevision: UUID = UUID(),
         signalURL: URL,
@@ -341,6 +356,7 @@ nonisolated struct MFFSignalData: Sendable {
         )
     }
 
+    /// Return a metadata-only copy with a new reference convention while preserving sample revision and data.
     func markingReference(_ state: EEGReferenceState) -> MFFSignalData {
         MFFSignalData(
             dataRevision: dataRevision,
@@ -403,6 +419,7 @@ nonisolated enum EventTimeAnchor: String, Codable, Sendable, CaseIterable, Hasha
         }
     }
 
+    /// User-facing anchor name used in selection controls.
     var displayName: String {
         switch self {
         case .onset: return "Onset"
@@ -440,6 +457,7 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
     /// so a producer that does not think about this gets the safe answer.
     let timeAnchor: EventTimeAnchor
 
+    /// Store an event with an explicit time-anchor convention and normalize optional text fields.
     init(
         id: String,
         code: String,
@@ -464,6 +482,7 @@ nonisolated struct MFFEvent: Identifiable, Hashable, Sendable, Codable {
         self.timeAnchor = timeAnchor
     }
 
+    /// Trim optional text and turn missing or whitespace-only values into nil.
     private static func nonEmpty(_ value: String?) -> String? {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             ? value?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -605,6 +624,7 @@ enum MFFReaderError: LocalizedError {
     case inconsistentBlockConfiguration
     case emptySignal
 
+    /// Describe a package, XML or binary-read failure with the relevant path or format detail.
     var errorDescription: String? {
         switch self {
         case .invalidContainer:
@@ -631,7 +651,12 @@ enum MFFReaderError: LocalizedError {
     }
 }
 
+/// Reads a package in layers: discover files, decode binary blocks, then attach
+/// channel/event/epoch metadata. SignalHeader describes on-disk blocks; MFFSignalData
+/// is the in-memory representation consumed outside the reader. Event time anchors
+/// live beside MFFEvent above; use its derived onset/center/span properties.
 nonisolated final class MFFReader {
+    /// List package XML/signal files and flatten one selected XML document for metadata inspection.
     func inspectPackage(at url: URL, selectedXMLFile: String? = nil) throws -> MFFPackage {
         let packageURL = try validatedPackageURL(from: url)
         let xmlFiles = try self.xmlFiles(in: packageURL)
@@ -648,6 +673,9 @@ nonisolated final class MFFReader {
         )
     }
 
+    /// Load the selected/default EEG signal, apply gain calibration and attach channel/event metadata.
+    /// Interpret on-disk epochs when available; otherwise restore acquisition gaps in the sample timeline.
+    /// Progress is reported synchronously on the caller’s execution context.
     func loadSignal(
         from packageURL: URL,
         signalFileName: String? = nil,
@@ -707,6 +735,9 @@ nonisolated final class MFFReader {
         // one continuous recording, and the raw event tracks are in the original
         // recording's timeline — useless against the re-segmented data. We replace
         // them with one stimulus-locked marker per epoch.
+        // Epoch interpretation is optional here: a parsing error is treated as no
+        // epoch result. Continuous-timeline restoration below can still throw if its
+        // acquisition metadata is inconsistent.
         let epochInfo = (try? parseOnDiskEpochs(
             in: packageURL,
             blockSampleCounts: signalData.blockSampleCounts,
@@ -714,6 +745,8 @@ nonisolated final class MFFReader {
         )) ?? nil
         progress?(1)
 
+        // Segmented output has a concatenated timeline, so use reconstructed epoch
+        // markers instead of original acquisition-clock events.
         var resolvedEvents = epochInfo.map(\.events) ?? events
         if epochInfo == nil {
             let restored = try restoreAcquisitionTimeline(
@@ -765,6 +798,8 @@ nonisolated final class MFFReader {
         )
     }
 
+    /// Read evidence that acquisition software already applied the timing correction.
+    /// Return metadata about that correction; this method does not shift samples or events.
     func antiAliasTimingCorrection(
         in packageURL: URL,
         signalFileName: String? = nil
@@ -796,6 +831,7 @@ nonisolated final class MFFReader {
         )
     }
 
+    /// List visible XML filenames in natural sort order, throwing if none exist.
     func xmlFiles(in url: URL) throws -> [String] {
         let contents = try packageContents(in: url)
         let xmlFiles = contents
@@ -810,6 +846,7 @@ nonisolated final class MFFReader {
         return xmlFiles
     }
 
+    /// Flatten an XML document’s attributes and leaf text into path-keyed metadata for inspection.
     func parseXMLMetrics(in url: URL, fileName: String) throws -> [String: String] {
         let packageURL = try validatedPackageURL(from: url)
         let xmlURL = packageURL.appendingPathComponent(fileName)
@@ -829,6 +866,7 @@ nonisolated final class MFFReader {
         return metrics
     }
 
+    /// List visible signal*.bin filenames in natural sort order, throwing if none exist.
     func binFiles(in url: URL) throws -> [String] {
         let contents = try packageContents(in: url)
         let binFiles = contents
@@ -843,6 +881,7 @@ nonisolated final class MFFReader {
         return binFiles
     }
 
+    /// Prefer info.xml case-insensitively, otherwise take the first file from a nonempty XML list.
     private func preferredXMLFile(from xmlFiles: [String]) -> String {
         if let infoXML = xmlFiles.first(where: { $0.caseInsensitiveCompare("info.xml") == .orderedSame }) {
             return infoXML
@@ -850,6 +889,7 @@ nonisolated final class MFFReader {
         return xmlFiles[0]
     }
 
+    /// Require an existing directory as the package container; this does not validate its internal files.
     private func validatedPackageURL(from url: URL) throws -> URL {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
@@ -858,6 +898,7 @@ nonisolated final class MFFReader {
         return url
     }
 
+    /// Enumerate the package’s immediate children while skipping hidden files.
     private func packageContents(in url: URL) throws -> [URL] {
         let packageURL = try validatedPackageURL(from: url)
         return try FileManager.default.contentsOfDirectory(
@@ -867,6 +908,8 @@ nonisolated final class MFFReader {
         )
     }
 
+    /// Recursively collect XML leaf values and attributes, indexing repeated sibling tag names.
+    /// The inout dictionary is updated in place throughout the traversal.
     private func collectMetrics(from element: XMLElement, path: String, into metrics: inout [String: String]) {
         let trimmedValue = (element.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let childElements = (element.children ?? []).compactMap { $0 as? XMLElement }
@@ -894,6 +937,8 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Resolve an explicitly requested signal or prefer the first EEG descriptor, then the first signal.
+    /// Pair signalN.bin with infoN.xml; an absent type is reported as Unknown.
     private func selectSignal(
         in packageURL: URL,
         preferredSignalFile: String?
@@ -929,6 +974,7 @@ nonisolated final class MFFReader {
         return firstSignal
     }
 
+    /// Read the signal-kind child under generalInformation/fileDataType in the matching info XML.
     private func parseSignalType(for signalURL: URL, in packageURL: URL) throws -> String? {
         let infoURL = packageURL.appendingPathComponent(signalInfoFileName(for: signalURL))
         guard FileManager.default.fileExists(atPath: infoURL.path) else {
@@ -950,12 +996,16 @@ nonisolated final class MFFReader {
         return nil
     }
 
+    /// Derive infoN.xml from a signalN.bin filename.
     private func signalInfoFileName(for signalURL: URL) -> String {
         let signalName = signalURL.deletingPathExtension().lastPathComponent
         let signalNumber = signalName.replacingOccurrences(of: "signal", with: "")
         return "info\(signalNumber).xml"
     }
 
+    /// Read the first usable calibration of the requested type at recording time zero.
+    /// Use one-based channel attributes when present, sequential numbering otherwise,
+    /// and the supplied default for missing channels. Return nil if no usable factors exist.
     private func parseCalibrationFactors(
         named calibrationType: String,
         in packageURL: URL,
@@ -1030,6 +1080,7 @@ nonisolated final class MFFReader {
         return nil
     }
 
+    /// Read a channel-number attribute named n, number or channel, ignoring attribute-name case.
     private func calibrationChannelNumber(from element: XMLElement) -> Int? {
         for attribute in element.attributes ?? [] {
             let name = sanitizedTagName(attribute.name).lowercased()
@@ -1043,6 +1094,7 @@ nonisolated final class MFFReader {
         return nil
     }
 
+    /// Multiply each channel’s samples in place by its finite nonidentity calibration factor.
     private func applyCalibrationFactors(_ factors: [Float], to samples: inout [[Float]]) {
         let channelCount = min(samples.count, factors.count)
         guard channelCount > 0 else { return }
@@ -1056,6 +1108,7 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Read recordTime from info.xml and parse its absolute timestamp, or return nil when absent/unparseable.
     private func parseRecordingStartTime(in packageURL: URL) throws -> Date? {
         let infoURL = packageURL.appendingPathComponent("info.xml")
         guard FileManager.default.fileExists(atPath: infoURL.path) else {
@@ -1073,6 +1126,7 @@ nonisolated final class MFFReader {
         return parseMFFDate(rawValue)
     }
 
+    /// Read a nonempty acquisition software version from info.xml when available.
     private func parseAcquisitionVersion(in packageURL: URL) throws -> String? {
         let infoURL = packageURL.appendingPathComponent("info.xml")
         guard FileManager.default.fileExists(atPath: infoURL.path) else {
@@ -1090,6 +1144,7 @@ nonisolated final class MFFReader {
         return rawValue
     }
 
+    /// Read the adjusted flag and optional microsecond shift from the selected signal’s info XML.
     private func parseHardwareFilterAdjustment(
         in packageURL: URL,
         infoFileName: String
@@ -1116,6 +1171,7 @@ nonisolated final class MFFReader {
         return (isAdjusted, shiftMicroseconds)
     }
 
+    /// Treat a parsed acquisition version of 5.2 or later as evidence of timing correction.
     private func acquisitionVersionIndicatesAntiAliasCorrection(_ value: String) -> Bool {
         guard let components = versionComponents(from: value) else {
             return false
@@ -1123,6 +1179,7 @@ nonisolated final class MFFReader {
         return version(components, isAtLeast: [5, 2])
     }
 
+    /// Parse the initial numeric/dot portion of a version string, ignoring a trailing suffix.
     private func versionComponents(from value: String) -> [Int]? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = String(trimmed.prefix { $0.isNumber || $0 == "." })
@@ -1135,6 +1192,7 @@ nonisolated final class MFFReader {
         return components.isEmpty ? nil : components
     }
 
+    /// Compare numeric version components lexicographically, treating absent components as zero.
     private func version(_ lhs: [Int], isAtLeast rhs: [Int]) -> Bool {
         let count = max(lhs.count, rhs.count)
         for index in 0..<count {
@@ -1147,6 +1205,7 @@ nonisolated final class MFFReader {
         return true
     }
 
+    /// Recognize true, 1 or yes case-insensitively; all other text is false.
     private func parseXMLBoolean(_ value: String) -> Bool {
         switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "true", "1", "yes":
@@ -1156,6 +1215,8 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Resolve EEG electrode/reference names from one-based sensor-layout numbers.
+    /// Use E-number labels for a complete unnamed layout, generic Ch labels for partial names, or nil.
     private func parseChannelNames(in packageURL: URL, expectedCount: Int) throws -> [String]? {
         let layoutURL = packageURL.appendingPathComponent("sensorLayout.xml")
         guard expectedCount > 0, FileManager.default.fileExists(atPath: layoutURL.path) else {
@@ -1368,6 +1429,7 @@ nonisolated final class MFFReader {
         try parseEvents(in: try validatedPackageURL(from: packageURL))
     }
 
+    /// Read Events-prefixed XML files, deduplicate by source/code/raw timestamp and sort by event time.
     private func parseEvents(in packageURL: URL) throws -> [MFFEvent] {
         let eventFiles = try xmlFiles(in: packageURL)
             .filter { $0.hasPrefix("Events") }
@@ -1395,6 +1457,8 @@ nonisolated final class MFFReader {
         return events.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
+    /// Recursively find elements with direct code/beginTime children and append valid onset-anchored events.
+    /// Convert positive duration values from microseconds and retain optional descriptive metadata.
     private func collectEvents(
         from element: XMLElement,
         sourceFile: String,
@@ -1454,6 +1518,7 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Read the first nonempty cell key using one of the supported cel#, #cel or cell aliases.
     private func eventCellValue(from eventElement: XMLElement) -> String? {
         let keyElements = (eventElement.children ?? [])
             .compactMap { $0 as? XMLElement }
@@ -1478,6 +1543,8 @@ nonisolated final class MFFReader {
         return nil
     }
 
+    /// Interpret numeric times with the existing magnitude heuristic, or subtract recording start from a date.
+    /// Numeric values greater than 1,000,000 are treated as microseconds; smaller values as seconds.
     private func resolveEventBeginTimeSeconds(_ rawValue: String, recordingStartTime: Date?) -> Double? {
         if let numericValue = Double(rawValue) {
             if numericValue > 1_000_000 {
@@ -1715,6 +1782,7 @@ nonisolated final class MFFReader {
         return (restored, gaps)
     }
 
+    /// Add gap markers not already represented within a microsecond tolerance, then sort all events by time.
     private func mergingAcquisitionSkips(_ events: [MFFEvent], _ gaps: [MFFEvent]) -> [MFFEvent] {
         let additions = gaps.filter { gap in
             !events.contains { $0.code == "BAD_ACQ_SKIP"
@@ -1724,6 +1792,8 @@ nonisolated final class MFFReader {
         return (events + additions).sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
     }
 
+    /// Map validated one-based block bounds from epochs.xml to concatenated sample ranges.
+    /// Preserve acquisition-clock timestamps separately so pauses can later be reconstructed.
     private func parseEpochRanges(
         in packageURL: URL,
         blockSampleCounts: [Int]
@@ -1743,6 +1813,7 @@ nonisolated final class MFFReader {
         var ranges: [EpochBlockRange] = []
         for epoch in descendants(named: "epoch", in: root) {
             let children = (epoch.children ?? []).compactMap { $0 as? XMLElement }
+            /// Read a numeric child field from this acquisition epoch; validation happens in the enclosing guard.
             func value(_ name: String) -> Double? {
                 guard let raw = children.first(where: { sanitizedTagName($0.name) == name })?
                     .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
@@ -1755,6 +1826,8 @@ nonisolated final class MFFReader {
                   first >= 1, last >= first, last <= Double(blockSampleCounts.count) else {
                 throw MFFReaderError.invalidXML(epochsURL, "invalid acquisition epoch times or block bounds")
             }
+            // Disk block numbers are one-based and inclusive. Prefix sums convert them
+            // into a zero-based half-open sample interval without summing every block again.
             let firstBlock = Int(first), lastBlock = Int(last)
             ranges.append(
                 EpochBlockRange(
@@ -1768,6 +1841,8 @@ nonisolated final class MFFReader {
         return ranges
     }
 
+    /// Read category segments, stimulus times, contributing-trial counts and optional subject identity.
+    /// Missing files yield an empty list; incomplete or reversed segment intervals are skipped.
     private func parseCategorySegments(in packageURL: URL) throws -> [CategorySegment] {
         let categoriesURL = packageURL.appendingPathComponent("categories.xml")
         guard FileManager.default.fileExists(atPath: categoriesURL.path) else { return [] }
@@ -1784,6 +1859,7 @@ nonisolated final class MFFReader {
 
             for seg in descendants(named: "seg", in: category) {
                 let children = (seg.children ?? []).compactMap { $0 as? XMLElement }
+                /// Read a numeric child field from this category segment, returning nil for missing or nonnumeric text.
                 func value(_ tag: String) -> Double? {
                     guard let raw = children.first(where: { sanitizedTagName($0.name) == tag })?
                         .stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
@@ -1844,6 +1920,9 @@ nonisolated final class MFFReader {
         return 1
     }
 
+    /// Read signal blocks sequentially, reusing the last header when a block omits its own.
+    /// Require consistent channel count/rate, append channel-major samples and retain block lengths.
+    /// Check task cancellation while reading and appending the recording.
     private func parseSignal(
         from signalURL: URL,
         progress: (@Sendable (Double) -> Void)? = nil
@@ -1868,6 +1947,8 @@ nonisolated final class MFFReader {
             let flag = try Int(readInt32(from: handle, signalURL: signalURL))
 
             let header: SignalHeader
+            // A zero flag means the previous header still describes this block. A one
+            // flag introduces a new header; the first block must therefore have flag one.
             if flag == 0 {
                 guard let previousHeader = lastHeader else {
                     throw MFFReaderError.invalidBinaryData(signalURL, "encountered a data block before any header block")
@@ -1934,6 +2015,7 @@ nonisolated final class MFFReader {
         )
     }
 
+    /// Open a signal and require its first block to contain a header; do not load sample payloads.
     private func readFirstSignalHeader(from signalURL: URL) throws -> SignalHeader {
         let handle = try FileHandle(forReadingFrom: signalURL)
         defer { try? handle.close() }
@@ -1950,6 +2032,9 @@ nonisolated final class MFFReader {
         return try readHeader(from: handle, signalURL: signalURL)
     }
 
+    /// Read and validate block dimensions, sample depth and the first channel’s packed sampling rate.
+    /// Skip channel-offset fields, remaining rate/depth fields and optional header bytes;
+    /// the supported payload is a rectangular matrix of 32-bit floats.
     private func readHeader(from handle: FileHandle, signalURL: URL) throws -> SignalHeader {
         let headerSize = try Int(readInt32(from: handle, signalURL: signalURL))
         let blockSize = try Int(readInt32(from: handle, signalURL: signalURL))
@@ -1977,6 +2062,8 @@ nonisolated final class MFFReader {
             _ = try readExactly(from: handle, byteCount: (numberOfChannels - 1) * 4, signalURL: signalURL)
         }
 
+        // The on-disk header size includes the four-byte flag already read by the
+        // caller, plus three scalar integers and two channel-sized integer tables.
         let consumedHeaderBytes = 16 + (numberOfChannels * 8)
         if headerSize < consumedHeaderBytes {
             throw MFFReaderError.invalidBinaryData(signalURL, "header size \(headerSize) is smaller than required \(consumedHeaderBytes)")
@@ -2000,6 +2087,7 @@ nonisolated final class MFFReader {
         )
     }
 
+    /// Decode exactly sized, channel-major little-endian IEEE Float bytes into [channel][sample] arrays.
     private func decodeSamples(
         from data: Data,
         numberOfChannels: Int,
@@ -2026,6 +2114,8 @@ nonisolated final class MFFReader {
                         | (UInt32(bytes[offset + 1]) << 8)
                         | (UInt32(bytes[offset + 2]) << 16)
                         | (UInt32(bytes[offset + 3]) << 24)
+                    // Interpret these assembled bits as an IEEE float; converting the integer
+                    // numerically to Float would produce an entirely different sample value.
                     channels[channel][sample] = Float(bitPattern: word)
                 }
             }
@@ -2034,11 +2124,13 @@ nonisolated final class MFFReader {
         return channels
     }
 
+    /// Unpack the upper 24 bits as sampling rate and the low byte as sample depth.
     private func decodeRateDepth(_ value: Int) -> (samplingRate: Int, sampleDepth: Int) {
         let unsigned = UInt32(bitPattern: Int32(value))
         return (Int(unsigned >> 8), Int(unsigned & 0xFF))
     }
 
+    /// Read one little-endian 32-bit integer, throwing on a short read.
     private func readInt32(from handle: FileHandle, signalURL: URL) throws -> Int32 {
         let data = try readExactly(from: handle, byteCount: MemoryLayout<Int32>.size, signalURL: signalURL)
         return data.withUnsafeBytes { rawBuffer in
@@ -2047,6 +2139,7 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Read the requested byte count and throw a contextual binary-format error if the read is short.
     private func readExactly(from handle: FileHandle, byteCount: Int, signalURL: URL) throws -> Data {
         let data = try handle.read(upToCount: byteCount) ?? Data()
         guard data.count == byteCount else {
@@ -2055,6 +2148,7 @@ nonisolated final class MFFReader {
         return data
     }
 
+    /// Read XML with Foundation’s tidy option and wrap file/parser errors in the reader’s XML error type.
     private func loadXMLDocument(at url: URL) throws -> XMLDocument {
         do {
             let data = try Data(contentsOf: url)
@@ -2064,6 +2158,7 @@ nonisolated final class MFFReader {
         }
     }
 
+    /// Depth-first search for the first matching local tag name, including the supplied element itself.
     private func firstDescendant(named name: String, in element: XMLElement) -> XMLElement? {
         if sanitizedTagName(element.name) == name {
             return element
@@ -2081,6 +2176,7 @@ nonisolated final class MFFReader {
         return nil
     }
 
+    /// Collect all matching local tag names recursively, including the supplied element itself.
     private func descendants(named name: String, in element: XMLElement) -> [XMLElement] {
         var matches: [XMLElement] = []
         if sanitizedTagName(element.name) == name {
@@ -2095,6 +2191,7 @@ nonisolated final class MFFReader {
         return matches
     }
 
+    /// Strip an XML namespace prefix, returning an empty name for nil.
     private func sanitizedTagName(_ name: String?) -> String {
         guard let name else {
             return ""
@@ -2102,6 +2199,7 @@ nonisolated final class MFFReader {
         return name.components(separatedBy: ":").last ?? name
     }
 
+    /// Parse an absolute MFF timestamp while preserving sub-millisecond fractional seconds.
     private func parseMFFDate(_ value: String) -> Date? {
         // Both fractional-second parsers Foundation offers stop at milliseconds:
         // ISO8601DateFormatter's `.withFractionalSeconds` truncates further
@@ -2134,6 +2232,7 @@ nonisolated final class MFFReader {
         return (String(value[value.startIndex..<dot]) + String(value[index...]), fraction)
     }
 
+    /// Parse an ISO timestamp without a fraction, falling back to numeric timezone offsets without a colon.
     private func parseWholeSecondMFFDate(_ value: String) -> Date? {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]

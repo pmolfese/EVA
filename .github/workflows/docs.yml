@@ -6,6 +6,21 @@ on:
     paths:
       - "docs/manual/**"
       - "docs/design/**"
+      - "docs/developers/**"
+      - "docs/figures/**"
+      - "*.py"
+      - "*.sh"
+      - "EVA/**"
+      - "EVACore/**"
+      - "EVAPreviewKit/**"
+      - "EVAQuickLook/**"
+      - "EVAThumbnail/**"
+      - "EVAResolve/**"
+      - "EVATests/**"
+      - "EVAUITests/**"
+      - "EVAResolveTests/**"
+      - "Tools/**"
+      - "scripts/**"
       - "ROADMAP.md"
       - "ROADMAP_COMPLETE.md"
       - "scripts/sync-planning-docs.py"
@@ -13,6 +28,18 @@ on:
       - "requirements-docs.txt"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "EVA*/**"
+      - "Tools/**"
+      - "scripts/**"
+      - "*.md"
+      - "*.sh"
+      - "*.py"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs.yml"
 
 permissions:
   contents: read
@@ -33,15 +60,23 @@ jobs:
           python-version: "3.12"
       - name: Install documentation dependencies
         run: pip install -r requirements-docs.txt
+      - name: Check documentation links, inventory, contracts and tutorial patches
+        run: python3 scripts/check-developer-docs.py
+      - name: Test documentation tooling
+        run: python3 -m unittest discover -s scripts/tests -p 'test_developer_docs.py'
       - name: Sync planning documents into the docs tree
         run: python3 scripts/sync-planning-docs.py
+      - name: Verify generated documentation is current
+        run: python3 scripts/sync-planning-docs.py --check
       - name: Build documentation
         run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
         with:
           path: site
 
   deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

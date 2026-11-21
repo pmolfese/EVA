@@ -12,7 +12,13 @@
 
 import Foundation
 
+/// Converts measured features into goodness scores: 1 is good, 0 is poor.
+/// These are heuristic display/quality scores, not probabilities of a diagnosis.
 nonisolated enum HealthScoring {
+    /// Fraction of absolute amplitudes near the supplied maximum, in the same units.
+    /// The existing heuristic requires more than three samples and maxAbs > 20.
+    /// Its rail tolerance is max(0.1% of maxAbs, 0.01); the caller supplies the
+    /// maximum and matching amplitudes. This is evidence of clipping, not proof.
     static func clippingFraction(absValues: [Double], maxAbs: Double) -> Double {
         guard absValues.count > 3, maxAbs > 20 else { return 0 }
         let tolerance = max(maxAbs * 0.001, 0.01)
@@ -20,6 +26,8 @@ nonisolated enum HealthScoring {
         return Double(clipped) / Double(absValues.count)
     }
 
+    /// For green < red: 1 at/below green, 0 at/above red, linear in between.
+    /// Nonfinite ratios score 0. Thresholds must use the same scale as the ratio.
     static func scoreUpperRatio(_ ratio: Double, green: Double, red: Double) -> Double {
         guard ratio.isFinite else { return 0 }
         if ratio <= green { return 1 }
@@ -27,6 +35,7 @@ nonisolated enum HealthScoring {
         return 1 - (ratio - green) / max(red - green, 1e-9)
     }
 
+    /// Treats a ratio and its reciprocal identically; zero/negative ratios score 0.
     static func scoreTwoSidedRatio(_ ratio: Double, green: Double, red: Double) -> Double {
         guard ratio.isFinite, ratio > 0 else { return 0 }
         return scoreUpperRatio(max(ratio, 1 / ratio), green: green, red: red)
@@ -36,6 +45,7 @@ nonisolated enum HealthScoring {
         scoreUpperRatio(fraction, green: green, red: red)
     }
 
+    /// For red < green, larger values are better; nonfinite values score 0.
     static func scoreLowerBound(_ value: Double, green: Double, red: Double) -> Double {
         guard value.isFinite else { return 0 }
         if value >= green { return 1 }
@@ -43,6 +53,8 @@ nonisolated enum HealthScoring {
         return (value - red) / max(green - red, 1e-9)
     }
 
+    /// Shared display bands: good begins at 0.78, watch at 0.50, otherwise poor.
+    /// Keep these thresholds consistent with the UI and HealthScoringTests.
     static func grade(for score: Double) -> ChannelHealthGrade {
         if score >= 0.78 { return .good }
         if score >= 0.50 { return .watch }

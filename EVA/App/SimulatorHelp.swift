@@ -88,6 +88,7 @@ struct HelpButton: View {
         }
         .buttonStyle(.plain)
         .help(topic.summary)
+        .accessibilityLabel("Help: \(topic.title)")
         .popover(isPresented: $shows, arrowEdge: .trailing) {
             HelpTopicView(topic: topic)
         }
@@ -914,15 +915,7 @@ enum SimulatorHelp {
 
     // MARK: Sweep and group
 
-    static let sweepParameter = HelpTopic(
-        title: "Sweep parameter",
-        summary: """
-        Which single setting varies across the generated runs. Everything else         is held at the Generate tab's values.
-        """,
-        guidance: """
-        A sweep is only interpretable if exactly one thing moves, which is what         this enforces. The most informative axes are the ones that set how hard         the problem is — BCG amplitude, gradient clock offset, QRS jitter —         because the result is a curve showing where a method stops working,         rather than a single number saying whether it worked once.
-        """
-    )
+    static let sweepParameter = SweepHelp.parameters
 
     static let homogeneous = HelpTopic(
         title: "Homogeneous cohort",

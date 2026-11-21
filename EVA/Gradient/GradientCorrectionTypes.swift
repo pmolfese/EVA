@@ -22,6 +22,14 @@ import Foundation
 
 // MARK: - Donor strategy
 
+/// Features used only for donor ranking; subtraction always uses original windows.
+nonisolated enum GradientCorrelationFeature: String, CaseIterable, Identifiable, Sendable {
+    case rawWaveform
+    case firstDifference
+    var id: String { rawValue }
+    var label: String { self == .rawWaveform ? "Raw waveform" : "First difference" }
+}
+
 /// How donor epochs are chosen when building an artifact template.
 ///
 /// The scientific motivation for each strategy is described in the literature
@@ -205,6 +213,9 @@ nonisolated struct GradientCorrectionConfig: Sendable {
     /// epoch. 0 puts the whole window after the trigger.
     var relativeTriggerPosition: Double = 0
 
+    /// Optional experimental restrictions. Nil preserves existing donor behavior.
+    var donorPolicy: GradientDonorPolicy? = nil
+
     // Donor window
 
     /// Donor epochs to take from before the target.
@@ -234,6 +245,7 @@ nonisolated struct GradientCorrectionConfig: Sendable {
 
     /// Minimum correlation a candidate must reach to qualify under
     /// `correlationRanked`.
+    var correlationFeature: GradientCorrelationFeature = .rawWaveform
     var correlationThreshold: Double = 0.9
     /// If fewer than this many candidates qualify, `correlationRanked` falls back
     /// to temporal neighbors for that epoch.
@@ -471,6 +483,8 @@ nonisolated struct GradientCorrectionDiagnostics: Sendable {
     /// scaled by — they are on the upsampled axis. Needed to place an epoch on
     /// the recording's own axis (`GradientCoverage`).
     var upsampleFactor: Int = 1
+    /// Actual correction ownership on the upsampled axis for slice partitions.
+    var outputRanges: [Range<Int>]? = nil
 
     var correctedEpochCount: Int { epochs.filter(\.corrected).count }
 }
@@ -478,4 +492,17 @@ nonisolated struct GradientCorrectionDiagnostics: Sendable {
 nonisolated struct GradientCorrectionResult: Sendable {
     let channels: [[Float]]
     let diagnostics: GradientCorrectionDiagnostics
+}
+
+/// Event-aware template training restrictions; targets remain eligible for correction.
+nonisolated struct GradientDonorPolicy: Sendable {
+    /// Half-open intervals on the original recording's seconds axis.
+    var protectedIntervals: [Range<Double>] = []
+    var maximumDistanceSeconds: Double = 60
+    var minimumDonors: Int = 4
+    var matchAcquisitionGroup: Bool = true
+
+    func permitsWindow(start: Double, end: Double) -> Bool {
+        !protectedIntervals.contains { $0.lowerBound < end && start < $0.upperBound }
+    }
 }

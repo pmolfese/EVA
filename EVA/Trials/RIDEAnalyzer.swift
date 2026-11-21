@@ -37,7 +37,9 @@ nonisolated enum RIDEAnalyzer {
         case central = "C"
         case response = "R"
 
+        /// Use the component code as stable UI identity.
         var id: String { rawValue }
+        /// Short component label used in plots and tables.
         var label: String {
             switch self {
             case .stimulus: "S"
@@ -52,6 +54,7 @@ nonisolated enum RIDEAnalyzer {
         case estimated = "Per-trial marker"
         case fixed = "Same latency each trial"
 
+        /// Use the latency-source label as picker identity.
         var id: String { rawValue }
     }
 
@@ -59,6 +62,7 @@ nonisolated enum RIDEAnalyzer {
         case mostProbable = "Most probable"
         case largestPeak = "Largest peak"
 
+        /// Use the search-mode label as picker identity.
         var id: String { rawValue }
     }
 
@@ -96,6 +100,7 @@ nonisolated enum RIDEAnalyzer {
     }
 
     struct ComponentWaveform: Identifiable, Sendable {
+        /// Identify the waveform by its S, C or R component.
         var id: Component { component }
         var component: Component
         /// Component in its own locking frame: S stimulus-locked, C latency-locked,
@@ -126,6 +131,7 @@ nonisolated enum RIDEAnalyzer {
     }
 
     struct IterationSummary: Identifiable, Sendable {
+        /// Identify each convergence-summary row by iteration number.
         var id: Int { iteration }
         var iteration: Int
         var changedCentralLatencyCount: Int
@@ -152,11 +158,19 @@ nonisolated enum RIDEAnalyzer {
         var explainedVariance: Double
         var warnings: [String]
 
+        /// Find the requested component waveform, or nil when that component was disabled.
         func component(_ component: Component) -> ComponentWaveform? {
             components.first { $0.component == component }
         }
     }
 
+    /// Separates stimulus-locked (S), latency-variable (C), and optional response-
+    /// locked (R) activity from equal-length trial traces. Timing configuration is
+    /// in milliseconds; the algorithm converts it to sample offsets internally.
+    ///
+    /// Read in stages: validate/initialize latencies, estimate component templates,
+    /// update trial shifts, then reconstruct and summarize. nil denotes inputs
+    /// for which this implementation cannot produce a decomposition, not zero activity.
     static func decompose(
         trials: [TrialInput],
         samplingRate: Double,
@@ -174,6 +188,8 @@ nonisolated enum RIDEAnalyzer {
         let length = first.samples.count
         guard trials.allSatisfy({ $0.samples.count == length }) else { return nil }
 
+        // Convert response markers to sample offsets before iteration. If R is enabled,
+        // every trial must resolve a finite marker under the selected latency-source rule.
         let responseLatencies = trials.map { trial -> Int? in
             guard configuration.includesResponseComponent else { return nil }
             let latencyMs: Double
@@ -233,6 +249,8 @@ nonisolated enum RIDEAnalyzer {
             )
         }
 
+        // Alternate component estimation and central-latency updates. Each component
+        // is fitted to what remains after subtracting the current estimates of the others.
         var previousCentralLatencies = centralLatencies
         for iteration in 1...configuration.maxIterations {
             if configuration.includesStimulusComponent {
@@ -328,6 +346,8 @@ nonisolated enum RIDEAnalyzer {
                     if delta > tolerance { changed += 1 }
                     maxChange = max(maxChange, delta)
                 }
+                // Convergence here means central lags changed by no more than the sample
+                // tolerance. It does not mean the reconstructed trials have zero residual error.
                 converged = changed == 0
                 let meanCorrelation = centralCorrelations.isEmpty
                     ? 0
@@ -506,6 +526,8 @@ nonisolated enum RIDEAnalyzer {
                 )
             )
             : nil
+        // Turn the template’s dominant sample into an event-relative reference marker.
+        // Adding each trial’s fitted shift yields its reported central marker latency.
         let centralReferenceLatencySamples = centralReferenceSample.map { $0 - first.stimulusOffsetSamples }
 
         let trialLatencies = trials.indices.map { index in
@@ -575,6 +597,9 @@ nonisolated enum RIDEAnalyzer {
 
     // MARK: - Template estimation
 
+    /// Subtract the other component estimates from each trial, align the residuals to the
+    /// target component and take their pointwise median. Finally restrict template support
+    /// to its configured window in the appropriate timing frame.
     private static func estimateTemplate(
         trials: [TrialInput],
         length: Int,
@@ -622,6 +647,8 @@ nonisolated enum RIDEAnalyzer {
         )
     }
 
+    /// Keep template samples inside the resolved component window and zero the rest.
+    /// If the window cannot be resolved, return the original template unchanged.
     private static func windowedTemplate(
         _ template: [Float],
         componentWindow: ComponentWindow,
@@ -643,6 +670,8 @@ nonisolated enum RIDEAnalyzer {
         return out
     }
 
+    /// Shift enabled S/C/R templates back into one trial’s timing frame and sum them.
+    /// Missing response latency omits the R contribution.
     private static func reconstruct(
         length: Int,
         centralLatency: Int,
@@ -670,6 +699,8 @@ nonisolated enum RIDEAnalyzer {
 
     // MARK: - Lag search
 
+    /// Convert event-relative millisecond endpoints to a clipped, half-open sample range.
+    /// Both rounded endpoints are included; invalid or nonoverlapping windows return nil.
     private static func sampleRange(
         startMs: Double,
         endMs: Double,
@@ -686,6 +717,9 @@ nonisolated enum RIDEAnalyzer {
         return lower..<(upper + 1)
     }
 
+    /// Search integer shifts for finite template/residual correlations. Largest-peak mode
+    /// chooses the maximum; most-probable mode favors a near-maximum candidate close
+    /// to the previous lag. Return zero lag/correlation if no candidate is usable.
     private static func bestLag(
         trial: [Float],
         template: [Float],
@@ -709,6 +743,8 @@ nonisolated enum RIDEAnalyzer {
             let best = candidates.max { lhs, rhs in lhs.correlation < rhs.correlation } ?? (0, 0)
             return best
         case .mostProbable:
+            // The 92% threshold is a heuristic candidate band, not a statistical probability.
+            // Among these candidates, proximity to the previous lag stabilizes the update.
             let peakThreshold = (candidates.map(\.correlation).max() ?? 0) * 0.92
             let plausible = candidates.filter { $0.correlation >= peakThreshold }
             let best = plausible.min {
@@ -721,6 +757,8 @@ nonisolated enum RIDEAnalyzer {
         }
     }
 
+    /// Shrink support so every tested lag can use the same samples when at least three remain.
+    /// Otherwise keep the original window and let correlation clip individual pairs.
     private static func fixedSupportWindow(
         _ window: Range<Int>,
         maxLagSamples: Int,
@@ -731,6 +769,9 @@ nonisolated enum RIDEAnalyzer {
         return upper - lower >= 3 ? lower..<upper : window
     }
 
+    /// Compute mean-centered correlation between template[i] and trial[i + lag].
+    /// Skip out-of-bounds/nonfinite pairs; insufficient support or variance returns negative
+    /// infinity so the lag search can reject that candidate.
     private static func normalizedCorrelation(
         trial: [Float],
         template: [Float],
@@ -770,6 +811,8 @@ nonisolated enum RIDEAnalyzer {
 
     // MARK: - Trace operations
 
+    /// Shift a trace earlier by an integer sample count, preserving length with zero padding.
+    /// Negative shifts move later; samples crossing an edge are discarded, not wrapped.
     private static func shiftEarlier(_ samples: [Float], by shift: Int) -> [Float] {
         guard shift != 0, !samples.isEmpty else { return samples }
         var out = [Float](repeating: 0, count: samples.count)
@@ -782,10 +825,13 @@ nonisolated enum RIDEAnalyzer {
         return out
     }
 
+    /// Shift later using the same zero-padding convention by negating the earlier-shift offset.
     private static func shiftLater(_ samples: [Float], by shift: Int) -> [Float] {
         shiftEarlier(samples, by: -shift)
     }
 
+    /// Add equal-length traces into the target, doing each addition in Double before storing Float.
+    /// Mismatched lengths leave the target unchanged.
     private static func addInPlace(_ target: inout [Float], _ source: [Float]) {
         guard target.count == source.count else { return }
         for i in target.indices {
@@ -793,6 +839,7 @@ nonisolated enum RIDEAnalyzer {
         }
     }
 
+    /// Subtract equal-length traces from the target; mismatched lengths are a no-op.
     private static func subtractInPlace(_ target: inout [Float], _ source: [Float]) {
         guard target.count == source.count else { return }
         for i in target.indices {
@@ -800,6 +847,8 @@ nonisolated enum RIDEAnalyzer {
         }
     }
 
+    /// Average finite samples at each position across traces of the requested length.
+    /// Positions without finite contributors become zero; empty input returns an empty array.
     private static func average(_ traces: [[Float]], length: Int) -> [Float] {
         guard !traces.isEmpty, length > 0 else { return [] }
         var sums = [Double](repeating: 0, count: length)
@@ -817,6 +866,9 @@ nonisolated enum RIDEAnalyzer {
         }
     }
 
+    /// Align traces by reading sourceIndex = outputIndex + shift, then take a finite-value
+    /// median per output position. Out-of-bounds samples are omitted, so padding zeros
+    /// do not bias the estimated template.
     private static func medianShifted(
         _ traces: [[Float]],
         shifts: [Int],
@@ -843,6 +895,7 @@ nonisolated enum RIDEAnalyzer {
         }
     }
 
+    /// Return the sorted middle value, averaging the middle pair for even counts; empty input gives zero.
     private static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let sorted = values.sorted()
@@ -852,6 +905,7 @@ nonisolated enum RIDEAnalyzer {
             : sorted[middle]
     }
 
+    /// Find the largest absolute sample within a valid optional window, or nil when none exists.
     private static func dominantSample(in trace: [Float], window: Range<Int>?) -> Int? {
         guard let window else { return nil }
         return window.filter(trace.indices.contains).max { lhs, rhs in
@@ -859,6 +913,7 @@ nonisolated enum RIDEAnalyzer {
         }
     }
 
+    /// Compute root mean square over finite trace values; no finite values yields zero.
     private static func rms(_ trace: [Float]) -> Double {
         let finite = trace.lazy.map(Double.init).filter(\.isFinite)
         let sum = finite.reduce(into: (squares: 0.0, count: 0)) { partial, value in
@@ -868,6 +923,9 @@ nonisolated enum RIDEAnalyzer {
         return sum.count > 0 ? sqrt(sum.squares / Double(sum.count)) : 0
     }
 
+    /// Summarize residual RMS and 1 − residual energy / mean-centered observed energy.
+    /// Finite observations/residuals are gathered separately; explained variance can be negative
+    /// when residual energy exceeds the observed variation.
     private static func fitDiagnostics(
         observed: [[Float]],
         residuals: [[Float]]

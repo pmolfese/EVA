@@ -1,0 +1,129 @@
+--- a/EVA/Analysis/EEGAnalysisModels.swift
++++ b/EVA/Analysis/EEGAnalysisModels.swift
+@@ -221,6 +221,8 @@
+     var segmentDecisions: [EEGAnalysisSegmentDecision]
+     var spectral: EEGSpectralAnalysisResult?
+     var connectivity: EEGConnectivityAnalysisResult?
++    /// Included segment duration / recording duration; nil when unavailable or invalid.
++    var retainedDurationFraction: Double? = nil
+ }
+ 
+ nonisolated struct EEGAnalysisExportOptions: Sendable {
+--- a/EVA/Analysis/EEGAnalysisEngine.swift
++++ b/EVA/Analysis/EEGAnalysisEngine.swift
+@@ -39,6 +39,13 @@
+ /// The pipeline is segment quality → retained data → spectral power/connectivity
+ /// → exportable summaries. Channel and sample indices are zero-based internally.
+ nonisolated enum EEGAnalysisEngine {
++    /// A dimensionless coverage fraction; invalid or overlapping totals are unavailable.
++    static func retainedDurationFraction(included: Double, total: Double) -> Double? {
++        guard included.isFinite, total.isFinite, total > 0,
++              included >= 0, included <= total else { return nil }
++        return included / total
++    }
++
+     /// Builds the complete report from the request: assess segments, select usable
+     /// data, and compute the requested power and connectivity summaries. Progress
+     /// is a fraction of the whole run; each stage maps its own fraction into a slice.
+@@ -154,7 +161,9 @@
+             segments: summary,
+             segmentDecisions: decisions,
+             spectral: spectral,
+-            connectivity: connectivity
++            connectivity: connectivity,
++            retainedDurationFraction: retainedDurationFraction(
++                included: summary.includedDurationSeconds, total: signal.duration)
+         )
+     }
+ 
+@@ -190,7 +199,8 @@
+                     channelPairs: options.includesConnectivityPairs ? connectivity.channelPairs : [],
+                     regionPairs: options.includesConnectivityPairs ? connectivity.regionPairs : []
+                 )
+-            }
++            },
++            retainedDurationFraction: result.retainedDurationFraction
+         )
+     }
+ 
+@@ -229,6 +239,9 @@
+         appendSummary("total_segments", result.segments.totalSegmentCount)
+         appendSummary("included_segments", result.segments.includedSegmentCount)
+         appendSummary("included_duration_seconds", clean(result.segments.includedDurationSeconds))
++        if let fraction = result.retainedDurationFraction {
++            appendSummary("retained_duration_fraction", clean(fraction))
++        }
+ 
+         if let spectral = result.spectral {
+             for band in spectral.bands {
+--- a/EVA/Analysis/EEGAnalysisSheet.swift
++++ b/EVA/Analysis/EEGAnalysisSheet.swift
+@@ -304,6 +304,9 @@
+                     summaryTile("Duration", "\(format(result.segments.includedDurationSeconds)) s")
+                     summaryTile("Channels", "\(result.recording.analyzedChannelCount)")
+                     summaryTile("Pairs", "\(pairCount(result))")
++                    if let fraction = result.retainedDurationFraction {
++                        summaryTile("Retained", "\(format(100 * fraction))%")
++                    }
+                 }
+             } else {
+                 Text("Run analysis to populate segment, spectral, and connectivity results.")
+--- a/EVATests/Analysis/EEGAnalysisEngineTests.swift
++++ b/EVATests/Analysis/EEGAnalysisEngineTests.swift
+@@ -15,7 +15,7 @@
+ @testable import EVA
+ 
+ struct EEGAnalysisEngineTests {
+-    @Test func analyzeProducesSpectralAndConnectivityResults() async {
++    @Test func analyzeProducesSpectralAndConnectivityResults() async throws {
+         let samplingRate = 128.0
+         let sampleCount = 512
+         let data = (0..<4).map { channel in
+@@ -81,5 +81,23 @@
+         #expect(result.spectral?.channels.count == data.count)
+         #expect(result.connectivity?.channelPairs.isEmpty == false)
+         #expect(result.connectivity?.regionPairs.isEmpty == false)
++        let fraction = try #require(result.retainedDurationFraction)
++        #expect(fraction >= 0 && fraction <= 1)
++        let rows = EEGAnalysisEngine.csvRows(for: result, options: EEGAnalysisExportOptions(
++            includesPerChannelDetails: false, includesSegmentDetails: false,
++            includesConnectivityPairs: false))
++        #expect(rows.contains { $0.contains("retained_duration_fraction") })
++        let options = EEGAnalysisExportOptions(includesPerChannelDetails: false,
++            includesSegmentDetails: false, includesConnectivityPairs: false)
++        let exported = EEGAnalysisEngine.exportResult(result, options: options)
++        #expect(exported.retainedDurationFraction == fraction)
++        let bytes = try JSONEncoder().encode(exported)
++        let decoded = try JSONDecoder().decode(EEGAnalysisResult.self, from: bytes)
++        #expect(decoded.retainedDurationFraction == fraction)
++        var legacy = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
++        legacy.removeValue(forKey: "retainedDurationFraction")
++        let legacyBytes = try JSONSerialization.data(withJSONObject: legacy)
++        #expect(try JSONDecoder().decode(EEGAnalysisResult.self,
++            from: legacyBytes).retainedDurationFraction == nil)
+     }
+ }
+--- /dev/null
++++ b/EVATests/Analysis/GuideRetentionMetricTests.swift
+@@ -0,0 +1,21 @@
++//  Developed by P. Molfese, National Institutes of Health (NIH).
++//
++//  This software is a "work of the United States Government" prepared by a federal
++//  employee as part of official duties. As such, it is not subject to copyright
++//  protection within the United States (17 U.S.C. § 105). International copyrights
++//  may apply.
++
++import Foundation
++import Testing
++@testable import EVA
++
++struct GuideRetentionMetricTests {
++    @Test func fractionHasExplicitUnitsAndMissingValuePolicy() {
++        #expect(EEGAnalysisEngine.retainedDurationFraction(included: 5, total: 10) == 0.5)
++        #expect(EEGAnalysisEngine.retainedDurationFraction(included: 0, total: 10) == 0)
++        #expect(EEGAnalysisEngine.retainedDurationFraction(included: 10, total: 10) == 1)
++        #expect(EEGAnalysisEngine.retainedDurationFraction(included: 1, total: 0) == nil)
++        #expect(EEGAnalysisEngine.retainedDurationFraction(included: 11, total: 10) == nil)
++        #expect(EEGAnalysisEngine.retainedDurationFraction(included: .nan, total: 10) == nil)
++    }
++}

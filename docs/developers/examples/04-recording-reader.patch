@@ -1,0 +1,180 @@
+--- /dev/null
++++ b/EVA/IO/DemoSignalReader.swift
+@@ -0,0 +1,50 @@
++//  Developed by P. Molfese, National Institutes of Health (NIH).
++//
++//  This software is a "work of the United States Government" prepared by a federal
++//  employee as part of official duties. As such, it is not subject to copyright
++//  protection within the United States (17 U.S.C. § 105). International copyrights
++//  may apply.
++
++import Foundation
++
++/// Teaching format: version 1 JSON, channel-major EEG arrays in microvolts.
++nonisolated enum DemoSignalReader {
++    private struct Document: Decodable {
++        let version: Int
++        let samplingRateHz: Double
++        let channelNames: [String]
++        let samplesMicrovolts: [[Float]]
++    }
++
++    static func load(from url: URL) throws -> ImportedRecording {
++        let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
++        guard bytes.count <= 1_048_576 else {
++            throw SignalImportError.malformedFile(url, "Demo input exceeds 1 MiB.")
++        }
++        let document: Document
++        do { document = try JSONDecoder().decode(Document.self, from: bytes) }
++        catch { throw SignalImportError.malformedFile(url, "Invalid demo JSON: \(error.localizedDescription)") }
++        guard document.version == 1 else {
++            throw SignalImportError.unsupportedVariant(url, "Expected demo format version 1.")
++        }
++        let data = document.samplesMicrovolts
++        guard document.samplingRateHz.isFinite, document.samplingRateHz > 0,
++              let count = data.first?.count, count > 0,
++              data.count == document.channelNames.count,
++              Set(document.channelNames).count == data.count,
++              document.channelNames.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
++              data.allSatisfy({ $0.count == count && $0.allSatisfy(\.isFinite) }) else {
++            throw SignalImportError.malformedFile(url, "Expected unique channel names, a positive rate, and rectangular finite samples.")
++        }
++        let duration = Double(count) / document.samplingRateHz
++        guard duration.isFinite else {
++            throw SignalImportError.malformedFile(url, "Sampling rate produces an invalid duration.")
++        }
++        let signal = MFFSignalData(signalURL: url, signalType: "EEG",
++            numberOfChannels: data.count, samplingRate: document.samplingRateHz,
++            duration: duration, recordingStartTime: nil,
++            events: [], data: data, channelNames: document.channelNames,
++            channelUnits: Array(repeating: "uV", count: data.count))
++        return ImportedRecording(signal: signal, layout: nil, geometry: nil, pnsSignal: nil)
++    }
++}
+--- a/EVA/IO/SignalImportReader.swift
++++ b/EVA/IO/SignalImportReader.swift
+@@ -74,7 +74,7 @@
+         "edf", "bdf",
+         "fif",
+         "lay", "dat",
+-        "avr", "mul"
++        "avr", "mul", "evademo"
+     ]
+ 
+     static let supportedLocationExtensions: Set<String> = ["sfp", "elp", "loc"]
+@@ -114,6 +114,8 @@
+         let imported: ImportedRecording
+ 
+         switch ext {
++        case "evademo":
++            imported = try DemoSignalReader.load(from: url)
+         case "mff":
+             let reader = MFFReader()
+             let antiAliasTimingCorrection = try? reader.antiAliasTimingCorrection(in: url)
+--- a/EVA/App/ContentView.swift
++++ b/EVA/App/ContentView.swift
+@@ -369,7 +369,7 @@
+             .buttonStyle(.borderedProminent)
+             .controlSize(.large)
+ 
+-            Text("Drop .mff, BrainVision, EDF/BDF, FIF, Persyst, or BESA .avr/.mul recordings here")
++            Text("Drop .mff, BrainVision, EDF/BDF, FIF, Persyst, or BESA .avr/.mul, or tutorial .evademo recordings here")
+                 .font(.callout)
+                 .foregroundStyle(.secondary)
+ 
+@@ -431,7 +431,7 @@
+         let openable = supportedURLs.filter { SignalImportReader.recordingRejectionReason(for: $0) == nil }
+         guard let url = openable.first else {
+             openError = supportedURLs.compactMap(SignalImportReader.recordingRejectionReason(for:)).first
+-                ?? "EVA can open .mff, BrainVision, EDF/BDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
++                ?? "EVA can open .mff, BrainVision, EDF/BDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul, or tutorial .evademo recordings."
+             return false
+         }
+         return open(url, securityScopedURLs: supportedURLs)
+@@ -440,7 +440,7 @@
+     @discardableResult
+     private func open(_ url: URL, securityScopedURLs: [URL] = []) -> Bool {
+         guard isSupportedRecordingURL(url) else {
+-            openError = "EVA can open .mff, BrainVision, EDF/BDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul recordings."
++            openError = "EVA can open .mff, BrainVision, EDF/BDF, FIF (.fif/.fif.gz), Persyst, and BESA .avr/.mul, or tutorial .evademo recordings."
+             return false
+         }
+         // A `.fif` may be a head model, a transform or a digitization rather
+--- a/EVA/Info.plist
++++ b/EVA/Info.plist
+@@ -2,6 +2,17 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
++    <key>UTExportedTypeDeclarations</key>
++    <array>
++        <dict>
++            <key>UTTypeIdentifier</key><string>gov.nih.nimh.cmn.eva.demo-recording</string>
++            <key>UTTypeDescription</key><string>EVA tutorial recording</string>
++            <key>UTTypeConformsTo</key><array><string>public.json</string></array>
++            <key>UTTypeTagSpecification</key><dict>
++                <key>public.filename-extension</key><array><string>evademo</string></array>
++            </dict>
++        </dict>
++    </array>
+ 	<key>CFBundleDocumentTypes</key>
+ 	<array>
+ 		<dict>
+--- /dev/null
++++ b/EVATests/IO/GuideDemoReaderTests.swift
+@@ -0,0 +1,55 @@
++//  Developed by P. Molfese, National Institutes of Health (NIH).
++//
++//  This software is a "work of the United States Government" prepared by a federal
++//  employee as part of official duties. As such, it is not subject to copyright
++//  protection within the United States (17 U.S.C. § 105). International copyrights
++//  may apply.
++
++import Foundation
++import Testing
++@testable import EVA
++
++struct GuideDemoReaderTests {
++    private func withFile(_ text: String, body: (URL) async throws -> Void) async throws {
++        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".evademo")
++        try Data(text.utf8).write(to: url)
++        defer { try? FileManager.default.removeItem(at: url) }
++        try await body(url)
++    }
++
++    @Test func dispatcherImportsAndMFFExportPreservesSamples() async throws {
++        let json = #"{"version":1,"samplingRateHz":1000,"channelNames":["Demo1","Demo2"],"samplesMicrovolts":[[1,-2,3,4],[4,3,-2,1]]}"#
++        try await withFile(json) { url in
++            #expect(SignalImportReader.isSupportedRecordingURL(url))
++            let imported = try SignalImportReader.load(from: url)
++            #expect(imported.signal.data[0] == [1, -2, 3, 4])
++            #expect(imported.signal.samplingRate == 1000)
++            #expect(imported.signal.duration == 0.004)
++            #expect(imported.signal.channelNames == ["Demo1", "Demo2"])
++            #expect(imported.pnsSignal == nil)
++            let output = url.deletingPathExtension().appendingPathExtension("mff")
++            defer { try? FileManager.default.removeItem(at: output) }
++            let result = await MFFExportWriter.write(
++                snapshot: MFFExportSnapshot(signal: imported.signal, segments: [], kind: .continuous),
++                pnsSignal: nil, script: EVAProcessingScript(), to: output)
++            let package = try result.get()
++            let restored = try MFFReader().loadSignal(from: package)
++            #expect(restored.data == imported.signal.data)
++            #expect(restored.channelNames == imported.signal.channelNames)
++        }
++    }
++
++    @Test(arguments: [
++        #"{"version":2,"samplingRateHz":1000,"channelNames":["A"],"samplesMicrovolts":[[1]]}"#,
++        #"{"version":1,"samplingRateHz":0,"channelNames":["A"],"samplesMicrovolts":[[1]]}"#,
++        #"{"version":1,"samplingRateHz":1000,"channelNames":["A","B"],"samplesMicrovolts":[[1],[1,2]]}"#,
++        #"{"version":1,"samplingRateHz":1000,"channelNames":["A","A"],"samplesMicrovolts":[[1],[2]]}"#,
++        #"{"version":1,"samplingRateHz":1000,"channelNames":[],"samplesMicrovolts":[]}"#,
++        "not JSON"
++    ])
++    func malformedInputIsRejected(_ json: String) async throws {
++        try await withFile(json) { url in
++            #expect(throws: (any Error).self) { try DemoSignalReader.load(from: url) }
++        }
++    }
++}

@@ -110,6 +110,7 @@ enum ArtifactCleaningMethod: String, CaseIterable, Identifiable, Codable, Sendab
 
     var id: String { rawValue }
 
+    /// Whether this selection requests processing rather than retaining the signal as-is.
     nonisolated var removesArtifact: Bool {
         self != .doNothing
     }
@@ -144,6 +145,7 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
 
     var id: String { rawValue }
 
+    /// Whether this strategy needs a saved scalp map to define its projection or weights.
     nonisolated var requiresTopography: Bool {
         switch self {
         case .topographyGated, .topographyAligned, .topographyWeighted, .virtualChannel:
@@ -153,6 +155,7 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
         }
     }
 
+    /// Marks the less-established OBS variants for presentation in the options UI.
     nonisolated var isExperimental: Bool {
         switch self {
         case .virtualChannel, .clustered, .spatiotemporal:
@@ -162,6 +165,7 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
         }
     }
 
+    /// User-facing description of how this OBS strategy differs from standard channel-wise fitting.
     nonisolated var helpText: String {
         switch self {
         case .standard:
@@ -195,6 +199,9 @@ enum ArtifactOBSStrategy: String, CaseIterable, Identifiable, Codable, Sendable 
     }
 }
 
+/// A saved artifact definition: detected events, selected channels, and cleaning
+/// settings travel together. Detection describes where an artifact may occur;
+/// cleaning is a separate action that fits and subtracts a signal contribution.
 struct DefinedArtifact: Identifiable, Sendable, Codable {
     nonisolated static let defaultOBSComponentCount = 2
     nonisolated static let maximumOBSComponentCount = 8
@@ -329,17 +336,21 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
     var appliedMethod: ArtifactCleaningMethod?
     var cleanedAt: Date?
 
+    /// Whether saved review choices or source partitioning constrain which events are used.
     nonisolated var hasReviewedEventSelection: Bool {
         guard let reviewState else { return false }
         return !reviewState.choices.isEmpty || reviewState.sourceArtifactID != nil || reviewState.partitionsSource == true
     }
 
+    /// Resolves default PCA-S settings, forcing reviewed definitions to use their
+    /// artifact events so an automatic beat detector cannot replace the reviewed selection.
     nonisolated var effectivePCASSettings: BCGSurrogateSettings {
         var settings = pcaSSettings ?? .default
         if hasReviewedEventSelection { settings.beatSource = .artifactEvents }
         return settings
     }
 
+    /// Counts blink-estimation masks for CRD definitions and ordinary detected events otherwise.
     nonisolated var eventCount: Int {
         isCorneoRetinalDefinition ? (corneoRetinalBlinkEvents?.count ?? 0) : events.count
     }
@@ -353,18 +364,23 @@ struct DefinedArtifact: Identifiable, Sendable, Codable {
             || corneoRetinalConfiguration != nil
     }
 
+    /// Recognizes movement definitions from their type, method or saved configuration.
     nonisolated var isMovementPCADefinition: Bool {
         type == .movement
             || cleaningMethod == .movementPCA
             || movementPCAConfiguration != nil
     }
 
+    /// Recognizes muscle definitions even when only their method or configuration identifies them.
     nonisolated var isMuscleBSSCCADefinition: Bool {
         type == .muscle
             || cleaningMethod == .bssCCA
             || muscleBSSCCAConfiguration != nil
     }
 
+    /// Carries the user’s cleaning choices into a replacement detection result.
+    /// mutating permits assignment to this struct’s properties. Event detections
+    /// are not copied here; switching into/out of BCG has special method defaults.
     mutating func preserveCleaningSettings(from previous: DefinedArtifact) {
         // Crossing the BCG boundary is a method-family change, not an ordinary
         // re-scan. A newly BCG-typed definition must enter PCA-S with the new
@@ -417,16 +433,21 @@ extension DefinedArtifact {
     /// make exported files auditable and manually reproducible from the source
     /// recording.
     nonisolated func processingParameters(prefix: String) -> [String: String] {
+        /// Adds the caller’s namespace to a provenance field, unless the prefix is empty.
         func key(_ suffix: String) -> String {
             prefix.isEmpty ? suffix : "\(prefix).\(suffix)"
         }
+        /// Serializes integer arrays as comma-separated text; display channel lists add one.
         func integerList(_ values: [Int], oneBased: Bool = false) -> String {
             values.map { String(oneBased ? $0 + 1 : $0) }.joined(separator: ",")
         }
+        /// Writes numeric provenance with six decimal places for a consistent text representation.
         func fixed(_ value: Double) -> String {
             String(format: "%.6f", value)
         }
 
+        // CRD blink spans are fitting masks rather than ordinary rejection events.
+        // Use the right collection so the exported count and event times agree.
         let provenanceEvents = isCorneoRetinalDefinition ? (corneoRetinalBlinkEvents ?? []) : events
         let sortedEvents = provenanceEvents.sorted { $0.beginTimeSeconds < $1.beginTimeSeconds }
         var params: [String: String] = [
@@ -612,6 +633,8 @@ struct ArtifactCleaningSummary: Identifiable, Sendable {
     var inputRMSMicrovolts: Float? = nil
     var outputRMSMicrovolts: Float? = nil
 
+    /// Fractional RMS decrease, or nil when the input RMS cannot define a ratio.
+    /// A negative value means RMS increased; this is change magnitude, not cleaning accuracy.
     var rmsChangeFraction: Float? {
         guard let inputRMSMicrovolts, let outputRMSMicrovolts,
               inputRMSMicrovolts > 0 else { return nil }
@@ -640,6 +663,8 @@ struct OBSPCAVarianceReport: Sendable {
     var totalResidualVariance: Double
     var components: [OBSPCAComponentVariance]
 
+    /// Looks up variance explained by the first N reported components. Nonpositive
+    /// counts return zero; requests past the report’s end use its last component.
     func cumulativeVariance(for componentCount: Int) -> Double {
         guard componentCount > 0 else { return 0 }
         let index = min(componentCount, components.count) - 1
@@ -666,6 +691,7 @@ struct ArtifactCleaningProgress: Sendable {
     var phase: ArtifactCleaningProgressPhase
     var detail: String?
 
+    /// Overall progress as completed/total, using zero when no total is available.
     var fraction: Double {
         guard total > 0 else { return 0 }
         return Double(completed) / Double(total)
@@ -680,7 +706,17 @@ enum ArtifactCleaningOrdering: String, Codable, Sendable {
     case maac
 }
 
+/// Applies selected cleaning methods to detected artifact windows. Reading map:
+/// the models above describe definitions/options/results; cleanedSignal dispatches
+/// methods; later sections implement method-specific fitting and window arithmetic.
+/// Input/output samples use [channel][sample]. Method ordering matters because each
+/// method can receive samples already modified by an earlier method. Pipeline commit
+/// and downstream invalidation are handled outside this computational entry point.
 nonisolated enum ArtifactCleaner {
+    /// Estimates how much event-to-event residual variation additional OBS components
+    /// could explain, without modifying samples. Builds a shared event-by-event Gram
+    /// matrix from up to 80 windows across eligible channels. nil means no usable
+    /// windows; a report with no components means no usable residual variation.
     static func obsVarianceReport(
         for artifact: DefinedArtifact,
         in signal: MFFSignalData,
@@ -716,6 +752,8 @@ nonisolated enum ArtifactCleaner {
             )
         }
 
+        // The Gram matrix is sized by sampled events rather than samples per event.
+        // Capping the donor set keeps the eigenproblem bounded on long recordings.
         let sampledRanges = sampledRanges(from: ranges, maximumCount: 80)
         let sampledEventCount = sampledRanges.count
         var aggregateGram = Array(
@@ -777,6 +815,9 @@ nonisolated enum ArtifactCleaner {
         )
     }
 
+    /// Computes each channel’s residual Gram matrix in bounded parallel batches.
+    /// Only appending to the shared result array needs a lock; each matrix is local
+    /// to its worker. Callers supply valid channels and in-bounds, equal-length ranges.
     private static func obsVarianceContributions(
         data: [[Float]],
         channels: [Int],
@@ -816,6 +857,9 @@ nonisolated enum ArtifactCleaner {
         return contributions
     }
 
+    /// Subtracts the average event waveform, then measures similarity between every
+    /// pair of residual windows. Matrix entry [i][j] is their dot product. Returns
+    /// nil if there are fewer than two windows or negligible residual energy.
     private static func obsVarianceContribution(
         channelData: [Float],
         sampledRanges: [Range<Int>]
@@ -846,6 +890,11 @@ nonisolated enum ArtifactCleaner {
         return OBSVarianceContribution(gram: gram)
     }
 
+    /// Applies supported synchronous cleaning methods in order to a local sample copy.
+    /// Returns a new signal and summaries for methods reporting corrected channels;
+    /// the original value is preserved. Cancellation stops between artifacts and may
+    /// return partially processed data. PCA-S is handled by ArtifactCleaningExecutor
+    /// because it awaits filtering, so this synchronous path skips that method.
     static func cleanedSignal(
         from signal: MFFSignalData,
         artifacts: [DefinedArtifact],
@@ -871,6 +920,8 @@ nonisolated enum ArtifactCleaner {
             guard !Task.isCancelled else { break }
             let startingCompletedEvents = completedEvents
 
+            // These closures capture per-artifact offsets to translate local progress into
+            // whole-run progress. max prevents a later setup/finalization report moving backward.
             let reportProgress: (ArtifactCleaningProgressPhase, Int, String?) -> Void = { phase, artifactCompletedEvents, detail in
                 let boundedArtifactCompleted = min(max(artifactCompletedEvents, 0), max(artifact.eventCount, 1))
                 completedEvents = max(completedEvents, startingCompletedEvents + boundedArtifactCompleted)
@@ -1028,11 +1079,14 @@ nonisolated enum ArtifactCleaner {
         return (cleaned, summaries)
     }
 
+    /// Keeps definition order by default, or applies MAAC method priorities.
+    /// Original offsets break ties so methods of equal priority keep their order.
     static func orderedArtifacts(
         _ artifacts: [DefinedArtifact],
         ordering: ArtifactCleaningOrdering
     ) -> [DefinedArtifact] {
         guard ordering == .maac else { return artifacts }
+        /// Assigns the relative MAAC stage: spike → CRD → ordinary cleaning → movement → muscle.
         func priority(_ method: ArtifactCleaningMethod) -> Int {
             switch method {
             case .spikeTemplate: return 10
@@ -1051,6 +1105,10 @@ nonisolated enum ArtifactCleaner {
             .map(\.element)
     }
 
+    /// Runs the dedicated temporal-PCA cleaner and replaces data only when it reports
+    /// removed factors. Selected channels narrow the eligible set; empty selection
+    /// means all non-bad channels. Averaged data and failures are skipped with progress
+    /// messages. Returns the number of eligible channels after a successful correction.
     private static func applyMovementPCA(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -1094,6 +1152,10 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Runs lagged CCA muscle cleaning on eligible channels and updates data only
+    /// when components were removed. Skips averages or insufficient signal bandwidth
+    /// because classification needs the configured high-frequency muscle band.
+    /// Errors become a skip message and a zero channel count.
     private static func applyMuscleBSSCCA(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -1148,6 +1210,9 @@ nonisolated enum ArtifactCleaner {
 
     // MARK: - Methods
 
+    /// Uses the saved eye-channel selection and blink masks to run CRD regression.
+    /// inout lets the helper replace the caller’s data on success. Missing selection
+    /// or a thrown error leaves data unchanged and returns zero.
     private static func applyCorneoRetinalRegression(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -1171,6 +1236,10 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Fits each saved average waveform to each event window, then subtracts that
+    /// fitted contribution. Variable-duration events resample the template first.
+    /// Returns the number of distinct processed channels; unusable templates or
+    /// windows are skipped. This path uses readable channels with matching templates.
     private static func applyTemplateRegression(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -1426,6 +1495,8 @@ nonisolated enum ArtifactCleaner {
         let effectiveRanges = usesAMRIPreprocessing
             ? amriAlignedRanges(from: ranges, channel: original)
             : ranges
+        // The outer map preserves one slot per event; Optional.map only slices valid
+        // ranges. Keeping nil slots prevents donor indices from drifting after rejection.
         let rawEpochs: [[Float]?] = effectiveRanges.map { range in range.map { Array(original[$0]) } }
         let templateEpochs: [[Float]?] = usesAMRIPreprocessing
             ? rawEpochs.map { $0.map(meanCentered) }
@@ -1490,6 +1561,10 @@ nonisolated enum ArtifactCleaner {
         return (corrected, cleaned)
     }
 
+    /// Precomputes donor event indices and their decay weights for each target event.
+    /// Local pools exclude the target; AMRI global weighting includes it at weight one.
+    /// Distance is measured in event positions, not elapsed seconds. Invalid windows
+    /// have no donors, preserving alignment with the original event array.
     private static func localTemplateDonorPlan(
         ranges: [Range<Int>?],
         localHalfWindow: Int,
@@ -1517,6 +1592,9 @@ nonisolated enum ArtifactCleaner {
         return (donorsByEvent, weightsByEvent)
     }
 
+    /// Finds a common timing shift for one channel from the median power waveform
+    /// of interior events. Requires at least three equally sized windows; otherwise
+    /// keeps the original ranges. A shifted window outside the channel becomes nil.
     private static func amriAlignedRanges(from ranges: [Range<Int>?], channel: [Float]) -> [Range<Int>?] {
         let validRanges = ranges.compactMap { $0 }
         guard validRanges.count >= 3,
@@ -1545,6 +1623,8 @@ nonisolated enum ArtifactCleaner {
         guard let peak = medianPower.indices.max(by: { medianPower[$0] < medianPower[$1] }) else {
             return ranges
         }
+        // A peak right of center gives a positive shift: move every window later
+        // so the typical high-power feature lands nearer the new window’s center.
         let shift = peak - windowLength / 2
         guard shift != 0 else { return ranges }
 
@@ -1556,6 +1636,7 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Subtracts the temporal mean from a Float trace, leaving its fluctuations around zero.
     private static func meanCentered(_ values: [Float]) -> [Float] {
         guard !values.isEmpty else { return values }
         let mean = values.reduce(Float(0), +) / Float(values.count)
@@ -1618,6 +1699,10 @@ nonisolated enum ArtifactCleaner {
         return numer / denom
     }
 
+    /// Prepares padded event windows, eligible channels, edge taper and strategy,
+    /// then dispatches to the appropriate optimal-basis-set (OBS) implementation.
+    /// OBS fits recurring artifact shapes to each event. Returns the number of
+    /// processed channels; unusable windows/channels produce zero.
     private static func applyOBS(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -1745,6 +1830,10 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Fits a separate temporal basis per channel, then estimates each event’s
+    /// correction from immutable sample snapshots. Optional alignment shifts each
+    /// channel’s window. Overlap-add combines competing corrections before applying;
+    /// the other path subtracts each fitted window separately. Returns channel IDs.
     private static func applyChannelwiseOBS(
         artifact: DefinedArtifact,
         data: inout [[Float]],
@@ -1838,6 +1927,9 @@ nonisolated enum ArtifactCleaner {
 
                 var corrections = [OBSCorrection?](repeating: nil, count: basisCount)
                 nonisolated(unsafe) let correctionsPtr = UnsafeMutablePointer<OBSCorrection?>.allocate(capacity: basisCount)
+                // Allocate/initialize typed storage before parallel writes; each worker owns
+                // one slot. After workers finish, copy results into Swift arrays, destroy stored
+                // values with deinitialize, and release the allocation with deallocate.
                 correctionsPtr.initialize(from: &corrections, count: basisCount)
                 // aOBS: each basis may fit at its own per-channel lag, so record
                 // the range used alongside the correction for the serial apply.
@@ -1885,6 +1977,10 @@ nonisolated enum ArtifactCleaner {
         return cleanedChannels
     }
 
+    /// Ranks events by amplitude and partitions that ranking into roughly equal-size
+    /// groups, fitting channel-wise OBS separately within each group. This is rank
+    /// binning, not iterative k-means. Falls back to one ordinary OBS fit when fewer
+    /// than two groups are possible; progress combines the group-local event counts.
     private static func applyClusteredChannelwiseOBS(
         artifact: DefinedArtifact,
         data: inout [[Float]],
@@ -1931,6 +2027,8 @@ nonisolated enum ArtifactCleaner {
 
         var clusters = [[Range<Int>]](repeating: [], count: clusterCount)
         for (rank, scoredRange) in scoredRanges.enumerated() {
+            // Integer division maps ordered ranks to contiguous amplitude groups.
+            // The minimum keeps the final rank inside the last array index.
             let clusterIndex = min(rank * clusterCount / max(scoredRanges.count, 1), clusterCount - 1)
             clusters[clusterIndex].append(scoredRange.range)
         }
@@ -1963,6 +2061,10 @@ nonisolated enum ArtifactCleaner {
         return cleanedChannels
     }
 
+    /// Projects channels onto a normalized scalp map to create one virtual trace.
+    /// Fits temporal OBS on that trace, then distributes its correction back using
+    /// the same signed spatial weights. Returns no channels when the map or basis
+    /// is unusable. Overlap-add delays writes until all event corrections are ready.
     private static func applyVirtualChannelOBS(
         artifact: DefinedArtifact,
         data: inout [[Float]],
@@ -2064,6 +2166,10 @@ nonisolated enum ArtifactCleaner {
         return cleanedChannels
     }
 
+    /// Fits one joint basis over concatenated channel-by-time event windows.
+    /// Unlike channel-wise OBS, each coefficient describes a pattern across several
+    /// channels. Splits each fitted vector back into per-channel corrections, then
+    /// tapers and applies them using the selected overlap policy.
     private static func applySpatiotemporalOBS(
         artifact: DefinedArtifact,
         data: inout [[Float]],
@@ -2154,6 +2260,7 @@ nonisolated enum ArtifactCleaner {
         return cleanedChannels
     }
 
+    /// Falls back to standard OBS if the requested strategy requires a missing scalp map.
     private static func resolvedOBSStrategy(for artifact: DefinedArtifact) -> ArtifactOBSStrategy {
         let strategy = artifact.obsStrategy
         if strategy.requiresTopography, artifact.topography == nil {
@@ -2214,6 +2321,10 @@ nonisolated enum ArtifactCleaner {
         return lower..<(lower + width)
     }
 
+    /// Searches near each event for the strongest absolute match to its saved scalp
+    /// map and recenters the complete correction window there. Uses normalized spatial
+    /// patterns, so polarity reversal can still match. Missing maps or disabled search
+    /// retain the supplied ranges; no recording samples are changed.
     private static func topographyAlignedEventRanges(
         artifact: DefinedArtifact,
         data: [[Float]],
@@ -2272,6 +2383,9 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Selects usable scalp-map entries, removes their spatial mean and normalizes
+    /// them to unit length. Returns weights keyed by recording channel index, or nil
+    /// when fewer than two channels or a constant/empty map prevents projection.
     private static func topographyProjectionWeights(
         for topography: ArtifactTemplateTopography,
         channels: [Int]
@@ -2288,6 +2402,9 @@ nonisolated enum ArtifactCleaner {
         return Dictionary(uniqueKeysWithValues: zip(projectionChannels, normalized))
     }
 
+    /// Blends uniform correction strength with normalized absolute scalp-map weights.
+    /// Strength zero treats every channel equally; strength one follows the map.
+    /// An empty dictionary signals the caller to use full strength without weighting.
     private static func topographyCorrectionScales(
         for artifact: DefinedArtifact,
         channels: [Int]
@@ -2308,11 +2425,16 @@ nonisolated enum ArtifactCleaner {
         return scales
     }
 
+    /// Resolves one channel’s scale: an empty map means one; a missing key in a
+    /// nonempty map means zero. Explicit values are clamped to the interval 0...1.
     private static func channelCorrectionScale(for channel: Int, scales: [Int: Double]) -> Double {
         guard !scales.isEmpty else { return 1 }
         return min(max(scales[channel] ?? 0, 0), 1)
     }
 
+    /// Summarizes event amplitude for rank-based clustering. Uses RMS of the scalp-map
+    /// projection when available, otherwise RMS across at most the first eight channels.
+    /// This score groups similar-sized artifacts; it is not an artifact probability.
     private static func clusterScore(
         data: [[Float]],
         range: Range<Int>,
@@ -2350,6 +2472,9 @@ nonisolated enum ArtifactCleaner {
         return sqrt(energy / Double(max(count, 1)))
     }
 
+    /// Builds a mean waveform plus residual principal components from up to 60 joint
+    /// windows. Each vector contains all selected channels’ samples in channel order.
+    /// Returns nil for incompatible/empty windows or no nonzero basis vectors.
     private static func fitSpatiotemporalOBSBasis(
         data: [[Float]],
         ranges: [Range<Int>],
@@ -2374,6 +2499,9 @@ nonisolated enum ArtifactCleaner {
         return basis.isEmpty ? nil : basis
     }
 
+    /// Fits the joint basis to one event and unpacks the predicted artifact into
+    /// [channel offset][sample offset]. Offsets refer to the supplied channels array,
+    /// not global channel IDs. Returns nil if no usable basis or fit is available.
     private static func spatiotemporalCorrections(
         basis: [[Double]],
         data: [[Float]],
@@ -2387,6 +2515,8 @@ nonisolated enum ArtifactCleaner {
         guard !usableBasis.isEmpty else { return nil }
 
         let y = centeredVector(flattened)
+        // The fit acts on the whole channel-by-time vector, so coefficients are shared
+        // across channels. Unpacking below restores the original channel boundaries.
         let coefficients = coefficientsForBasis(usableBasis, y: y)
         guard coefficients.count == usableBasis.count else { return nil }
 
@@ -2410,6 +2540,9 @@ nonisolated enum ArtifactCleaner {
         return corrections
     }
 
+    /// Concatenates each selected channel’s window into a Double vector. The index
+    /// formula is channelOffset * range.count + sampleOffset; unavailable values
+    /// are filled with zero to preserve that shape.
     private static func flattenedWindow(
         data: [[Float]],
         range: Range<Int>,
@@ -2429,6 +2562,9 @@ nonisolated enum ArtifactCleaner {
         return values
     }
 
+    /// Averages corresponding positions across windows, assuming equal lengths.
+    /// Mismatched windows are skipped in the sum but still counted in the divisor;
+    /// callers must enforce consistent lengths. Empty first windows produce [].
     private static func meanDoubleWindow(_ windows: [[Double]]) -> [Double] {
         guard let count = windows.first?.count, count > 0 else { return [] }
         var mean = [Double](repeating: 0, count: count)
@@ -2444,6 +2580,9 @@ nonisolated enum ArtifactCleaner {
         return mean
     }
 
+    /// Fits independent channel bases in bounded batches, locking shared result
+    /// appends and restoring channel order afterward. Channels with no usable basis
+    /// are omitted. Progress describes completed fitting batches, not corrected events.
     private static func fitOBSChannelBases(
         data: [[Float]],
         ranges: [Range<Int>],
@@ -2499,6 +2638,9 @@ nonisolated enum ArtifactCleaner {
         return bases.sorted { $0.channel < $1.channel }
     }
 
+    /// Uses up to 80 event windows to form one channel’s average artifact shape and
+    /// principal components of deviations from that average. The mean shape is
+    /// additional to componentLimit residual components. Returns nil if no basis exists.
     private static func fitOBSChannelBasis(
         channel: Int,
         channelData: [Float],
@@ -2518,6 +2660,10 @@ nonisolated enum ArtifactCleaner {
         return OBSChannelBasis(channel: channel, basis: basis)
     }
 
+    /// Estimates dominant spatial patterns from event-window covariance and removes
+    /// their projections within the event windows. Unlike OBS temporal bases, these
+    /// components have one value per selected channel. Uses at most the requested
+    /// positive-eigenvalue components and returns the number of processed channels.
     private static func applySSPPCA(
         artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -2645,6 +2791,8 @@ nonisolated enum ArtifactCleaner {
 
     // MARK: - Basis fitting
 
+    /// Convenience subtraction with uniform taper and no optional baseline preservation.
+    /// The shared smoothing helper still forces the fitted correction’s endpoints to zero.
     private static func subtractBasis(_ basis: [[Double]], from channel: inout [Float], in range: Range<Int>) {
         let taper = [Double](repeating: 1, count: range.count)
         subtractBasis(
@@ -2657,6 +2805,9 @@ nonisolated enum ArtifactCleaner {
         )
     }
 
+    /// Fits a temporal basis inside an in-bounds range and subtracts the tapered
+    /// correction in place. No usable fit means no change. The range is half-open:
+    /// its lower endpoint is included, its upper endpoint is excluded.
     private static func subtractBasis(
         _ basis: [[Double]],
         from channel: inout [Float],
@@ -2679,6 +2830,10 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Fits a linear combination of compatible, nonzero basis vectors to a centered
+    /// event trace. Optionally removes baseline drift, then returns tapered values
+    /// and taper weights for subtraction/accumulation. Does not mutate the channel;
+    /// nil means there was no compatible basis, taper or solvable coefficient system.
     private static func fittedCorrection(
         basis: [[Double]],
         from channel: [Float],
@@ -2713,6 +2868,10 @@ nonisolated enum ArtifactCleaner {
         )
     }
 
+    /// Solves a small regularized least-squares system for basis amplitudes.
+    /// The Gram matrix contains pairwise basis dot products; the right side contains
+    /// each basis vector’s match to y. Diagonal regularization stabilizes nearly
+    /// dependent shapes. Returns [] when the linear solver cannot produce a result.
     private static func coefficientsForBasis(_ basis: [[Double]], y: [Double]) -> [Double] {
         let count = basis.count
         var gram = Array(repeating: [Double](repeating: 0, count: count), count: count)
@@ -2728,11 +2887,16 @@ nonisolated enum ArtifactCleaner {
         }
 
         for index in 0..<count {
+            // Add a small ridge to avoid an unstable solve when two basis shapes are
+            // nearly identical. The absolute floor also handles tiny diagonal entries.
             gram[index][index] += max(abs(gram[index][index]) * 1e-6, 1e-9)
         }
         return LinearAlgebra.solveLinearSystem(gram, rhs) ?? []
     }
 
+    /// Projects each sample’s spatial channel vector onto the selected components.
+    /// The across-channel mean is removed before projection. Returns the contribution
+    /// to subtract as [channel offset][sample offset], without changing data.
     private static func sspCorrections(
         data: [[Float]],
         range: Range<Int>,
@@ -2767,6 +2931,9 @@ nonisolated enum ArtifactCleaner {
         return corrections
     }
 
+    /// Prepares a correction for safe joins at event boundaries: optionally detrend,
+    /// force endpoints to zero, then multiply by the taper. Retains taper weights for
+    /// later overlap normalization. Empty or mismatched arrays return nil.
     private static func smoothedWindowCorrection(
         _ values: [Double],
         taper: [Double],
@@ -2785,6 +2952,9 @@ nonisolated enum ArtifactCleaner {
 
     // MARK: - Window helpers
 
+    /// Chooses the fixed core window: use the saved average’s width when appropriate,
+    /// otherwise convert the editable seconds setting to at least three samples.
+    /// Reviewed/threshold definitions retain their explicit window setting.
     private static func windowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {
         // Threshold definitions own an explicit editable window; a replay-
         // derived average must not silently override a later window change.
@@ -2795,16 +2965,21 @@ nonisolated enum ArtifactCleaner {
         return max(Int((artifact.windowSizeSeconds * signal.samplingRate).rounded()), 3)
     }
 
+    /// Bounds parallel channel work by the item count and the application-wide worker limit.
     private static func workerCount(for itemCount: Int) -> Int {
         guard itemCount > 1 else { return 1 }
         return min(itemCount, evaMaxWorkers)
     }
 
+    /// Converts a sample count to rounded milliseconds for progress text; invalid rate gives zero.
     private static func milliseconds(for sampleCount: Int, samplingRate: Double) -> Int {
         guard samplingRate > 0 else { return 0 }
         return Int((Double(sampleCount) / samplingRate * 1000).rounded())
     }
 
+    /// Returns a half-open sample range centered on the event, optionally padded for
+    /// tapering. By default the whole range must fit the signal. With that requirement
+    /// disabled it may extend outside the recording, so it must not be indexed directly.
     static func correctionWindow(
         for event: MFFEvent, artifact: DefinedArtifact, signal: MFFSignalData,
         includesTaper: Bool = true,
@@ -2824,12 +2999,15 @@ nonisolated enum ArtifactCleaner {
                            samplingRate: signal.samplingRate)
     }
 
+    /// Adds one taper margin on each side of the fixed artifact core window.
     private static func obsPaddedWindowSamples(for artifact: DefinedArtifact, signal: MFFSignalData) -> Int {
         let windowSamples = windowSamples(for: artifact, signal: signal)
         let edgeSamples = obsEdgeTaperSamples(for: artifact, signal: signal, windowSamples: windowSamples)
         return max(windowSamples + 2 * edgeSamples, windowSamples)
     }
 
+    /// Converts taper seconds to samples, bounded by the configured maximum and
+    /// less than half the core window. A nonpositive sample rate disables the taper.
     private static func obsEdgeTaperSamples(
         for artifact: DefinedArtifact,
         signal: MFFSignalData,
@@ -2844,6 +3022,8 @@ nonisolated enum ArtifactCleaner {
         return min(max(requested, 0), max(windowSamples / 2 - 1, 0))
     }
 
+    /// Converts the event’s center time to a rounded sample index and asks the
+    /// integer overload for a complete window; invalid timing/length returns nil.
     private static func eventWindow(
         event: MFFEvent,
         windowSamples: Int,
@@ -2855,6 +3035,8 @@ nonisolated enum ArtifactCleaner {
         return eventWindow(centerSample: center, windowSamples: windowSamples, sampleCount: sampleCount)
     }
 
+    /// Builds a fixed-length half-open range around a sample center. Rejects windows
+    /// crossing recording boundaries rather than truncating them, preserving fit dimensions.
     private static func eventWindow(
         centerSample: Int,
         windowSamples: Int,
@@ -2867,10 +3049,13 @@ nonisolated enum ArtifactCleaner {
         return start..<end
     }
 
+    /// Copies a deterministic subset of valid ranges from one channel for basis fitting.
     private static func sampledWindows(from channel: [Float], ranges: [Range<Int>], maximumCount: Int) -> [[Float]] {
         sampledRanges(from: ranges, maximumCount: maximumCount).map { Array(channel[$0]) }
     }
 
+    /// Selects evenly spaced positions from the ordered range list when it exceeds
+    /// a positive cap. No randomness is used. A nonpositive cap leaves the list unchanged.
     private static func sampledRanges(from ranges: [Range<Int>], maximumCount: Int) -> [Range<Int>] {
         guard ranges.count > maximumCount, maximumCount > 0 else {
             return ranges
@@ -2882,6 +3067,8 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Returns weights rising smoothly from zero at both edges to one in the core.
+    /// Zero edge length produces all ones; an empty window produces [].
     private static func raisedCosineTaper(count: Int, edgeSamples: Int) -> [Double] {
         guard count > 0 else { return [] }
         guard edgeSamples > 0 else { return [Double](repeating: 1, count: count) }
@@ -2894,6 +3081,9 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Removes a straight-line trend estimated from short averages at both ends
+    /// of the correction. This changes the proposed subtraction, not the raw signal,
+    /// so the correction is less likely to introduce an offset or drift at its joins.
     private static func preserveLocalBaseline(in correction: inout [Double], edgeTaperSamples: Int) {
         guard correction.count > 2 else { return }
         let anchorCount = min(max(edgeTaperSamples, 1), max(correction.count / 4, 1))
@@ -2908,6 +3098,8 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Subtracts the line joining the correction’s exact endpoints, making both zero.
+    /// This final boundary constraint is applied even when baseline preservation is off.
     private static func forceZeroAtBoundaries(_ correction: inout [Double]) {
         guard correction.count > 1 else { return }
         let start = correction.first ?? 0
@@ -2920,6 +3112,8 @@ nonisolated enum ArtifactCleaner {
         }
     }
 
+    /// Computes a Double mean for any Sequence, including array slices, without a copy.
+    /// Returns zero for an empty sequence; does not filter nonfinite inputs.
     private static func mean<S: Sequence>(_ values: S) -> Double where S.Element == Double {
         var total = 0.0
         var count = 0.0
@@ -2932,6 +3126,9 @@ nonisolated enum ArtifactCleaner {
 
     // MARK: - PCA helpers
 
+    /// Extracts dominant temporal directions from equally sized residual event traces.
+    /// Solves the smaller event-by-event Gram matrix, maps eigenvectors back to sample
+    /// space and centers/normalizes them. Returns only usable components, up to the cap.
     private static func principalComponents(from residuals: [[Double]], maximumCount: Int) -> [[Double]] {
         guard let sampleCount = residuals.first?.count,
               residuals.count > 1,
@@ -2969,6 +3166,8 @@ nonisolated enum ArtifactCleaner {
                 }
             }
 
+            // An event-space eigenvector is not yet a sample waveform. Multiplying by
+            // residual traces above maps it back; division by sqrt(eigenvalue) rescales it.
             let scale = sqrt(eigenvalue)
             if scale > 1e-12 {
                 for sample in vector.indices {
@@ -2983,6 +3182,8 @@ nonisolated enum ArtifactCleaner {
         return components
     }
 
+    /// Builds the residual event Gram matrix and returns its largest positive eigenvalues.
+    /// These measure residual energy; no sample-count normalization is applied here.
     private static func principalComponentEigenvalues(from residuals: [[Double]], maximumCount: Int) -> [Double] {
         guard let sampleCount = residuals.first?.count,
               sampleCount > 0,
@@ -3004,6 +3205,8 @@ nonisolated enum ArtifactCleaner {
         return principalComponentEigenvalues(fromGram: gram, maximumCount: maximumCount)
     }
 
+    /// Returns the largest positive eigenvalues of a square Gram matrix, up to the
+    /// requested limit. Invalid shape, no requested components or solver failure gives [].
     private static func principalComponentEigenvalues(fromGram gram: [[Double]], maximumCount: Int) -> [Double] {
         guard maximumCount > 0,
               !gram.isEmpty,
@@ -3021,6 +3224,9 @@ nonisolated enum ArtifactCleaner {
             .map { $0 }
     }
 
+    /// Estimates a channel-by-channel covariance-like matrix using regularly spaced
+    /// samples from each event. Each spatial vector is mean-centered across channels,
+    /// then its outer product is accumulated and divided by the sampled-point count.
     private static func spatialCovariance(
         data: [[Float]],
         ranges: [Range<Int>],
@@ -3064,6 +3270,9 @@ nonisolated enum ArtifactCleaner {
 
     // MARK: - Small linear algebra
 
+    /// Float counterpart of meanDoubleWindow: averages corresponding sample offsets.
+    /// Callers provide equal-length windows; mismatches are skipped in the sum but
+    /// remain in the divisor. An empty first window yields [].
     private static func meanWindow(_ windows: [[Float]]) -> [Float] {
         guard let count = windows.first?.count, count > 0 else { return [] }
         var mean = [Float](repeating: 0, count: count)
@@ -3079,20 +3288,25 @@ nonisolated enum ArtifactCleaner {
         return mean
     }
 
+    /// Converts a Float trace to Double before subtracting its temporal mean.
     private static func centeredVector(_ samples: [Float]) -> [Double] {
         centeredVector(samples.map(Double.init))
     }
 
+    /// Returns a copy with its mean removed; empty input stays empty.
     private static func centeredVector(_ samples: [Double]) -> [Double] {
         guard !samples.isEmpty else { return [] }
         let mean = samples.reduce(0, +) / Double(samples.count)
         return samples.map { $0 - mean }
     }
 
+    /// Converts Float samples to Double, then centers and normalizes the vector.
     private static func centeredUnitVector(_ samples: [Float]) -> [Double] {
         centeredUnitVector(samples.map(Double.init))
     }
 
+    /// Removes the mean and scales to Euclidean length one. Constant or negligible
+    /// energy returns [] so callers can reject an unusable fitting direction.
     private static func centeredUnitVector(_ samples: [Double]) -> [Double] {
         var centered = centeredVector(samples)
         let norm = sqrt(SignalStatistics.vectorEnergy(centered))
@@ -3103,6 +3317,7 @@ nonisolated enum ArtifactCleaner {
         return centered
     }
 
+    /// Applies the same centering/normalization to values across channels at one time.
     private static func normalizedSpatial(_ values: [Double]) -> [Double] {
         centeredUnitVector(values)
     }
@@ -3113,6 +3328,8 @@ nonisolated private struct OBSCorrection {
     var weightedValues: [Double]
     var weights: [Double]
 
+    /// Scales a correction’s amplitude while preserving its overlap weights.
+    /// Scaling weights too would cancel the intended amplitude change during normalization.
     func scaled(by scale: Double) -> OBSCorrection {
         guard abs(scale - 1) > 1e-12 else { return self }
         return OBSCorrection(
@@ -3135,11 +3352,15 @@ nonisolated private final class OBSCorrectionAccumulator {
     private var weightedValues: [Double]
     private var weights: [Double]
 
+    /// Allocates full-channel sum/weight buffers initialized to zero for overlap-add.
     init(sampleCount: Int) {
         weightedValues = [Double](repeating: 0, count: sampleCount)
         weights = [Double](repeating: 0, count: sampleCount)
     }
 
+    /// Accumulates one window’s already-weighted correction and its taper weights.
+    /// The caller supplies an in-bounds nonnegative range and exclusive access to this
+    /// accumulator; the class does not lock. Incompatible shapes are ignored.
     func add(_ correction: OBSCorrection, in range: Range<Int>) {
         guard correction.weightedValues.count == range.count,
               correction.weights.count == range.count,
@@ -3154,9 +3375,14 @@ nonisolated private final class OBSCorrectionAccumulator {
         }
     }
 
+    /// Subtracts accumulated corrections in place. Where several windows overlap,
+    /// dividing by their total weight prevents repeated full-strength subtraction.
+    /// The divisor never falls below one, preserving a lone window’s edge taper.
     func apply(to channel: inout [Float]) {
         let count = min(channel.count, weightedValues.count)
         for sample in 0..<count where weights[sample] > 0 {
+            // Do not divide a single taper value back out: weights below one are the
+            // intentional fade at the boundary, while sums above one indicate overlap.
             let divisor = max(weights[sample], 1)
             channel[sample] -= Float(weightedValues[sample] / divisor)
         }

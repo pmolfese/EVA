@@ -12,7 +12,13 @@
 
 import SwiftUI
 
+/// Provides setup, detection, and acceptance UI for MAAC-1 saccadic spike potentials.
+/// These are brief saccade-related transients. The detector supplies events and a
+/// spatial template; the cleaning sheet applies the resulting artifact definition.
 extension WaveformView {
+    /// Clears the last detection result, suggests Cz/EOG roles from the recording’s
+    /// sensor layout, and opens the sheet. Bad and interpolated channels are excluded
+    /// from automatic selection; failures are shown as status text for manual review.
     func openSaccadicSpikeSheet(for signal: MFFSignalData) {
         saccadicSpike.result = nil
         saccadicSpike.statusMessage = nil
@@ -32,6 +38,9 @@ extension WaveformView {
         saccadicSpike.showsSheet = true
     }
 
+    /// Builds the template/threshold controls, channel-role fields, and detection preview.
+    /// SwiftUI reevaluates this hierarchy as state changes; Detect and Use actions
+    /// start processing and accept results separately from constructing the view.
     func saccadicSpikeSheet(for signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 5) {
@@ -177,6 +186,8 @@ extension WaveformView {
                     useDetectedSaccadicSpikes(in: signal)
                 }
                 .keyboardShortcut(.defaultAction)
+                // Optional chaining yields nil when there is no result. Comparing with false
+                // therefore disables Use both for missing results and for an empty event list.
                 .disabled(saccadicSpike.isDetecting || saccadicSpike.result?.events.isEmpty != false)
             }
             .padding(20)
@@ -184,6 +195,8 @@ extension WaveformView {
         .frame(width: 620, height: 720)
     }
 
+    /// Builds a labeled channel-entry field. Binding<String> links its text to the
+    /// parent’s state, so edits propagate without this helper owning a separate copy.
     @ViewBuilder
     private func channelRoleRow(_ title: String, text: Binding<String>, placeholder: String) -> some View {
         HStack {
@@ -195,6 +208,7 @@ extension WaveformView {
         }
     }
 
+    /// Builds a label/value card for candidate count, confirmed count, or threshold.
     private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
@@ -208,10 +222,15 @@ extension WaveformView {
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
     }
 
+    /// Converts internal zero-based channel indices to one-based numbers for display.
     private func channelList(_ indices: [Int]) -> String {
         indices.map { String($0 + 1) }.joined(separator: ", ")
     }
 
+    /// Parses user-facing channel lists into zero-based indices, taking the first Cz
+    /// entry as reference. Removes excluded and horizontal-EOG channels from the
+    /// spatial analysis set, then validates all role assignments. Throws for missing
+    /// Cz or invalid selection so detection can show a useful status message.
     private func currentSaccadicSpikeSelection(
         signal: MFFSignalData,
         excluding excluded: Set<Int>
@@ -244,6 +263,10 @@ extension WaveformView {
         ).validated(channelCount: signal.numberOfChannels)
     }
 
+    /// Validates channel roles, maps the canonical template when requested, and runs
+    /// the detector in a detached task. Publishes events/topography only if the parent
+    /// task is still active and the recording session matches. Failures become status
+    /// text; no cleaning definition is installed until the user accepts the result.
     private func detectSaccadicSpikes(in signal: MFFSignalData) {
         let excluded = channels.bad.union(channels.interpolated.keys)
         let selection: SaccadicSpikeChannelSelection
@@ -256,6 +279,8 @@ extension WaveformView {
         }
 
         let configuration = saccadicSpike.configuration
+        // Only canonical mode loads a predefined spatial map. Passing nil lets the
+        // detector derive a recording-specific template in the other mode.
         let canonical: [Float]?
         do {
             canonical = configuration.templateSource == .canonical
@@ -272,6 +297,10 @@ extension WaveformView {
         saccadicSpike.result = nil
         saccadicSpike.statusMessage = "Scanning the Cz-referenced derivative…"
         let sessionID = recordingSessionID
+        // The outer task inherits the UI actor; the detached task performs the
+        // expensive scan. Result turns thrown errors into a value for the switch below.
+        // Cancelling the outer task prevents publication but does not automatically
+        // cancel this detached worker.
         saccadicSpike.detectionTask = Task {
             let outcome = await Task.detached(priority: .userInitiated) {
                 Result {
@@ -283,6 +312,8 @@ extension WaveformView {
                     )
                 }
             }.value
+            // A recording may have changed while awaiting the worker. Avoid showing
+            // old events on the newly opened recording.
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
             switch outcome {
             case .success(let result):
@@ -299,6 +330,10 @@ extension WaveformView {
         }
     }
 
+    /// Builds an event average and adds or replaces the saccadic-spike artifact
+    /// definition using detected events and topography. Refreshes marker visibility,
+    /// invalidates prior cleaning/variance caches, and opens the cleaning sheet.
+    /// It does nothing without confirmed events; applying correction is a later step.
     private func useDetectedSaccadicSpikes(in signal: MFFSignalData) {
         guard let result = saccadicSpike.result, !result.events.isEmpty else { return }
         let selectedChannels = result.topography.channelIndices
@@ -325,6 +360,8 @@ extension WaveformView {
             cleanedAt: nil
         )
 
+        // Reuse the definition’s identity when revising this result so repeated
+        // acceptance updates one artifact instead of appending duplicates.
         if let index = template.definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
             template.definedArtifacts[index] = artifact
         } else {
@@ -334,6 +371,8 @@ extension WaveformView {
         saccadicSpike.definedArtifactID = artifact.id
         artifactVM.events = definedArtifactEventList()
         selectedEventCodes = [artifact.eventCode]
+        // The event set/template may have changed, making earlier derived variance
+        // and cleaned-signal caches obsolete even when the artifact ID stayed the same.
         invalidateOBSVarianceCache(for: artifact.id)
         clearAppliedArtifactCleaning()
         artifactVM.cleaningStatusMessage = "Added \(artifact.eventCount) saccadic spike potentials."

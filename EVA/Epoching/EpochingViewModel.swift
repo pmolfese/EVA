@@ -68,6 +68,8 @@ struct JointPlotMarker: Identifiable, Hashable, Sendable {
     /// computed from just its own values instead of every marker's.
     var scaleMode: EpochingViewModel.TopomapScaleMode?
 
+    /// Creates a marker with a stable identity and epoch-relative sample position.
+    /// No clamping occurs here; updateJointMarker handles bounds when moving it.
     init(id: UUID = UUID(), relativeSample: Int, scaleMode: EpochingViewModel.TopomapScaleMode? = nil) {
         self.id = id
         self.relativeSample = relativeSample
@@ -125,6 +127,8 @@ nonisolated struct CategoryRegexRule: Identifiable, Codable, Hashable, Sendable 
             if chars[i] == "$", i + 1 < chars.count, chars[i + 1].isNumber {
                 var j = i + 1
                 var digits = ""
+                // Read the whole digit sequence so $12 refers to group twelve rather than
+                // group one followed by a literal 2. Swift regex output index zero is the whole match.
                 while j < chars.count, chars[j].isNumber {
                     digits.append(chars[j])
                     j += 1
@@ -154,6 +158,7 @@ final class EpochingViewModel {
 
         var id: String { rawValue }
 
+        /// SF Symbol used for each averaged-data presentation mode.
         var systemImage: String {
             switch self {
             case .waveform: return "waveform.path.ecg"
@@ -168,6 +173,8 @@ final class EpochingViewModel {
     /// `FilterViewModel.store` for the rationale (RecordingStore direct-injection pass).
     let store: RecordingStore
 
+    /// Connects the view model to the recording store that owns channel decisions.
+    /// Configuration starts from the stored-property defaults in this type.
     init(store: RecordingStore) {
         self.store = store
     }
@@ -202,7 +209,10 @@ final class EpochingViewModel {
     /// When averaging, pause after epoch creation so the operator can review
     /// the channel × epoch evidence and see exactly what enters the average.
     var usesDecisionMatrix = false
+    /// Whether averaging should pause in the modal decision-matrix review UI.
     var presentsPSADecisionMatrixSheet: Bool { averageOnApply && usesDecisionMatrix }
+    /// Whether epoch decisions are deferred to review: always for unaveraged epochs,
+    /// and for averages when the decision matrix is enabled.
     var defersPSADecisionsForReview: Bool { !averageOnApply || usesDecisionMatrix }
     var decisionMatrix: PSADecisionMatrixModel?
     var showsDecisionMatrix = false
@@ -210,6 +220,9 @@ final class EpochingViewModel {
     /// uses the independent floating panel instead.
     var decisionMatrixIsInSheet = false
     var decisionMatrixNeedsRefresh = false
+    /// Snapshots the cheap rejection-rule settings used to detect stale matrix decisions.
+    /// This identity excludes expensive waveform/health evidence so opening a sheet
+    /// does not unnecessarily recompute that evidence.
     var decisionMatrixRejectionSettings: PSAReviewRejectionSettings {
         .init(segmentField: segmentField.rawValue, skipsArtifacts: skipIfContainsArtifact,
               policy: artifactRejectionPolicy, skipsBlinks: skipEyeBlinks,
@@ -442,10 +455,14 @@ final class EpochingViewModel {
         jointPlotMarkers.append(JointPlotMarker(relativeSample: relativeSample))
     }
 
+    /// Deletes the marker with this stable ID. Other markers keep their identities
+    /// and sample positions, so SwiftUI can retain their views during updates.
     func removeJointMarker(_ id: UUID) {
         jointPlotMarkers.removeAll { $0.id == id }
     }
 
+    /// Moves a known marker to a sample within 0…epochLength−1. Unknown IDs
+    /// are ignored; a nonpositive epoch length clamps the position to zero.
     func updateJointMarker(_ id: UUID, relativeSample: Int, epochLength: Int) {
         guard let index = jointPlotMarkers.firstIndex(where: { $0.id == id }) else { return }
         jointPlotMarkers[index].relativeSample = min(max(relativeSample, 0), max(epochLength - 1, 0))
@@ -512,10 +529,14 @@ final class EpochingViewModel {
         overlaySelectedCategories.isEmpty ? Set(available) : overlaySelectedCategories.intersection(available)
     }
 
+    /// Tests membership after resolving the empty-selection shorthand to all available categories.
     func isOverlaySelected(_ category: String, available: [String]) -> Bool {
         overlayCategories(available: available).contains(category)
     }
 
+    /// Toggles one category in the resolved overlay set while keeping at least one
+    /// selection. If removing the last category would empty the set, that category
+    /// is retained instead of accidentally switching the empty-means-all sentinel on.
     func toggleOverlayCategory(_ category: String, available: [String]) {
         var current = overlayCategories(available: available) // resolves "all" first
         if current.contains(category) { current.remove(category) } else { current.insert(category) }
@@ -538,7 +559,7 @@ final class EpochingViewModel {
         return lower...max(lower, upper)
     }
 
-    /// True when the configured bounds are inverted, so the UI can say so
+    /// True when the configured end is at or before its start, so the UI can say so
     /// instead of silently rejecting nothing.
     var artifactRejectionWindowIsInverted: Bool {
         limitsArtifactRejectionWindow && artifactRejectionWindowEnd <= artifactRejectionWindowStart
@@ -552,6 +573,10 @@ final class EpochingViewModel {
         artifactRejectionWindowEnd = postStimulus
     }
 
+    /// Builds the portable string parameters used by segment-step export/replay.
+    /// Times are serialized in milliseconds where the key ends in Ms; category
+    /// and timing mappings use prefixed keys. Session-only display state is omitted.
+    /// This packages settings; the caller writes the processing step/XML.
     var parameters: [String: String] {
         var p: [String: String] = [
             // Which field the segmentation reads. Both apply paths branch on it
@@ -629,6 +654,10 @@ final class EpochingViewModel {
     /// Event codes are portable when the target recording has the same codes;
     /// DIN pairings are portable when the target also has the paired marker
     /// code's events (`makeBuildJob` already validates that at apply time).
+    /// Restores recognized settings from a processing-step dictionary. Most absent
+    /// or unparseable fields retain their current value; MRI rejection and the
+    /// limited artifact-window flag explicitly reset when their keys are absent.
+    /// This is a selective restore, not a reset of every stored property.
     func apply(parameters p: [String: String]) {
         // Absent means a pre-audit script, which could only have been `.code` —
         // that was the only value `parameters` was capable of describing.
@@ -683,6 +712,8 @@ final class EpochingViewModel {
         if !groups.isEmpty { categoryGroups = groups }
 
         var rules = [String: CategoryRegexRule]()
+        // Flattened keys such as categoryRegex.2.pattern identify one rule. Gather
+        // those numeric IDs first, then rebuild each complete rule from its fields.
         let regexIndices = Set(p.keys.compactMap { key -> Int? in
             guard key.hasPrefix("categoryRegex.") else { return nil }
             return Int(key.dropFirst("categoryRegex.".count).prefix(while: \.isNumber))
@@ -729,6 +760,9 @@ final class EpochingViewModel {
         }
     }
 
+    /// Maps checked segment values to their category names and additional named groups.
+    /// Returns nil when a selected code has an empty category name; ignores blank
+    /// group names. Regex-only categories are supplied separately in makeBuildJob.
     private func selectedCategoriesByCode() -> [String: [String]]? {
         var categoriesByCode = [String: [String]]()
         for code in selectedEventCodes {
@@ -790,6 +824,10 @@ final class EpochingViewModel {
     /// SwiftData markers off the view — those are passed in (or default to
     /// empty/off, which degrades gracefully: no defined-artifact rejection,
     /// no per-epoch-interpolation donor positions).
+    /// Validates category names, timing-marker pairings, event selection, and readable
+    /// samples, returning nil with status text when they are unusable. Converts epoch
+    /// seconds to samples and snapshots inputs for background work. This creates the
+    /// job; it does not build epoch sample arrays yet.
     func makeBuildJob(
         from signal: MFFSignalData,
         events allEvents: [MFFEvent],
@@ -834,6 +872,8 @@ final class EpochingViewModel {
             statusMessage = "Epoch duration must be greater than zero."
             return nil
         }
+        // When segmenting ON artifacts, rejecting epochs for containing those same
+        // artifacts would discard the events being studied. Disable that rejection path.
         let skipArtifacts = skipIfContainsArtifact && segmentField != .artifact
         let regexRules = Array(categoryRegexRules.values)
         return PSABuildJob(
@@ -861,19 +901,6 @@ final class EpochingViewModel {
         )
     }
 
-    /// Headless build → (average) → post-process for `job`, writing results
-    /// into this VM. Returns the final signal, or `nil` if nothing survived.
-    ///
-    /// Unlike `WaveformView.applyPSACore`, this has no `recordingSessionID`
-    /// staleness guard (safe — it only ever writes to `self`; see
-    /// `GradientViewModel.apply` for why a one-shot headless caller doesn't
-    /// need one), doesn't cache the raw pre-average epochs for later
-    /// re-toggling (`segmentedEpochSignal`/`segmentedEpochSegments` are a
-    /// `WaveformView`-only *display* cache), and doesn't escalate per-epoch
-    /// bad channels to globally-bad + interpolate (that reaches into
-    /// `WaveformView.interpolate(_:in:)`, which needs live electrode geometry
-    /// and updates view-only status text — a live-view-only feature, not
-    /// meaningful for a one-shot headless run).
     /// Result of the shared PSA sequence: the raw per-trial build and the
     /// post-processed (optionally averaged) output.
     struct PSAApplyOutcome {
@@ -964,6 +991,8 @@ final class EpochingViewModel {
         let progressLower = min(max(progressRange.lowerBound, 0), 1)
         let progressUpper = min(max(progressRange.upperBound, progressLower), 1)
         let progressSpan = progressUpper - progressLower
+        /// Maps a local phase fraction into the caller’s reserved overall progress interval,
+        /// clamping the local value to 0…1 before publishing it.
         func setProgress(_ fraction: Double) {
             segmentingProgress = progressLower + progressSpan * min(max(fraction, 0), 1)
         }
@@ -976,6 +1005,9 @@ final class EpochingViewModel {
             let buildShare = shouldAverage ? 0.70 : 0.75
             self?.segmentingProgress = progressLower + progressSpan * buildShare * update.fraction
         }
+        // Snapshot jobs can run away from MainActor. Progress crosses back through
+        // ProgressBridge; explicit cancellation handlers below forward cancellation
+        // because detached tasks do not automatically inherit it.
         let buildWorker = Task.detached(priority: .userInitiated) {
             await job.buildEpochs { completed, total in
                 progressContinuation.yield(EpochBuildProgress(completed: completed, total: total))
@@ -1019,6 +1051,8 @@ final class EpochingViewModel {
             let averageWorker = Task.detached(priority: .userInitiated) {
                 built.average(colorIndices: colorIndices, excludedIndices: excluded)
             }
+            // Averaging creates new category segments. Keep built separately so later
+            // SNR and rejection reporting can still inspect the original individual trials.
             let averagedOpt = await withTaskCancellationHandler(
                 operation: { await averageWorker.value },
                 onCancel: { averageWorker.cancel() }
@@ -1065,6 +1099,9 @@ final class EpochingViewModel {
         // Only meaningful when averaging: an exclusion removes a trial from an
         // average, and there is no average to remove it from otherwise.
         trialExclusionResolution = wasAveraged ? resolution : nil
+        // Success returns the computed outcome to its caller, which still owns
+        // publication, SNR scheduling, and clearing the applying flags. Early failures
+        // above clear those flags here because there is no outcome to publish.
         setProgress(1)
         return PSAApplyOutcome(
             built: built,
@@ -1083,6 +1120,12 @@ final class EpochingViewModel {
         segmentingProgress = nil
     }
 
+    /// Runs the shared build/average/post-process sequence for headless callers, then
+    /// publishes raw/final epoch caches, SNR, exclusions, and status. Awaits SNR before
+    /// returning so exports can include it. When continuousSignal is supplied, also
+    /// escalates persistent channel failures and patches the returned/stored epochs.
+    /// Returns nil if the shared sequence fails; there is no recording-session guard
+    /// here, so the caller must own this model for the operation’s lifetime.
     func applyBuildJob(
         _ job: PSABuildJob,
         averageReference: Bool,
@@ -1169,6 +1212,9 @@ final class EpochingViewModel {
 
         // Promote persistently-bad channels to globally bad and interpolate them.
         var resultSignal = finalResult.signal
+        // Global interpolation needs original continuous donors and electrode
+        // positions, not only concatenated epochs. Without that optional input this
+        // headless publication path does not attempt escalation.
         if let continuousSignal {
             let escalation = await PSABadChannelEscalation.escalate(
                 counts: epochBadChannelCounts,
@@ -1201,6 +1247,10 @@ final class EpochingViewModel {
         return resultSignal
     }
 
+    /// Clears recording-specific selections, review state, results, and many display
+    /// choices when closing a recording. This is not a full reinitialization of all
+    /// processing parameters or every cache; surrounding close/invalidation code
+    /// handles the rest of the recording lifecycle.
     func resetForClose() {
         showsSheet = false
         showsDecisionMatrix = false

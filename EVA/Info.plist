@@ -11,7 +11,7 @@
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.egi.mff</string>
+				<string>com.egi.mffrecording</string>
 			</array>
 			<key>LSTypeIsPackage</key>
 			<true/>
@@ -169,7 +169,7 @@
 			<key>UTTypeDescription</key>
 			<string>EGI MFF Recording</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.egi.mff</string>
+			<string>com.egi.mffrecording</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

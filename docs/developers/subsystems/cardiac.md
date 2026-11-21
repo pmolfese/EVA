@@ -35,3 +35,14 @@ surrogate head model, keep it consistent with the generator in
 `EVACore/Simulation` so simulator truth still validates the corrector. ICA also
 consumes beat timing for cardiac components — see
 [ica.md](ica.md) (`BCGComponentLabeller`).
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [BCGDurationEstimator.swift](../../../EVA/Cardiac/BCGDurationEstimator.swift) | Estimates the temporal support of cardiac artifacts. |
+| [PCASRunGrade.swift](../../../EVA/Cardiac/PCASRunGrade.swift) | Measures and classifies the quality of a PCA-S correction run. |

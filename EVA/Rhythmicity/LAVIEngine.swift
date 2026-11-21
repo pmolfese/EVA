@@ -4,6 +4,11 @@
 //
 //  Developed by P. Molfese, National Institutes of Health (NIH).
 //
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+//
 //  Segment-aware Local Auto-correlated Vector Index reduction.
 //
 //  Karvat, G., Crespo-García, M., Vishne, G., Anderson, M. C., & Landau, A. N.
@@ -14,7 +19,14 @@
 
 import Foundation
 
+/// Measures frequency-dependent temporal structure from valid signal segments.
+/// Read analyze for backend fallback, analyzeOnce for orchestration, and the
+/// coefficient providers for convolution. The engine returns analysis results;
+/// it does not replace recording samples or commit a cleaning operation.
 nonisolated enum LAVIEngine {
+    /// Run LAVI analysis with optional injected coefficient provider and significance cache.
+    /// If an internally selected Metal provider fails, retry the complete analysis on CPU
+    /// and attach a warning. A supplied provider owns its errors and is not replaced.
     static func analyze(
         input: RhythmicityInput,
         configuration: RhythmicityConfiguration,
@@ -70,6 +82,12 @@ nonisolated enum LAVIEngine {
         }
     }
 
+    // Stage map: validate → resolve backend → split into finite runs → obtain
+    // coefficients/reduce each channel → optional significance → assemble results.
+    // Finite runs are kept separate so a gap does not become artificial continuity.
+    /// Perform one backend attempt: validate, transform each finite run, reduce lagged
+    /// coefficients, optionally estimate significance and assign rhythmic frequency bands.
+    /// Return provenance and warnings alongside values; cancellation throws.
     private static func analyzeOnce(
         input: RhythmicityInput,
         configuration: RhythmicityConfiguration,
@@ -379,6 +397,9 @@ nonisolated enum LAVIEngine {
         )
     }
 
+    /// Compute one result per requested frequency, preserving configuration order.
+    /// Production FFT providers use a memory-budgeted worker pool; other providers run
+    /// serially. Stop scheduling after a worker failure and rethrow the first recorded error.
     private static func analyzeFrequencies(
         finiteSignals: [[Double]],
         samplingRate: Double,
@@ -448,6 +469,8 @@ nonisolated enum LAVIEngine {
                     failures.record(error)
                     return
                 }
+                // Assign interleaved frequency indices to workers. Results go into indexed slots,
+                // so completion order does not change the returned frequency order.
                 frequencyIndex += workerCount
             }
         }
@@ -462,6 +485,9 @@ nonisolated enum LAVIEngine {
         return ordered
     }
 
+    /// Reduce one frequency across all finite runs without pairing across gaps.
+    /// Convert lag cycles to a fractional sample delay, obtain complex coefficients and
+    /// report usable pair count, duration and warnings with the normalized LAVI value.
     private static func analyzeFrequency(
         finiteSignals: [[Double]],
         samplingRate: Double,
@@ -475,6 +501,8 @@ nonisolated enum LAVIEngine {
         var reduction = LAVIReduction()
         let exactLag = configuration.laviLagCycles * samplingRate / frequencyHz
         let wholeLag = Int(floor(exactLag))
+        // A cycle-based delay rarely lands exactly on a sample. Keep the fractional
+        // part for linear interpolation instead of rounding away the requested delay.
         let lagFraction = exactLag - Double(wholeLag)
         for finiteSignal in finiteSignals {
             try cancellation.check()
@@ -529,6 +557,8 @@ nonisolated enum LAVIEngine {
         )
     }
 
+    /// Validate channel shapes, ordered disjoint segments and numerical settings.
+    /// Return the common sample count, or throw the first descriptive input error.
     @discardableResult
     static func validate(
         input: RhythmicityInput,
@@ -617,6 +647,8 @@ nonisolated enum LAVIEngine {
         return sampleCount
     }
 
+    /// Split each inclusive input segment at nonfinite samples into half-open finite ranges.
+    /// Count excluded samples within the selected segments; never join separate segments.
     private static func finiteRuns(
         samples: [Double],
         segments: [RhythmicitySegment]
@@ -643,6 +675,9 @@ nonisolated enum LAVIEngine {
         return (ranges, excludedCount)
     }
 
+    /// Add valid complex coefficient pairs separated by the requested fractional lag.
+    /// Interpolate the delayed coefficient between adjacent samples and require both
+    /// positions to remain within the provider’s valid interior range.
     private static func accumulate(
         tile: ComplexCoefficientTile,
         wholeLag: Int,
@@ -659,6 +694,8 @@ nonisolated enum LAVIEngine {
         guard upper > lower else { return }
 
         for index in lower..<upper {
+            // Checking the low ten bits tests every 1,024 samples, limiting cancellation
+            // check overhead inside this numerical loop.
             if index & 0x3ff == 0 { try cancellation.check() }
             let firstReal = tile.real[index]
             let firstImaginary = tile.imaginary[index]
@@ -682,6 +719,8 @@ nonisolated enum LAVIEngine {
         }
     }
 
+    /// Snap tiny rounding excursions just outside 0...1 onto the boundary.
+    /// Preserve larger excursions for diagnosis and return NaN for nonfinite input.
     private static func unitClampedWithinTolerance(_ value: Double) -> Double {
         guard value.isFinite else { return .nan }
         if value > 1, value <= 1 + 1e-12 { return 1 }
@@ -701,14 +740,17 @@ private nonisolated final class LAVIFrequencyOutcomeStore: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [LAVIFrequencyComputation?]
 
+    /// Allocate one optional result slot per frequency; nil means that work has not completed.
     init(count: Int) { values = [LAVIFrequencyComputation?](repeating: nil, count: count) }
 
+    /// Write a result into its frequency-indexed slot while holding the shared-array lock.
     func store(_ value: LAVIFrequencyComputation, at index: Int) {
         lock.lock()
         values[index] = value
         lock.unlock()
     }
 
+    /// Read completed results in slot order under the lock; unfinished slots are omitted.
     var orderedValues: [LAVIFrequencyComputation] {
         lock.lock()
         defer { lock.unlock() }
@@ -720,18 +762,21 @@ private nonisolated final class LAVIFrequencyFailureStore: @unchecked Sendable {
     private let lock = NSLock()
     private var value: (any Error)?
 
+    /// Check the shared failure flag safely before a worker begins another frequency.
     var hasFailure: Bool {
         lock.lock()
         defer { lock.unlock() }
         return value != nil
     }
 
+    /// Read the first recorded worker error under the same lock used by writers.
     var first: (any Error)? {
         lock.lock()
         defer { lock.unlock() }
         return value
     }
 
+    /// Keep only the first error, so later worker failures do not replace the original cause.
     func record(_ error: any Error) {
         lock.lock()
         if value == nil { value = error }
@@ -746,10 +791,13 @@ private nonisolated final class LAVIMonotonicProgressRelay: @unchecked Sendable 
     private let progress: @Sendable (RhythmicityProgress) -> Void
     private var highestFraction = -Double.infinity
 
+    /// Retain the callback that receives monotonic progress updates.
     init(progress: @escaping @Sendable (RhythmicityProgress) -> Void) {
         self.progress = progress
     }
 
+    /// Deliver only updates whose fraction is at least the highest already delivered.
+    /// The callback runs while locked, serializing delivery; it must not re-enter this relay.
     func emit(_ update: RhythmicityProgress) {
         lock.lock()
         defer { lock.unlock() }
@@ -776,6 +824,7 @@ private nonisolated final class LAVITileProgressReporter: @unchecked Sendable {
     private let progress: (@Sendable (RhythmicityProgress) -> Void)?
     private var completedCount = 0
 
+    /// Capture this channel’s assigned progress interval and the previous channels’ completed count.
     init(
         initialCompletedTiles: Int,
         frequencyCount: Int,
@@ -796,6 +845,8 @@ private nonisolated final class LAVITileProgressReporter: @unchecked Sendable {
         self.progress = progress
     }
 
+    /// Count one finished frequency and emit its mapped channel/file progress under a lock.
+    /// The callback must not re-enter this reporter because delivery holds that lock.
     func completed(frequencyHz: Double) {
         lock.lock()
         completedCount += 1
@@ -818,7 +869,10 @@ private nonisolated struct CompensatedSum {
     private(set) var value = 0.0
     private var compensation = 0.0
 
+    /// Add with Kahan compensation, carrying a rounding-error correction into the next sum.
     mutating func add(_ addition: Double) {
+        // Recover small contributions that would otherwise disappear when added to
+        // a much larger running total.
         let corrected = addition - compensation
         let next = value + corrected
         compensation = (next - value) - corrected
@@ -833,6 +887,8 @@ private nonisolated struct LAVIReduction {
     private var secondEnergy = CompensatedSum()
     private(set) var pairCount = 0
 
+    /// Accumulate the complex product first × conjugate(second), both energies and pair count.
+    /// `mutating` permits this value-type accumulator to update its stored sums.
     mutating func add(
         firstReal: Double,
         firstImaginary: Double,
@@ -846,6 +902,8 @@ private nonisolated struct LAVIReduction {
         pairCount += 1
     }
 
+    /// Normalize the magnitude of the summed complex products by the two signal energies.
+    /// No pairs or zero energy makes the value undefined, represented by NaN.
     func finalValue() -> Double {
         guard pairCount > 0, firstEnergy.value > 0, secondEnergy.value > 0 else {
             return .nan

@@ -1,3 +1,10 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  LAVIEngineTests.swift
 //  EVATests
@@ -24,6 +31,10 @@ struct LAVIEngineTests {
     private static let inputFixture: InputFixture = decode("Rhythmicity/reference-input.json")
     private static let outputFixture: OutputFixture = decode("Rhythmicity/python-reference.json")
 
+    // Numerical parity check against the committed independent Python fixture.
+    // Keep its frequencies, widths, lags and sample rate together: changing one
+    // changes the convention being compared. The 1e-10 absolute-error gate below
+    // checks the direct Double path; it is not a tolerance promised for Float GPU work.
     @Test func directEngineMatchesPinnedPythonLAVI() throws {
         let fixture = Self.inputFixture.signal
         let channels = fixture.channels.enumerated().map { index, samples in
@@ -63,6 +74,8 @@ struct LAVIEngineTests {
         #expect(result.channels.allSatisfy { $0.values.allSatisfy { $0 >= 0 && $0 <= 1 } })
     }
 
+    // A stationary sine supplies stable phase progression at its own frequency.
+    // This is a behavior check independent of the pinned fixture comparison above.
     @Test func stationarySineHasNearUnitLAVIAtItsFrequency() throws {
         let samplingRate = 200.0
         let samples = (0..<2_400).map { index in

@@ -1,15 +1,30 @@
+//  Developed by P. Molfese, National Institutes of Health (NIH).
+//
+//  This software is a "work of the United States Government" prepared by a federal
+//  employee as part of official duties. As such, it is not subject to copyright
+//  protection within the United States (17 U.S.C. § 105). International copyrights
+//  may apply.
+
 //
 //  DICOMQuickLookReader.swift
 //  EVAPreviewKit
 //
 //  A deliberately self-contained DICOM Part 10 reader for Quick Look. It reads
 //  common uncompressed monochrome/RGB images and lets ImageIO decode encapsulated
-//  JPEG-family transfer syntaxes. It retains only the first frame.
+//  JPEG-family transfer syntaxes. Uncompressed conversion uses the first frame;
+//  encapsulated fragments are passed onward as an encoded stream.
 //
 
 import Foundation
 
+/// Reading path: map file bytes → parse transfer syntax and elements → convert
+/// the first image frame → assemble preview metadata. A transfer syntax determines
+/// byte order, value-representation encoding and whether pixels are compressed.
+/// The parser's borrowed pointer stays inside withUnsafeBytes; returned data must
+/// be owned independently of that temporary borrow.
 nonisolated enum DICOMQuickLookReader {
+    /// Map a .dcm/.ima file, parse supported metadata/pixels and assemble a Quick Look preview.
+    /// The parser borrows bytes only during withUnsafeBytes; returned pixel Data owns its storage.
     static func read(from url: URL) throws -> DICOMPreviewModel {
         let name = url.lastPathComponent.lowercased()
         guard name.hasSuffix(".dcm") || name.hasSuffix(".ima") else {
@@ -40,6 +55,8 @@ nonisolated enum DICOMQuickLookReader {
         )
     }
 
+    /// Validate image dimensions and choose compressed, monochrome or 8-bit three-component decoding.
+    /// Compressed bytes are returned for later image decoding; this method does not decode that stream.
     private static func makeImage(from parsed: ParsedDICOM) throws -> DICOMPixelImage {
         guard let pixelData = parsed.pixelData else { throw DICOMReadError.missingPixelData }
         let width = parsed.columns ?? 0, height = parsed.rows ?? 0
@@ -74,6 +91,8 @@ nonisolated enum DICOMQuickLookReader {
         )
     }
 
+    /// Read the first monochrome frame, extract stored bits, sign-extend when needed and apply rescaling.
+    /// Use a valid supplied intensity window or derive one from the pixels; mark MONOCHROME1 for inversion.
     private static func grayscaleImage(
         from parsed: ParsedDICOM, pixelData: Data, width: Int, height: Int
     ) throws -> DICOMPixelImage {
@@ -110,6 +129,8 @@ nonisolated enum DICOMQuickLookReader {
                         ? a | (b << 8) | (c << 16) | (d << 24)
                         : (a << 24) | (b << 16) | (c << 8) | d
                 }
+                // Allocated bits describe storage width; stored bits describe the actual
+                // value inside it. Shift/mask before checking the stored sign bit.
                 let shifted = raw >> UInt32(lowBit)
                 let mask: UInt32 = bitsStored == 32 ? .max : (UInt32(1) << UInt32(bitsStored)) - 1
                 let stored = shifted & mask
@@ -117,6 +138,8 @@ nonisolated enum DICOMQuickLookReader {
                 if isSigned, bitsStored == 32 {
                     numeric = Double(Int32(bitPattern: stored))
                 } else if isSigned, stored & (UInt32(1) << UInt32(bitsStored - 1)) != 0 {
+                    // A set sign bit in an N-bit two’s-complement value represents value − 2^N.
+                    // Promote to Int64 first so this subtraction cannot underflow UInt32.
                     numeric = Double(Int64(stored) - (Int64(1) << Int64(bitsStored)))
                 } else {
                     numeric = Double(stored)
@@ -143,6 +166,7 @@ nonisolated enum DICOMQuickLookReader {
         )
     }
 
+    /// Produce interleaved RGB bytes from the first frame, handling planar RGB and supported YBR layouts.
     private static func colorBytes(
         _ pixelData: Data, width: Int, height: Int, photometric: String, planarConfiguration: Int
     ) throws -> Data {
@@ -154,6 +178,8 @@ nonisolated enum DICOMQuickLookReader {
                 pixelData.withUnsafeBytes { (input: UnsafeRawBufferPointer) in
                     var source = 0, destination = 0
                     while destination < count, source + 3 < input.count {
+                        // YBR 4:2:2 stores two luminance values sharing one chrominance pair.
+                        // Four source bytes therefore produce two RGB pixels.
                         let y1 = Double(input[source]), y2 = Double(input[source + 1])
                         let cb = Double(input[source + 2]), cr = Double(input[source + 3])
                         writeYBR(y: y1, cb: cb, cr: cr, into: output, pixel: destination)
@@ -171,6 +197,8 @@ nonisolated enum DICOMQuickLookReader {
             pixelData.withUnsafeBytes { (input: UnsafeRawBufferPointer) in
                 for pixel in 0..<count {
                     let components: (UInt8, UInt8, UInt8)
+                    // Planar color stores all first components, then all second, then all third;
+                    // interleaved color stores three consecutive components per pixel.
                     if planarConfiguration == 1 {
                         components = (input[pixel], input[count + pixel], input[count * 2 + pixel])
                     } else {
@@ -192,9 +220,11 @@ nonisolated enum DICOMQuickLookReader {
         return rgb
     }
 
+    /// Convert one luminance/chrominance pixel to clamped 8-bit RGB in the caller’s output buffer.
     private static func writeYBR(
         y: Double, cb: Double, cr: Double, into output: UnsafeMutableRawBufferPointer, pixel: Int
     ) {
+        /// Round and clamp a color component before narrowing it to UInt8.
         func byte(_ value: Double) -> UInt8 { UInt8(min(max(value.rounded(), 0), 255)) }
         output[pixel * 3] = byte(y + 1.402 * (cr - 128))
         output[pixel * 3 + 1] = byte(y - 0.344_136 * (cb - 128) - 0.714_136 * (cr - 128))
@@ -243,8 +273,12 @@ private nonisolated struct DICOMParser {
     let bytes: UnsafeRawBufferPointer
     var cursor = 0
 
+    /// Advance through the optional preamble, file-meta header and dataset until Pixel Data.
+    /// Resolve the transfer syntax first, retain only preview metadata and skip unrelated values.
     mutating func parse() throws -> ParsedDICOM {
         guard bytes.count >= 8 else { throw DICOMReadError.malformed("file is too short") }
+        // A Part 10 file starts with 128 preamble bytes followed by the ASCII DICM
+        // marker. Without it, parsing starts at byte zero for supported legacy exports.
         if bytes.count >= 132,
            bytes[128] == 0x44, bytes[129] == 0x49, bytes[130] == 0x43, bytes[131] == 0x4d {
             cursor = 132
@@ -256,6 +290,8 @@ private nonisolated struct DICOMParser {
         while cursor + 8 <= bytes.count {
             let start = cursor
             let tag = try readTag(order: .littleEndian)
+            // Peek at the next group without consuming it: the first non-meta element
+            // must be reread using the dataset’s transfer syntax.
             cursor = start
             guard tag.group == 0x0002 else { break }
             let header = try readHeader(explicitVR: true, order: .littleEndian)
@@ -332,6 +368,8 @@ private nonisolated struct DICOMParser {
         return parsed
     }
 
+    /// Read a tag and its byte length according to explicit/implicit VR rules.
+    /// VR means value representation; some explicit VRs use reserved bytes plus a 32-bit length.
     private mutating func readHeader(explicitVR: Bool, order: DICOMByteOrder) throws -> ElementHeader {
         let tag = try readTag(order: order)
         if tag.group == 0xfffe {
@@ -350,6 +388,7 @@ private nonisolated struct DICOMParser {
         return ElementHeader(tag: tag, length: UInt32(try readUInt16(order: order)))
     }
 
+    /// Heuristically recognize a known two-letter VR when a file omits transfer-syntax metadata.
     private func isLikelyExplicitVR(at offset: Int) -> Bool {
         guard offset >= 0, offset + 6 <= bytes.count else { return false }
         let first = bytes[offset + 4], second = bytes[offset + 5]
@@ -363,16 +402,19 @@ private nonisolated struct DICOMParser {
         return known.contains(vr)
     }
 
+    /// Read the group/element pair that identifies a DICOM field, advancing the cursor by four bytes.
     private mutating func readTag(order: DICOMByteOrder) throws -> DICOMTag {
         DICOMTag(group: try readUInt16(order: order), element: try readUInt16(order: order))
     }
 
+    /// Bounds-check and assemble a two-byte word in the requested order, advancing the cursor.
     private mutating func readUInt16(order: DICOMByteOrder) throws -> UInt16 {
         guard cursor + 2 <= bytes.count else { throw DICOMReadError.malformed("truncated 16-bit value") }
         let a = UInt16(bytes[cursor]), b = UInt16(bytes[cursor + 1]); cursor += 2
         return order == .littleEndian ? a | (b << 8) : (a << 8) | b
     }
 
+    /// Bounds-check and assemble a four-byte word in the requested order, advancing the cursor.
     private mutating func readUInt32(order: DICOMByteOrder) throws -> UInt32 {
         guard cursor + 4 <= bytes.count else { throw DICOMReadError.malformed("truncated 32-bit value") }
         let a = UInt32(bytes[cursor]), b = UInt32(bytes[cursor + 1])
@@ -380,15 +422,19 @@ private nonisolated struct DICOMParser {
         return order == .littleEndian ? a | (b << 8) | (c << 16) | (d << 24) : (a << 24) | (b << 16) | (c << 8) | d
     }
 
+    /// Copy a validated value span into owned Data and advance past it.
     private mutating func valueData(length: UInt32) throws -> Data {
         guard let length = Int(exactly: length), length >= 0, cursor <= bytes.count - length else {
             throw DICOMReadError.malformed("element extends beyond end of file")
         }
+        // Copy before leaving the source buffer’s borrow. An unsafe pointer into the
+        // mapped file cannot be retained by the returned preview model.
         let result = Data(bytes: bytes.baseAddress!.advanced(by: cursor), count: length)
         cursor += length
         return result
     }
 
+    /// Advance past a validated fixed-length value without copying its bytes.
     private mutating func skipValue(length: UInt32) throws {
         guard let length = Int(exactly: length), length >= 0, cursor <= bytes.count - length else {
             throw DICOMReadError.malformed("element extends beyond end of file")
@@ -396,6 +442,7 @@ private nonisolated struct DICOMParser {
         cursor += length
     }
 
+    /// Recognize the small set of tags needed for image decoding and the preview’s information panel.
     private func isPreviewMetadata(_ tag: DICOMTag) -> Bool {
         switch tag {
         case DICOMTag(group: 0x0008, element: 0x0016),
@@ -425,6 +472,8 @@ private nonisolated struct DICOMParser {
         }
     }
 
+    /// Skip the Basic Offset Table item and concatenate compressed fragments until the sequence delimiter.
+    /// This helper does not use the offset table to split individual frames.
     private mutating func readEncapsulatedPixelData() throws -> Data {
         var fragments = Data()
         var isFirstItem = true
@@ -441,6 +490,8 @@ private nonisolated struct DICOMParser {
         throw DICOMReadError.malformed("unterminated encapsulated pixel data")
     }
 
+    /// Recursively skip nested undefined-length items/sequences until their delimiter.
+    /// Throw if the stream ends before a matching termination can be reached.
     private mutating func skipUndefinedValue(explicitVR: Bool, order: DICOMByteOrder) throws {
         while cursor + 8 <= bytes.count {
             let header = try readHeader(explicitVR: explicitVR, order: order)
@@ -452,19 +503,24 @@ private nonisolated struct DICOMParser {
         throw DICOMReadError.malformed("unterminated undefined-length value")
     }
 
+    /// Decode UTF-8 with a Latin-1 fallback, trim padding/NUL characters and treat empty text as absent.
     private func string(_ data: Data) -> String? {
         let value = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines.union(.init(charactersIn: "\0")))
         return trimmed?.isEmpty == false ? trimmed : nil
     }
 
+    /// Read the first numeric component of a potentially multivalued DICOM decimal string.
     private func decimal(_ data: Data) -> Double? { decimalList(data)?.first }
+    /// Parse backslash-separated numeric text, omitting components that cannot be converted to Double.
     private func decimalList(_ data: Data) -> [Double]? {
         guard let value = string(data) else { return nil }
         let values = value.split(separator: "\\").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
         return values.isEmpty ? nil : values
     }
+    /// Parse a trimmed DICOM integer-text field, returning nil on invalid text.
     private func integerString(_ data: Data) -> Int? { string(data).flatMap(Int.init) }
+    /// Decode the first unsigned 16-bit value from an owned field without changing the parser cursor.
     private func unsignedShort(_ data: Data, _ order: DICOMByteOrder) -> Int? {
         guard data.count >= 2 else { return nil }
         let a = UInt16(data[data.startIndex]), b = UInt16(data[data.startIndex + 1])

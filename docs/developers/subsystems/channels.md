@@ -81,3 +81,14 @@ and dimensionality. `MFFWriter` carries this record through later exports, and
 `MFFLocationImportTests` compares native fixtures to the existing readers and
 covers names/numbers, axes, namespaces, reference identity, malformed files,
 center electrodes, and 2D → export → reopen → re-export → 3D transitions.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [ChannelLocationImportViews.swift](../../../EVA/Channels/ChannelLocationImportViews.swift) | Imports electrode locations and integrates location changes with the window. |
+| [DisplayChannels.swift](../../../EVA/Channels/DisplayChannels.swift) | Resolves channels used for display from channel state and roles. |

@@ -25,6 +25,8 @@ private struct ArtifactInspectorField<Content: View>: View {
     let help: String
     @ViewBuilder let content: () -> Content
 
+    /// Pairs a help-enabled field label with caller-supplied controls. The content
+    /// closure builds views; this wrapper does not own the controls’ underlying values.
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             ArtifactTemplateFieldLabel(title: title, help: help)
@@ -39,6 +41,9 @@ private struct ArtifactInspectorDisclosureSection<Content: View>: View {
     @State private var isExpanded: Bool
     let content: Content
 
+    /// Builds the supplied content and initializes this view identity’s expansion state.
+    /// The underscore accesses State storage; later view reconstruction does not reset
+    /// an existing identity’s state to initiallyExpanded.
     init(
         title: String,
         initiallyExpanded: Bool = false,
@@ -49,6 +54,8 @@ private struct ArtifactInspectorDisclosureSection<Content: View>: View {
         self.content = content()
     }
 
+    /// Displays a collapsible inspector section whose $isExpanded binding lets the
+    /// DisclosureGroup read and update local presentation state.
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 12) {
@@ -77,6 +84,7 @@ private enum ArtifactDefinitionTypeFamily: String, CaseIterable, Identifiable {
 
     var id: Self { self }
 
+    /// Maps each artifact-family button to its SF Symbol name.
     var systemImage: String {
         switch self {
         case .eye: return "eye"
@@ -89,6 +97,7 @@ private enum ArtifactDefinitionTypeFamily: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Chooses the concrete artifact type used when selecting a new family.
     var defaultType: DefinedArtifactType {
         switch self {
         case .eye: return .ocular
@@ -101,6 +110,7 @@ private enum ArtifactDefinitionTypeFamily: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Tests family membership; Eye groups blink and saccadic-spike types under one button.
     func contains(_ type: DefinedArtifactType) -> Bool {
         switch self {
         case .eye:
@@ -131,12 +141,16 @@ extension WaveformView {
             && template.topographyScanStyle == .continuous
     }
 
+    /// Prefers a visible, non-bad channel, then any visible channel, then any signal
+    /// row. Returns nil only when there are no rows; the fallback may be marked bad.
     func defaultArtifactTemplateChannel(in signal: MFFSignalData) -> Int? {
         signal.data.indices.first { !channels.hidden.contains($0) && !channels.bad.contains($0) }
             ?? signal.data.indices.first { !channels.hidden.contains($0) }
             ?? signal.data.indices.first
     }
 
+    /// Infers a legacy/imported artifact type from case-insensitive name/code keywords.
+    /// Checks specific categories before broad eye/movement terms; unmatched text is Other.
     func inferredArtifactType(name: String, eventCode: String) -> DefinedArtifactType {
         let text = "\(name) \(eventCode)".lowercased()
         if text.contains("muscle") || text.contains("emg") {
@@ -163,6 +177,7 @@ extension WaveformView {
         return .other
     }
 
+    /// Returns the stable short event-code suffix associated with each artifact type.
     func artifactTemplateEventCodeSuffix(for type: DefinedArtifactType) -> String {
         switch type {
         case .ocular: return "AOC"
@@ -176,6 +191,9 @@ extension WaveformView {
         }
     }
 
+    /// Combines a number and type suffix, preferring a four-character code when possible.
+    /// Uses base 36 after decimal digits outgrow the available prefix, then falls back
+    /// to the full decimal number rather than silently truncating identity.
     func artifactTemplateEventCode(for type: DefinedArtifactType, number: Int) -> String {
         let suffix = artifactTemplateEventCodeSuffix(for: type)
         let maxTokenLength = max(4 - suffix.count, 1)
@@ -190,6 +208,8 @@ extension WaveformView {
         return "\(token)\(suffix)"
     }
 
+    /// Parses a type-matching code’s numeric prefix as decimal, then base 36.
+    /// Trims whitespace and ignores case; an incompatible or invalid code returns nil.
     func artifactTemplateCodeNumber(_ code: String, for type: DefinedArtifactType) -> Int? {
         let suffix = artifactTemplateEventCodeSuffix(for: type)
         let upperCode = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
@@ -202,6 +222,8 @@ extension WaveformView {
         return Int(body, radix: 36)
     }
 
+    /// Finds a fresh number above existing same-type numbers while avoiding code
+    /// collisions across all other definitions. Excludes the definition currently being edited.
     func nextArtifactTemplateNumber(for type: DefinedArtifactType) -> Int {
         let existingArtifacts = template.definedArtifacts.filter { $0.id != template.definedArtifactID }
         let sameTypeArtifacts = existingArtifacts.filter { $0.type == type }
@@ -213,6 +235,8 @@ extension WaveformView {
             }
         }
 
+        // Normalize codes before collision checks; otherwise case or surrounding
+        // whitespace could make two display-equivalent codes appear distinct.
         let existingCodes = Set(existingArtifacts.map {
             $0.eventCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         })
@@ -223,12 +247,16 @@ extension WaveformView {
         return candidate
     }
 
+    /// Updates the working template’s generated human-readable name and event code.
     func applyDefaultArtifactTemplateIdentity(for type: DefinedArtifactType) {
         let number = nextArtifactTemplateNumber(for: type)
         template.name = "A\(number): \(type.rawValue)"
         template.eventCode = artifactTemplateEventCode(for: type, number: number)
     }
 
+    /// Starts a fresh definition from the current highlighted waveform interval.
+    /// Resets scan/results and matching controls, uses the clicked channel as a fallback
+    /// and opens Define. Missing selection/rate reports a status message instead.
     func openArtifactTemplateSheet(for signal: MFFSignalData, clickedChannel: Int) {
         guard let range = activeSelectionRange(in: signal), signal.samplingRate > 0 else {
             template.statusMessage = "Highlight a waveform region before defining an artifact."
@@ -268,17 +296,23 @@ extension WaveformView {
         template.showsSheet = true
     }
 
+    /// Opens the shared workspace directly on Review without resetting stored definitions.
     func openArtifactReviewSheet() {
         template.workspaceTab = .review
         template.showsSheet = true
     }
 
+    /// Closes both artifact presentations and resumes an awaiting replay decision as skip.
+    /// Closing the UI is therefore also part of the interactive replay lifecycle.
     func closeArtifactWorkspace() {
         template.showsSheet = false
         artifactVM.showsCleaningSheet = false
         if replay.state.isAwaitingDecision { replay.resume(.skip) }
     }
 
+    /// Routes Define/Review/Clean within a stable workspace. Detection, review and
+    /// broadband fitting may use different upstream signals. Review changes cancel
+    /// cleaning and invalidate cached/applied results through the owner’s callbacks.
     func artifactTemplateSheet(
         for signal: MFFSignalData,
         reviewSignal: MFFSignalData,
@@ -298,6 +332,8 @@ extension WaveformView {
                     sensorLayoutName: recording.sensorLayout?.name,
                     sensorLayout: recording.sensorLayout,
                     onChange: {
+                        // A review edit changes which events train/apply cleaning. Cancel work based
+                        // on the old selection and clear both numerical and display caches.
                         artifactCleaningTask?.cancel()
                         invalidateOBSVarianceCache()
                         template.cleaningPreviewCache.removeAll()
@@ -312,6 +348,9 @@ extension WaveformView {
         }
     }
 
+    /// Composes type rail, scan preview/comparison and settings inspector. Input
+    /// changes update defaults or trigger topography refresh; buttons perform the
+    /// explicit scan/selection actions. Field bindings modify the shared template model.
     func artifactDefinitionSheetContent(for signal: MFFSignalData) -> some View {
         let selectedChannels = artifactTemplateSelectedChannels(in: signal)
         let comparisonChannels = Array(signal.data.indices)
@@ -470,15 +509,19 @@ extension WaveformView {
         }
     }
 
+    /// Finds the UI family containing the selected concrete artifact type.
     private var artifactDefinitionTypeFamily: ArtifactDefinitionTypeFamily {
         ArtifactDefinitionTypeFamily.allCases.first { $0.contains(template.type) } ?? .other
     }
 
+    /// Combines panel and topography mode into the three-way Waveform/Spatial/Sequence UI choice.
     private var artifactDefinitionMode: ArtifactDefinitionMode {
         if template.definitionPanel == .waveforms { return .waveform }
         return template.topographyMode == .trajectory ? .sequence : .spatial
     }
 
+    /// Uses a custom Binding to translate one picker selection into the underlying
+    /// panel/mode properties instead of storing a second, potentially inconsistent value.
     private var artifactDefinitionModeBinding: Binding<ArtifactDefinitionMode> {
         Binding(
             get: { artifactDefinitionMode },
@@ -486,6 +529,7 @@ extension WaveformView {
         )
     }
 
+    /// Suggests a starting representation by artifact type; this does not prevent other modes.
     private var artifactDefinitionRecommendedMode: ArtifactDefinitionMode {
         switch template.type {
         case .ocular, .saccadicSpike, .corneoRetinal:
@@ -497,6 +541,7 @@ extension WaveformView {
         }
     }
 
+    /// Explains the selected type beside the recommended-mode action.
     private var artifactDefinitionRecommendationText: String {
         switch template.type {
         case .ocular:
@@ -518,11 +563,14 @@ extension WaveformView {
         }
     }
 
+    /// Switches to a family’s default type only when the current subtype is outside it.
     private func selectArtifactDefinitionTypeFamily(_ family: ArtifactDefinitionTypeFamily) {
         guard !family.contains(template.type) else { return }
         template.type = family.defaultType
     }
 
+    /// Updates panel and reference mode together. Spatial replaces off/trajectory
+    /// with a peak map; Sequence explicitly chooses a time-varying map trajectory.
     private func selectArtifactDefinitionMode(_ mode: ArtifactDefinitionMode) {
         switch mode {
         case .waveform:
@@ -538,6 +586,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds the vertical family selector with active and accessibility state.
+    /// Buttons change type; the surrounding sheet’s onChange applies type-specific defaults.
     private var artifactDefinitionTypeRail: some View {
         VStack(spacing: 7) {
             ForEach(ArtifactDefinitionTypeFamily.allCases) { family in
@@ -565,6 +615,7 @@ extension WaveformView {
         .background(Color(nsColor: .underPageBackgroundColor).opacity(0.42))
     }
 
+    /// Shows the recommendation and mode picker, both routed through the same mode-selection helper.
     private var artifactDefinitionModeBar: some View {
         HStack(spacing: 10) {
             Label(artifactDefinitionRecommendationText, systemImage: "info.circle")
@@ -596,6 +647,8 @@ extension WaveformView {
         .background(.primary.opacity(0.018))
     }
 
+    /// Shows identity plus waveform or spatial controls for the active panel.
+    /// Disclosure state belongs to the child sections, while parameter values live in template.
     private func artifactDefinitionInspector(
         signal: MFFSignalData,
         selectedChannels: [Int]
@@ -630,6 +683,8 @@ extension WaveformView {
         .background(Color(nsColor: .underPageBackgroundColor).opacity(0.30))
     }
 
+    /// Edits name/code and, for the Eye family, its concrete subtype. Text-field writes
+    /// are observed by the parent to debounce relabeling of an existing definition.
     var artifactIdentitySection: some View {
         VStack(alignment: .leading, spacing: 12) {
             ArtifactInspectorField(
@@ -665,6 +720,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds channel, correlation, polarity, timing and merge controls for waveform
+    /// matching. UI channel numbers are one-based; selectedChannels contains array indices.
     func artifactWaveformConfigurationSection(selectedChannels: [Int]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             ArtifactInspectorDisclosureSection(title: "Match Channels", initiallyExpanded: true) {
@@ -754,6 +811,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds map/trajectory, channel-scope and temporal matching controls. Continuous
+    /// single-map scanning is enabled only for ocular types; sequence controls have
+    /// their own eligibility. These controls configure detection, not artifact removal.
     func artifactTopographyConfigurationSection(signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             ArtifactInspectorDisclosureSection(title: "Spatial Matching", initiallyExpanded: true) {
@@ -932,6 +992,7 @@ extension WaveformView {
         }
     }
 
+    /// Connects slider and numeric entry to one bounded correlation threshold.
     var artifactThresholdControl: some View {
         HStack(spacing: 8) {
             Slider(value: artifactThresholdBinding, in: 0.30...0.98, step: 0.01)
@@ -948,6 +1009,7 @@ extension WaveformView {
         .frame(maxWidth: .infinity)
     }
 
+    /// Clamps both displayed and newly entered thresholds to 0.30...0.98.
     var artifactThresholdBinding: Binding<Double> {
         Binding(
             get: { min(max(template.threshold, 0.30), 0.98) },
@@ -955,6 +1017,7 @@ extension WaveformView {
         )
     }
 
+    /// Changes the close label after a result source has been selected for the definition.
     var artifactDefinitionCloseTitle: String {
         guard let confirmedSource = template.confirmedSource else {
             return "Close"
@@ -962,6 +1025,7 @@ extension WaveformView {
         return "Confirm \(confirmedSource.confirmationName) Selection"
     }
 
+    /// Chooses Run versus Rescan based on whether the active panel already has results.
     var artifactDefinitionApplyTitle: String {
         switch template.definitionPanel {
         case .waveforms:
@@ -971,6 +1035,8 @@ extension WaveformView {
         }
     }
 
+    /// Allows a waveform scan when missing/stale, and a spatial scan when its mode
+    /// is enabled. Other input/busy requirements are enforced by the button separately.
     var activeArtifactDefinitionPanelCanRun: Bool {
         switch template.definitionPanel {
         case .waveforms:
@@ -980,6 +1046,7 @@ extension WaveformView {
         }
     }
 
+    /// Runs detection with the active panel’s result source selected for the resulting definition.
     func applyActiveArtifactDefinitionPanel(to signal: MFFSignalData) {
         switch template.definitionPanel {
         case .waveforms:
@@ -989,6 +1056,8 @@ extension WaveformView {
         }
     }
 
+    /// Selects the current panel’s progress and result/empty views. ViewBuilder
+    /// permits these differently shaped branches to form one SwiftUI view result.
     @ViewBuilder
     func artifactDefinitionPreview(signal: MFFSignalData) -> some View {
         switch template.definitionPanel {
@@ -1022,6 +1091,8 @@ extension WaveformView {
         }
     }
 
+    /// Shows determinate progress when total work is known, otherwise a spinner;
+    /// also displays any scan status error independently of the running flag.
     @ViewBuilder
     func artifactDefinitionActivityView(isRunning: Bool, runningText: String) -> some View {
         if isRunning {
@@ -1049,6 +1120,7 @@ extension WaveformView {
         }
     }
 
+    /// Displays a consistent empty-result panel with a title and next-step explanation.
     func artifactDefinitionEmptyPreview(title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -1062,6 +1134,8 @@ extension WaveformView {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Compares waveform and topography detections and lets the user choose which
+    /// event set feeds cleaning/rejection. Displaying both rows does not merge their events.
     @ViewBuilder
     func artifactDefinitionComparisonSection(signal: MFFSignalData) -> some View {
         if template.result != nil {
@@ -1114,6 +1188,9 @@ extension WaveformView {
         }
     }
 
+    /// Renders a detection-source row and its selection action. @escaping allows
+    /// SwiftUI’s button to retain the callback for a later click; already-selected or
+    /// empty rows cannot be chosen again through this button.
     func artifactDefinitionComparisonRow(
         source: ArtifactDefinitionResultSource,
         count: Int,
@@ -1145,6 +1222,7 @@ extension WaveformView {
         }
     }
 
+    /// Summarizes selected-channel and all-channel detection counts for the comparison table.
     func waveformComparisonDetail(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) -> String {
         let allChannelText = result.comparisonEvents.count == result.selectedEvents.count
             ? "all-channel same"
@@ -1156,6 +1234,10 @@ extension WaveformView {
     /// reference mode or channel scope changes, but only after a full detection
     /// has already been run once. Keeps the displayed topomap in sync without a
     /// new Apply.
+    /// Snapshots current matching inputs and replaces the previous refresh task.
+    /// Final publication checks cancellation, recording session and refresh generation
+    /// so an older completion cannot overwrite a newer map. This refresh does not
+    /// by itself choose topography matches as the committed artifact event set.
     func refreshTopographyIfNeeded(for signal: MFFSignalData) {
         guard template.result != nil,
               let range = template.selectionRange else {
@@ -1173,6 +1255,8 @@ extension WaveformView {
         }
 
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
+        // Generation is a monotonically advancing request identity. A task can finish
+        // after cancellation, so the final guard must also compare this value.
         template.topographyRefreshGeneration += 1
         let generation = template.topographyRefreshGeneration
         template.isRefreshingTopography = true
@@ -1209,6 +1293,8 @@ extension WaveformView {
         }
     }
 
+    /// Shows the exemplar average, strongest-channel buttons and scope comparison counts.
+    /// Choosing a channel can trigger a new waveform scan through selectArtifactTemplateChannel.
     func artifactWaveformResultView(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if let average = result.templateAverage {
@@ -1308,6 +1394,7 @@ extension WaveformView {
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.primary.opacity(0.08)))
     }
 
+    /// Wraps the spatial reference map/sequence with channel-count and metric labels.
     func artifactTopographyResultView(_ topography: ArtifactTemplateTopography) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 16) {
@@ -1419,6 +1506,9 @@ extension WaveformView {
         }
     }
 
+    /// Renders one trajectory frame with an exclude/restore control. Exclusion edits
+    /// the matching mask; the parent observes that set and refreshes topography results.
+    /// A missing sensor layout shows a placeholder without discarding the frame.
     @ViewBuilder
     func trajectoryFrameThumb(
         frame: ArtifactTrajectoryFrame,
@@ -1473,6 +1563,8 @@ extension WaveformView {
         }
     }
 
+    /// Commits waveform detections into the definition, rebuilds displayed artifact events
+    /// and selects their event code. This chooses detection evidence; cleaning remains separate.
     func useWaveformMatches(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData) {
         guard let range = template.selectionRange else { return }
         let configuration = artifactTemplateConfiguration(for: signal, range: range)
@@ -1483,6 +1575,9 @@ extension WaveformView {
         artifactVM.statusMessage = "\(result.selectedEvents.count) waveform matches"
     }
 
+    /// Commits topography detections, preferring a full upsert from current inputs.
+    /// When those inputs are unavailable, updates the existing definition’s events/map
+    /// and clears stale review descendants and applied cleaning. Refreshes event display state.
     func useTopographyMatches(_ result: ArtifactTemplateDetectionResult, signal: MFFSignalData? = nil) {
         if let range = template.selectionRange,
            let signalForConfiguration = signal ?? recording.signal {
@@ -1515,6 +1610,7 @@ extension WaveformView {
         event.spanSeconds != nil
     }
 
+    /// Styles clicked, separately selected and template-member channels in priority order.
     func artifactTemplateChannelChipColor(
         _ summary: ArtifactTemplateChannelSummary,
         average: ArtifactTemplateAverage
@@ -1534,6 +1630,8 @@ extension WaveformView {
         return Color.secondary.opacity(0.08)
     }
 
+    /// Makes one channel the template source and switches scope to Clicked Channel.
+    /// If a signal and prior result exist and no scan is running, immediately rescans waveforms.
     func selectArtifactTemplateChannel(_ channelIndex: Int, autoApplyIn signal: MFFSignalData? = nil) {
         template.clickedChannel = channelIndex
         template.selectedChannel = channelIndex
@@ -1548,6 +1646,10 @@ extension WaveformView {
         }
     }
 
+    /// Validates selection/channels, snapshots configuration and launches detection
+    /// off the UI actor. Forwards cancellation and checks recording-session identity
+    /// before publishing, then upserts the chosen source’s events and updates UI state.
+    /// This defines an artifact; it does not subtract samples from the recording.
     func applyArtifactTemplate(
         to signal: MFFSignalData,
         preferredSource: ArtifactDefinitionResultSource = .waveform
@@ -1570,6 +1672,8 @@ extension WaveformView {
         template.scanCompleted = 0
         template.scanTotal = 0
 
+        // Remember which control values produced this result. Later UI edits can
+        // mark it stale without pretending that it was computed using the new settings.
         let signature = artifactScanSignature
         artifactTemplateTask?.cancel()
         let sessionID = recordingSessionID
@@ -1608,6 +1712,10 @@ extension WaveformView {
         }
     }
 
+    /// Creates or replaces a definition from the chosen detection source. Chooses
+    /// initial treatment/window policy, preserves existing cleaning settings on update,
+    /// removes stale split descendants and invalidates applied cleaning. New ordinary
+    /// definitions are registered with PSA rejection but initially skipped there.
     func upsertDefinedArtifact(
         from result: ArtifactTemplateDetectionResult,
         configuration: ArtifactTemplateConfiguration,
@@ -1651,6 +1759,8 @@ extension WaveformView {
             cleanedAt: nil
         )
 
+        // A rescan replaces candidate identity/membership. Old child partitions cannot
+        // be retained as if they still referred to the same detection result.
         ArtifactReviewEngine.removeSplitClasses(from: &template.definedArtifacts, sourceID: artifact.id)
         if let index = template.definedArtifacts.firstIndex(where: { $0.id == artifact.id }) {
             let previous = template.definedArtifacts[index]
@@ -1666,6 +1776,8 @@ extension WaveformView {
         clearAppliedArtifactCleaning()
     }
 
+    /// Creates PCA-S settings using the reviewed exemplar and a symmetric time window
+    /// around each anchor. Bounds the full window to at least 20 ms before halving it.
     func manualExemplarPCASSettings(windowSeconds: Double) -> BCGSurrogateSettings {
         var settings = BCGSurrogateSettings.default
         settings.patternSearch = .reviewedExemplar
@@ -1743,6 +1855,8 @@ extension WaveformView {
         }
     }
 
+    /// Copies events with a new display label while preserving IDs, codes, timing,
+    /// duration and time-anchor semantics. Relabeling must not shift detected intervals.
     func definedArtifactEvents(_ events: [MFFEvent], label: String) -> [MFFEvent] {
         events.map { event in
             MFFEvent(
@@ -1760,6 +1874,9 @@ extension WaveformView {
         }
     }
 
+    /// Combines existing automatic detector events with non-threshold definition
+    /// candidates. Uses the candidate set so held/excluded examples remain inspectable
+    /// even when they are absent from the active cleaning events.
     func definedArtifactEventList() -> [MFFEvent] {
         let automatic = artifactVM.events.filter { ArtifactDetectorEventMerger.isAutomaticEvent($0) }
         return automatic + template.definedArtifacts.filter { !ArtifactReviewEngine.isThresholdFamily($0) }.flatMap { artifact in
@@ -1779,6 +1896,8 @@ extension WaveformView {
         }
     }
 
+    /// Removes one definition, clears its active-edit state when applicable and
+    /// removes cached variance/PSA references before rebuilding event and cleaning state.
     func deleteDefinedArtifact(id: DefinedArtifact.ID) {
         guard let index = template.definedArtifacts.firstIndex(where: { $0.id == id }) else { return }
         let name = template.definedArtifacts[index].name
@@ -1797,6 +1916,8 @@ extension WaveformView {
         refreshAfterDeletingArtifacts(message: "Deleted \(name).")
     }
 
+    /// Clears all definitions and related edit/cache/rejection state, then refreshes
+    /// artifact events and invalidates applied cleaning. Does not delete source recordings.
     func deleteAllDefinedArtifacts() {
         guard !template.definedArtifacts.isEmpty else { return }
         template.definedArtifacts.removeAll()
@@ -1811,17 +1932,22 @@ extension WaveformView {
         refreshAfterDeletingArtifacts(message: "Deleted all defined artifacts.")
     }
 
+    /// Tracks a newly seen definition and initially marks it skipped for PSA rejection.
+    /// Set.insert’s inserted flag keeps an existing user choice from being reset.
     func registerPSADefinedArtifactForRejection(_ id: DefinedArtifact.ID) {
         if epoching.knownArtifactIDsForRejection.insert(id).inserted {
             epoching.skippedDefinedArtifactIDs.insert(id)
         }
     }
 
+    /// Removes a deleted definition from both PSA’s known and skipped ID sets.
     func removePSADefinedArtifactForRejection(_ id: DefinedArtifact.ID) {
         epoching.skippedDefinedArtifactIDs.remove(id)
         epoching.knownArtifactIDsForRejection.remove(id)
     }
 
+    /// Prunes removed IDs and registers new definitions without overwriting existing
+    /// choices. Threshold families are known immediately without the ordinary skip default.
     func reconcilePSADefinedArtifactRejectionSelections() {
         let currentIDs = Set(template.definedArtifacts.map(\.id))
         epoching.skippedDefinedArtifactIDs.formIntersection(currentIDs)
@@ -1836,6 +1962,8 @@ extension WaveformView {
         }
     }
 
+    /// Drops all variance reports or just keys prefixed with one artifact’s UUID.
+    /// The separator matches ArtifactOBSOptionsSheet’s cache-key format.
     func invalidateOBSVarianceCache(for artifactID: DefinedArtifact.ID? = nil) {
         guard let artifactID else {
             template.obsVarianceReportCache.removeAll()
@@ -1845,6 +1973,8 @@ extension WaveformView {
         template.obsVarianceReportCache = template.obsVarianceReportCache.filter { !$0.key.hasPrefix(prefix) }
     }
 
+    /// Invalidates the applied result, rebuilds the event list and refresh token, and
+    /// sets user-facing deletion/status text after definition removal.
     func refreshAfterDeletingArtifacts(message: String) {
         clearAppliedArtifactCleaning()
         artifactVM.events = definedArtifactEventList()
@@ -1853,6 +1983,9 @@ extension WaveformView {
         artifactVM.cleaningStatusMessage = message
     }
 
+    /// Lists saved definitions, treatments, options and applied previews. Computes
+    /// PCA-S readiness from geometry, anchors and fitting-signal availability; Apply
+    /// invokes the shared cleaning workflow. onAppear repairs legacy type/payload mismatches.
     func artifactCleaningSheet(
         for signal: MFFSignalData,
         broadbandSignal: MFFSignalData? = nil
@@ -1904,6 +2037,9 @@ extension WaveformView {
                         Divider()
                             .gridCellColumns(4)
 
+                        // Iterating the array binding gives each row a binding to the actual element.
+                        // The dollar-prefixed closure parameter supports both reading artifact and
+                        // passing $artifact to child option views without creating a separate copy.
                         ForEach($template.definedArtifacts) { $artifact in
                             GridRow {
                                 Button {
@@ -2021,6 +2157,9 @@ extension WaveformView {
                     applyArtifactCleaning(to: signal, broadbandSignal: broadbandSignal)
                 }
                 .keyboardShortcut(.defaultAction)
+                // Apply needs at least one runnable treatment, not just a nonempty definition
+                // list. Continuous methods and PCA-S R-wave anchors have different event rules
+                // from windowed methods, whose usable windows must fit the recording.
                 .disabled(
                     artifactVM.isCleaning
                         || hasUnavailablePCAS
@@ -2060,6 +2199,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds one definition’s method picker and method-specific options through a
+    /// Binding. wrappedValue reads the definition; projected members remain editable
+    /// bindings. Applied-result previews appear only when the chosen and applied methods agree.
     func artifactTreatmentControl(
         artifact: Binding<DefinedArtifact>,
         signal: MFFSignalData,
@@ -2176,6 +2318,8 @@ extension WaveformView {
         .disabled(artifactVM.isCleaning)
     }
 
+    /// Restricts treatments to methods compatible with the definition’s specialized
+    /// payload/type; threshold ocular definitions have their own limited method list.
     private func availableCleaningMethods(for artifact: DefinedArtifact) -> [ArtifactCleaningMethod] {
         if artifact.thresholdOcularKind != nil { return [.doNothing, .sspPCA, .obs] }
         return ArtifactCleaningMethod.allCases.filter {
@@ -2190,6 +2334,7 @@ extension WaveformView {
         }
     }
 
+    /// Supplies the shared user-facing description of cleaning methods and window policies.
     var artifactTreatmentHelpText: String {
         """
         Do Nothing: keep the artifact definition but do not alter the data.
@@ -2208,6 +2353,8 @@ extension WaveformView {
         """
     }
 
+    /// Formats preparation, event/epoch processing and finalization progress, including
+    /// artifact position and optional detail. Missing progress uses a preparation message.
     var artifactCleaningProgressText: String {
         guard let progress = artifactVM.cleaningProgress else {
             return "Preparing artifact cleanup..."
@@ -2233,6 +2380,8 @@ extension WaveformView {
         }
     }
 
+    /// Routes enable/bypass changes through the shared pipeline toggle helper so
+    /// downstream epoching and health state follow the same invalidation policy.
     func setArtifactCleaningEnabled(_ isEnabled: Bool) {
         PipelineStageToggles.setArtifactCleaningEnabled(
             isEnabled, artifactVM: artifactVM, store: recordingStore,

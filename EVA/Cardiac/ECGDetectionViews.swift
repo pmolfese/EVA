@@ -18,11 +18,15 @@
 import SwiftUI
 
 extension WaveformView {
+    /// Reconciles source defaults with the current EEG/PNS signals and opens the sheet.
     func openECGDetectionSheet(for signal: MFFSignalData) {
         prepareECGDetectionDefaults(for: signal, pns: displayedPhysioSignal())
         ecg.showsSheet = true
     }
 
+    /// Drops unavailable PNS selections and guesses likely cardiac channels only
+    /// when neither PNS nor manual EEG proxies are selected. Also normalizes the
+    /// proxy text’s numeric formatting if its parsed list contains duplicate entries.
     func prepareECGDetectionDefaults(for signal: MFFSignalData, pns: MFFSignalData?) {
         if let pns {
             ecg.selectedPNSChannels = ecg.selectedPNSChannels
@@ -40,6 +44,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds source selectors, detector controls, and a live algorithm comparison.
+    /// Detect QRS enables detection and increments the shared refresh token; the
+    /// actual artifact-event refresh is coordinated elsewhere in WaveformView.
     func ecgDetectionSheet(for signal: MFFSignalData) -> some View {
         let pns = displayedPhysioSignal()
         let sources = ecgDetectionSources(for: signal)
@@ -192,6 +199,8 @@ extension WaveformView {
                 Button("Cancel") {
                     ecg.showsSheet = false
                 }
+                // Detection is driven by shared state/refresh observers. This button enables
+                // that workflow rather than synchronously scanning inside the SwiftUI action.
                 Button("Detect QRS") {
                     ecg.isEnabled = true
                     artifactVM.detectionRefreshToken += 1
@@ -203,6 +212,8 @@ extension WaveformView {
         }
         .padding(20)
         .frame(width: 620)
+        // SwiftUI manages this task’s lifetime and cancels it when the signature
+        // changes or the view disappears. The result publisher also checks the signature.
         .task(id: ecgDetectionPreviewRequestID(for: signal)) {
             await refreshECGDetectionEstimate(for: signal)
         }
@@ -211,6 +222,8 @@ extension WaveformView {
         }
     }
 
+    /// Connects a checkbox to membership in the selected PNS-index set. Its getter
+    /// reads membership and its setter inserts/removes the zero-based channel index.
     func ecgPNSSelectionBinding(for index: Int) -> Binding<Bool> {
         Binding(
             get: { ecg.selectedPNSChannels.contains(index) },
@@ -224,6 +237,9 @@ extension WaveformView {
         )
     }
 
+    /// Builds the per-algorithm count/BPM table and selection buttons. These are
+    /// preview measurements; changing the selected algorithm does not itself
+    /// install artifact events.
     @ViewBuilder
     func ecgAlgorithmComparisonView() -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -298,6 +314,9 @@ extension WaveformView {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Builds the task(id:) signature from source metadata, selections, and detector
+    /// settings. SwiftUI restarts the preview when this string changes. It is not
+    /// a content hash of all signal samples.
     func ecgDetectionPreviewRequestID(for signal: MFFSignalData) -> String {
         [
             signal.signalURL.path,
@@ -312,6 +331,9 @@ extension WaveformView {
         ].joined(separator: "|")
     }
 
+    /// Snapshots selected sources/settings, runs each QRS algorithm in a task group,
+    /// and publishes their counts and estimated BPM when the request still matches.
+    /// With no usable sources, clears the preview. MainActor isolates UI state updates.
     @MainActor
     func refreshECGDetectionEstimate(for signal: MFFSignalData) async {
         let requestID = ecgDetectionPreviewRequestID(for: signal)
@@ -330,6 +352,8 @@ extension WaveformView {
         let polarity = ecg.polarity
         let duration = sources.map(\.duration).max() ?? signal.duration
 
+        // Each child returns the algorithm alongside its count, since tasks may
+        // finish out of order. The dictionary preserves which result belongs to which row.
         let results = await withTaskGroup(
             of: (ECGDetectionAlgorithm, Int).self,
             returning: [ECGDetectionAlgorithm: ECGAlgorithmResult].self
@@ -348,6 +372,8 @@ extension WaveformView {
             }
             var out: [ECGDetectionAlgorithm: ECGAlgorithmResult] = [:]
             for await (algo, count) in group {
+                // This preview reports count/duration × 60, not a median RR-interval rate.
+                // Use the longest selected source duration as the common comparison interval.
                 let bpm = duration > 0 ? Double(count) / duration * 60 : nil
                 out[algo] = ECGAlgorithmResult(count: count, bpm: bpm)
             }
@@ -359,6 +385,8 @@ extension WaveformView {
         ecg.algorithmResults = results
     }
 
+    /// Labels a zero-based PNS channel with its one-based number and stored name,
+    /// falling back to PNS N when a name is missing or empty.
     func pnsChannelDisplayName(index: Int, signal: MFFSignalData) -> String {
         let name = signal.channelNames?.indices.contains(index) == true
             ? signal.channelNames?[index].nilIfEmpty ?? "PNS \(index + 1)"
@@ -366,6 +394,8 @@ extension WaveformView {
         return "\(index + 1): \(name)"
     }
 
+    /// Labels a zero-based EEG channel with its one-based number and stored name,
+    /// falling back to Ch N when a name is missing or empty.
     func eegChannelDisplayName(index: Int, signal: MFFSignalData) -> String {
         let name = signal.channelNames?.indices.contains(index) == true
             ? signal.channelNames?[index].nilIfEmpty ?? "Ch \(index + 1)"
@@ -373,6 +403,9 @@ extension WaveformView {
         return "\(index + 1): \(name)"
     }
 
+    /// Guesses cardiac references from channel-name tokens. Prefers ECG/heart names,
+    /// then pulse/plethysmography names, then the first available PNS channel.
+    /// This is a naming heuristic, not a signal-quality measurement.
     func likelyECGPNSChannelIndices(in pns: MFFSignalData) -> [Int] {
         let names = pns.channelNames ?? []
         let cardiacTokens = ["ecg", "ekg", "card", "heart"]
@@ -395,12 +428,15 @@ extension WaveformView {
         return pns.data.indices.first.map { [$0] } ?? []
     }
 
+    /// Parses the manual EEG channel list and summarizes its selected-channel count.
     func ecgProxySummary(in signal: MFFSignalData) -> String {
         let indices = WaveformView.parseChannelList(ecg.proxyChannels, channelCount: signal.numberOfChannels)
         guard !indices.isEmpty else { return "No EEG proxy channels selected" }
         return "\(indices.count) EEG proxy channel\(indices.count == 1 ? "" : "s")"
     }
 
+    /// Summarizes the total channels and source groups, or explains that a selection
+    /// is required when no usable group can be assembled.
     func ecgSourceSummary(_ sources: [ECGDetectionSource]) -> String {
         guard !sources.isEmpty else {
             return "Choose at least one PNS channel or EEG proxy channel before detecting QRS complexes."
@@ -409,11 +445,17 @@ extension WaveformView {
         return "Will detect from \(channelCount) channel\(channelCount == 1 ? "" : "s") across \(sources.count) source group\(sources.count == 1 ? "" : "s")."
     }
 
+    /// Builds separate PNS and EEG-proxy detection inputs with each group’s own
+    /// sampling rate. Skips invalid indices and rows whose length differs from the
+    /// group’s first channel. Caps PNS duration at the EEG duration; does not resample
+    /// the two groups or merge them into one sample matrix.
     func ecgDetectionSources(for signal: MFFSignalData) -> [ECGDetectionSource] {
         var sources: [ECGDetectionSource] = []
 
         if let pns = displayedPhysioSignal() {
             let indices = ecg.selectedPNSChannels.sorted().filter { pns.data.indices.contains($0) }
+            // A source group must be rectangular for the detector’s channel operations.
+            // Validate within PNS; EEG can legitimately have a different sampling rate.
             let valid = indices.filter { pns.data[$0].count == (pns.data.first?.count ?? 0) }
             if !valid.isEmpty {
                 sources.append(
@@ -455,6 +497,8 @@ extension WaveformView {
 struct ECGAlgorithmHelpButton: View {
     @State private var showsHelp = false
 
+    /// Builds the local help button and scrollable algorithm descriptions. @State
+    /// tracks whether its popover is visible; $showsHelp lets SwiftUI dismiss it.
     var body: some View {
         Button {
             showsHelp.toggle()

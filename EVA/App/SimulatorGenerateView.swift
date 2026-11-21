@@ -130,6 +130,11 @@ struct SimulatorGenerateView: View {
                 statusStrip(simulator: simulator)
             }
 
+            if let output = simulator.lastOutput {
+                Divider()
+                SimulatorCommandPanel(output: output)
+            }
+
             Divider()
             bottomBar(simulator: simulator)
         }
@@ -262,7 +267,84 @@ struct SimulatorGenerateView: View {
     }
 
     private func isValid(_ c: SimulationConfig) -> Bool {
-        c.channelCount >= 4 && c.durationSeconds > 0 && c.samplingRate > 0
+        guard c.channelCount >= 4 && c.durationSeconds > 0 && c.samplingRate > 0 else { return false }
+        if let erp = c.erp, erp.experiment != nil {
+            guard let trials = try? ERPExperimentSampler.trials(erp: erp, seed: c.seed) else { return false }
+            return ERPExperimentSampler.requiredDuration(trials) + 1 / c.samplingRate < c.durationSeconds
+        }
+        return true
+    }
+}
+
+/// Shared by all Generate settings sections, above the persistent bottom bar.
+/// This is a snapshot of the completed run, never a reconstruction from edits
+/// made to the current settings after generation.
+private struct SimulatorCommandPanel: View {
+    let output: SimulatorRunner.Output
+    @State private var isExpanded = false
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                            .frame(width: 10)
+                        Label("CLI command", systemImage: "terminal")
+                        Text("Last successful run")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("CLI command")
+                .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                .accessibilityHint("Shows the command used for the last successful generation")
+
+                Spacer()
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    copied = NSPasteboard.general.setString(output.commandRecord.command, forType: .string)
+                } label: {
+                    Label(copied ? "Copied" : "Copy command",
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .help("Copy the original command, including the executable's full path")
+            }
+
+            if isExpanded {
+                ScrollView {
+                    Text(output.commandRecord.command)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .frame(height: 110)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.vertical, 8)
+
+                HStack(alignment: .top, spacing: 12) {
+                    Text("Settings and seed are in the scenario file. Original temporary paths may no longer exist.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([output.scenarioURL])
+                    } label: {
+                        Label("Reveal Scenario", systemImage: "doc.text")
+                    }
+                    .help(output.scenarioURL.path)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .onChange(of: output.commandRecord.command) { copied = false }
     }
 }
 
@@ -852,8 +934,27 @@ private struct ERPTab: View {
     var body: some View {
         @Bindable var simulator = simulator
         TabForm {
-            Toggle("Event-related potentials", isOn: erpEnabled).font(.callout.weight(.semibold))
-            if simulator.config.erp != nil {
+            HStack {
+                Toggle("Event-related potentials", isOn: erpEnabled).font(.callout.weight(.semibold))
+                HelpButton(topic: ERPStudioHelp.conditions)
+            }
+            if simulator.config.erp?.experiment != nil {
+                ERPExperimentEditor(erp: Binding(
+                    get: { simulator.config.erp ?? ERPConfig() },
+                    set: { simulator.config.erp = $0 }),
+                    seed: simulator.config.seed, samplingRate: simulator.config.samplingRate,
+                    recordingDuration: $simulator.config.durationSeconds)
+            } else if simulator.config.erp != nil {
+                HStack {
+                    Button("Open waveform & condition editor") {
+                        if let erp = simulator.config.erp,
+                           let experiment = ERPExperimentConfig.editing(erp) {
+                            simulator.config.erp?.experiment = experiment
+                        }
+                    }
+                    .disabled(ERPExperimentConfig.editing(simulator.config.erp ?? ERPConfig()) == nil)
+                    HelpButton(topic: ERPStudioHelp.legacy)
+                }
                 Group {
                     IntRow(title: "Trials", value: erpInt(\.trialCount), range: 1...2000)
                     DoubleRow(title: "Target fraction", value: erpDouble(\.targetFraction),
@@ -866,7 +967,7 @@ private struct ERPTab: View {
                 Text("Trials are written as events; the ERP overlays and single-trial tools read them like any real recording.")
                     .font(.caption2).foregroundStyle(.secondary)
             } else {
-                Text("Adds an oddball-style stimulus train with standard/target conditions.")
+                Text("Create named stimulus conditions, edit their ERP waveforms, and vary responses across trials.")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
@@ -874,7 +975,13 @@ private struct ERPTab: View {
     private var erpEnabled: Binding<Bool> {
         Binding(
             get: { simulator.config.erp != nil },
-            set: { simulator.config.erp = $0 ? ERPConfig() : nil }
+            set: {
+                if $0 {
+                    var erp = ERPConfig()
+                    erp.experiment = ERPExperimentConfig()
+                    simulator.config.erp = erp
+                } else { simulator.config.erp = nil }
+            }
         )
     }
     private func erpInt(_ keyPath: WritableKeyPath<ERPConfig, Int>) -> Binding<Int> {

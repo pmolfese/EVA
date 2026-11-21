@@ -46,3 +46,14 @@ mirror (`GradientMetalBackend`) that must match it — add both, and gate the GP
 path behind the `GradientBackend` protocol. Timing changes (TR/slice inference)
 ripple into every downstream stage, so validate `TRSpacing`/`GradientEpochLayout`
 first.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [GradientCoverage.swift](../../../EVA/Gradient/GradientCoverage.swift) | Describes which intervals a gradient correction covers. |
+| [GradientTimingCheck.swift](../../../EVA/Gradient/GradientTimingCheck.swift) | Checks scanner-event timing before gradient correction. |

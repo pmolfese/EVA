@@ -101,6 +101,10 @@ nonisolated enum GradientAAS {
         /// from the data rather than told — an explicit censor list is the user
         /// saying so.
         var censoredVolumes: Set<Int> = []
+        /// Optional experimental CLI geometry and donor protection. Defaults preserve GUI behavior.
+        var acquisitionSchedule: GradientAcquisitionSchedule? = nil
+        var protectedIntervals: [Range<Double>] = []
+        var minimumProtectedDonors: Int = 1
 
         /// **Deprecated** — see `Preset.evaLocal`. Reachable only through replay
         /// of a file that selects `AAS`.
@@ -200,7 +204,8 @@ nonisolated enum GradientAAS {
         var layout = try GradientEpochLayout.build(
             volumeTriggers: volumeTriggers,
             sampleCount: sampleCount,
-            slicesPerVolume: config.epochUnit == .slice ? max(1, config.slicesPerVolume) : 1,
+            acquisitionSchedule: config.acquisitionSchedule ?? .uniform(groupsPerVolume: config.epochUnit == .slice ? max(1, config.slicesPerVolume) : 1),
+            samplingRate: samplingRate,
             upsampleFactor: upsampleFactor,
             relativeTriggerPosition: config.relativeTriggerPosition
         )
@@ -236,7 +241,8 @@ nonisolated enum GradientAAS {
         let correctionPlans = buildPlans(
             channels: workingChannels,
             layout: layout,
-            config: config
+            config: config,
+            samplingRate: workingRate
         )
         let units = max(1, workingChannels.count)
 
@@ -428,9 +434,19 @@ nonisolated enum GradientAAS {
     private static func buildPlans(
         channels: [[Float]],
         layout: GradientEpochLayout,
-        config: Config
+        config: Config,
+        samplingRate: Double
     ) -> [[EpochPlan]] {
-        channels.map { channel in
+        func eligible(_ epoch: Int) -> Bool {
+            guard let start = layout.windowStart(of: epoch),
+                  !config.censoredVolumes.contains(layout.volumeIndex[epoch]) else { return false }
+            let lo = Double(start) / samplingRate, hi = Double(start + layout.length) / samplingRate
+            return !config.protectedIntervals.contains { $0.lowerBound < hi && lo < $0.upperBound }
+        }
+        func enough(_ donors: [Int]) -> [Int] {
+            donors.count >= max(1, config.minimumProtectedDonors) ? donors : []
+        }
+        return channels.map { channel in
             var plans: [EpochPlan] = []
             plans.reserveCapacity(layout.count)
             switch config.templateWindow {
@@ -444,10 +460,9 @@ nonisolated enum GradientAAS {
                     let hi = min(layout.count - 1, epoch + max(0, after))
                     let donors = (lo...hi).filter {
                         $0 != epoch
-                            && layout.windowStart(of: $0) != nil
-                            && !config.censoredVolumes.contains(layout.volumeIndex[$0])
+                            && eligible($0)
                     }
-                    plans.append(EpochPlan(epoch: epoch, donorIndices: donors))
+                    plans.append(EpochPlan(epoch: epoch, donorIndices: enough(donors)))
                 }
 
             case .fixedSections(let epochCount):
@@ -457,8 +472,7 @@ nonisolated enum GradientAAS {
                     let sectionEnd = min(layout.count, sectionStart + sectionLength)
                     let section = Array(sectionStart..<sectionEnd)
                     let validSection = section.filter {
-                        layout.windowStart(of: $0) != nil
-                            && !config.censoredVolumes.contains(layout.volumeIndex[$0])
+                        eligible($0)
                     }
                     let donors = acceptedSectionDonors(
                         validSection,
@@ -469,7 +483,7 @@ nonisolated enum GradientAAS {
                     for epoch in section {
                         plans.append(EpochPlan(
                             epoch: epoch,
-                            donorIndices: donors.filter { $0 != epoch }
+                            donorIndices: enough(donors.filter { $0 != epoch })
                         ))
                     }
                     sectionStart = sectionEnd

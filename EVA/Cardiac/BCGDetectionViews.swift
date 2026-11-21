@@ -31,6 +31,7 @@ private struct BCGParameterLabel: View {
     let explanation: String
     var width: CGFloat? = 100
 
+    /// Builds a fixed-width parameter label beside its help button.
     var body: some View {
         HStack(spacing: 4) {
             Text(title)
@@ -46,6 +47,8 @@ private struct BCGHelpButton: View {
     let explanation: String
     @State private var isPresented = false
 
+    /// Builds a help icon and popover. @State keeps this button’s presentation local;
+    /// $isPresented supplies the two-way binding used to dismiss the popover.
     var body: some View {
         Button {
             isPresented = true
@@ -76,6 +79,7 @@ private struct BCGHelpButton: View {
 private struct BCGMethodOverviewHelpButton: View {
     @State private var isPresented = false
 
+    /// Builds the method-comparison help popover from method metadata and references.
     var body: some View {
         Button {
             isPresented = true
@@ -150,6 +154,10 @@ private struct BCGMethodOverviewHelpButton: View {
 extension WaveformView {
     // MARK: - BCG Detection sheet
 
+    /// Builds the BCG setup sheet, comparison preview, and method-specific actions.
+    /// Detection uses signal; optional correctionSignal supplies the PCA-S input when
+    /// its pipeline stage differs. selection is an inclusive exemplar sample range.
+    /// View construction describes controls; button tasks perform the processing.
     @ViewBuilder
     func bcgDetectionSheet(
         for signal: MFFSignalData,
@@ -515,6 +523,8 @@ extension WaveformView {
         // means checking this number again.
         .frame(width: 860)
         .disabled(bcg.isRunning || bcg.isRefining)
+        // SwiftUI cancels and recreates this task when its ID changes. The refresh
+        // function also checks that ID before publishing, because obsolete work may finish.
         .task(id: bcgDetectionPreviewRequestID(for: signal, selection: selection)) {
             await refreshBCGDetectionEstimate(for: signal, selection: selection)
         }
@@ -525,6 +535,8 @@ extension WaveformView {
         }
     }
 
+    /// Displays the last preview count/BPM for each method and allows selecting one.
+    /// Preview results do not replace the recording’s actual artifact events.
     @ViewBuilder
     func bcgAlgorithmComparisonView() -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -591,6 +603,8 @@ extension WaveformView {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Returns a short missing-prerequisite label for a comparison row without a result.
+    /// Direct CWL correction has no event count/BPM to preview.
     func bcgComparisonUnavailableLabel(for method: BCGDetectionMethod) -> String {
         switch method {
         case .cwlRegression: return "N/A"
@@ -600,6 +614,9 @@ extension WaveformView {
         }
     }
 
+    /// Builds the identity used by SwiftUI’s task(id:) to restart a preview when
+    /// relevant recording metadata, settings, selections, or QRS times change.
+    /// This is a settings signature, not a hash of every signal sample.
     func bcgDetectionPreviewRequestID(
         for signal: MFFSignalData,
         selection: ClosedRange<Int>?
@@ -631,6 +648,10 @@ extension WaveformView {
         ].joined(separator: "|")
     }
 
+    /// Snapshots preview settings/channels and estimates each event-producing method
+    /// concurrently. Collects results by method and publishes only if its request ID
+    /// still matches and the task is not cancelled. MainActor protects UI updates;
+    /// child tasks delegate computation to the preview estimator.
     @MainActor
     func refreshBCGDetectionEstimate(
         for signal: MFFSignalData,
@@ -674,6 +695,8 @@ extension WaveformView {
 
         bcg.isEstimating = true
         bcg.algorithmResults = [:]
+        // Each child returns its method alongside an optional result. Completion
+        // order may differ from picker order; the dictionary keeps the association.
         let results = await withTaskGroup(
             of: (BCGDetectionMethod, BCGAlgorithmResult?).self,
             returning: [BCGDetectionMethod: BCGAlgorithmResult].self
@@ -694,6 +717,8 @@ extension WaveformView {
                 }
             }
             var output: [BCGDetectionMethod: BCGAlgorithmResult] = [:]
+            // Consume children as they finish. nil means that method lacked usable
+            // inputs or could not produce a preview, so its row keeps the fallback label.
             for await (method, result) in group {
                 if let result { output[method] = result }
             }
@@ -710,6 +735,8 @@ extension WaveformView {
     /// for the hemispheric-topography method (see `BCGDetector.hemisphericTopographyEvents`).
     /// `nil` when either side is unset or has no channels in range.
     func hemisphericPreviewChannels(for signal: MFFSignalData) -> (right: [[Float]], left: [[Float]])? {
+        /// Resolves one optional saved-set ID into valid signal rows. Missing, unknown,
+        /// or empty sets return nil, indicating that this hemisphere cannot be previewed.
         func channels(for id: ChannelSet.ID?) -> [[Float]]? {
             guard let id,
                   let set = ChannelSetStore.shared.allSets.first(where: { $0.id == id })
@@ -724,6 +751,8 @@ extension WaveformView {
         return (right, left)
     }
 
+    /// Builds controls for the selected detector or direct-correction method. Shared
+    /// state lives in bcg; each $bcg property is a writable binding to that state.
     @ViewBuilder
     func bcgMethodOptions(for signal: MFFSignalData, selection: ClosedRange<Int>?) -> some View {
         switch bcg.method {
@@ -1325,6 +1354,8 @@ extension WaveformView {
         }
     }
 
+    /// Offers common target rates only when below the source rate and when integer
+    /// decimation would actually reduce the number of samples.
     func cwlDownsampleTargets(for sourceRate: Double) -> [Double] {
         let commonRates = [2500.0, 1000.0, 500.0, 250.0, 125.0]
         return commonRates.filter { target in
@@ -1332,6 +1363,9 @@ extension WaveformView {
         }
     }
 
+    /// Connects the rate picker to its saved target, accepting only currently valid
+    /// choices. Zero is the full-rate sentinel; stale or unsupported choices read
+    /// and write as zero rather than appearing as an invalid picker selection.
     func cwlDownsampleSelectionBinding(for sourceRate: Double) -> Binding<Double> {
         Binding(
             get: {
@@ -1345,6 +1379,8 @@ extension WaveformView {
         )
     }
 
+    /// Labels a requested target with its achievable integer-decimation rate. Adds
+    /// an approximation marker when that effective rate differs by more than 0.5 Hz.
     func cwlDownsampleOptionLabel(sourceRate: Double, targetRate: Double) -> String {
         let factor = Downsampler.factor(sourceRate: sourceRate, targetRate: targetRate)
         let effectiveRate = Downsampler.effectiveRate(sourceRate: sourceRate, factor: factor)
@@ -1354,6 +1390,7 @@ extension WaveformView {
         return "≈\(cwlRateLabel(effectiveRate))"
     }
 
+    /// Formats a rate in Hz, omitting the decimal for values sufficiently close to an integer.
     func cwlRateLabel(_ rate: Double) -> String {
         if abs(rate.rounded() - rate) < 0.05 {
             return "\(Int(rate.rounded())) Hz"
@@ -1361,6 +1398,7 @@ extension WaveformView {
         return "\(String(format: "%.1f", rate)) Hz"
     }
 
+    /// Delegates disabling detected BCG state/events to the shared pipeline toggle helper.
     func disableBCGDetection() {
         PipelineStageToggles.disableBCGDetection(bcg: bcg, artifactVM: artifactVM, template: template)
     }
@@ -1377,12 +1415,17 @@ extension WaveformView {
         }
     }
 
+    /// Queues BCG detection through the shared processing queue, then awaits its core workflow.
     func runBCGDetection(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
         await processingQueue.run("BCG Detection") { [self] in
             await runBCGDetectionCore(signal: signal, selection: selection)
         }
     }
 
+    /// Runs the chosen detector on the selected channels and optionally estimates
+    /// a repeating artifact duration. Replaces BCG-origin events, preserves other
+    /// events, and registers nonempty results for cleaning. The worker is explicitly
+    /// cancelled with its parent; a session check rejects results from another recording.
     private func runBCGDetectionCore(signal: MFFSignalData, selection: ClosedRange<Int>?) async {
         let sessionID = recordingSessionID
         bcg.isRunning = true
@@ -1447,6 +1490,8 @@ extension WaveformView {
                 : nil
             return (times: times, estimate: estimate)
         }
+        // Detached work does not inherit cancellation automatically. Forward the
+        // parent’s cancellation to this worker rather than merely ignoring its result.
         let detection = await withTaskCancellationHandler(
             operation: {
                 await detectionWorker.value
@@ -1511,14 +1556,21 @@ extension WaveformView {
         }
     }
 
+    /// Queues a refinement pass so it participates in the same processing coordination as detection.
     func runBCGRefinement(signal: MFFSignalData) async {
         await processingQueue.run("BCG Refinement") { [self] in
             await runBCGRefinementCore(signal: signal)
         }
     }
 
+    /// Uses existing BCG event centers to rebuild a cleaner spatial-PCA exemplar
+    /// and redetect beats. Updates events, optional duration, template diagnostics,
+    /// and the cleaning definition. Returns early when there are no prior beats or
+    /// the detector cannot form a refinement.
     private func runBCGRefinementCore(signal: MFFSignalData) async {
         let sessionID = recordingSessionID
+        // Refinement starts from event centers, including any asymmetric duration
+        // estimate already incorporated into those markers.
         let existingTimes = artifactVM.events
             .filter { $0.sourceFile == BCGDetector.sourceFile }
             .map(\.centerTimeSeconds)
@@ -1590,6 +1642,9 @@ extension WaveformView {
         bcg.isRefining = false
     }
 
+    /// Adds or replaces the stable BCG artifact definition, removing obsolete split
+    /// review classes while preserving previously selected cleaning settings.
+    /// Invalidates derived variance and applied cleaning because the event set changed.
     func registerBCGDefinedArtifact(events: [MFFEvent], eventCode: String) {
         let artifact = DefinedArtifact(
             id: bcg.definedArtifactID,
@@ -1604,6 +1659,8 @@ extension WaveformView {
             cleaningMethod: .obs
         )
         template.reviewArtifactID = bcg.definedArtifactID
+        // Redetection changes the source events, so earlier manually split review
+        // classes cannot continue pointing at the old membership.
         ArtifactReviewEngine.removeSplitClasses(from: &template.definedArtifacts, sourceID: bcg.definedArtifactID)
         if let index = template.definedArtifacts.firstIndex(where: { $0.id == bcg.definedArtifactID }) {
             let previous = template.definedArtifacts[index]
@@ -1616,12 +1673,16 @@ extension WaveformView {
         clearAppliedArtifactCleaning()
     }
 
+    /// Delegates heart-rate estimation to the preview helper, which uses beat intervals
+    /// and returns nil when it cannot produce a usable estimate.
     func estimatedBPM(from times: [Double]) -> Double? {
         BCGDetectionPreviewEstimator.estimatedBPM(from: times)
     }
 
     // MARK: - CWL regression (direct correction — no events/ArtifactCleaner involved)
 
+    /// Builds the imported PNS reference-channel checklist and bulk selection buttons.
+    /// Without PNS data it displays an explanation instead of a channel list.
     @ViewBuilder
     func cwlChannelPicker() -> some View {
         if let pns = displayedPhysioSignal() {
@@ -1668,6 +1729,8 @@ extension WaveformView {
         }
     }
 
+    /// Adapts membership in selectedCWLChannels to a checkbox Binding<Bool>.
+    /// Checking inserts the zero-based PNS index; unchecking removes it.
     func cwlPNSSelectionBinding(for index: Int) -> Binding<Bool> {
         Binding(
             get: { bcg.selectedCWLChannels.contains(index) },
@@ -1707,12 +1770,18 @@ extension WaveformView {
         }
     }
 
+    /// Queues direct CWL regression, then awaits validation, fitting, and publication.
     func runCWLCorrection(signal: MFFSignalData) async {
         await processingQueue.run("CWL Correction") { [self] in
             await runCWLCorrectionCore(signal: signal)
         }
     }
 
+    /// Validates selected wire-loop references and matching PNS/EEG sampling grids,
+    /// then runs CWL regression in a cancellable detached worker. Publishes corrected
+    /// samples and, when needed, reconstructs rate-dependent epoch metadata.
+    /// Records removal variance only for matching input/output grids and invalidates
+    /// downstream pipeline results. Validation and solver failures appear as status text.
     private func runCWLCorrectionCore(signal: MFFSignalData) async {
         let sessionID = recordingSessionID
         guard let pns = displayedPhysioSignal() else {
@@ -1751,6 +1820,8 @@ extension WaveformView {
         let downsampleFilter = bcg.cwlDownsampleFilter
         let upsampleToOriginalHz = downsampleFactor > 1 && bcg.cwlUpsampleToOriginalHz
 
+        // The bridge delivers worker progress to UI state. A weak capture avoids
+        // keeping the BCG view model alive solely for pending progress callbacks.
         let (progressContinuation, progressTask) = ProgressBridge.make { [weak bcg] (update: CWLCorrector.ProgressUpdate) in
             let clamped = min(max(update.fraction, 0), 1)
             let percent = Int((clamped * 100).rounded())
@@ -1822,6 +1893,9 @@ extension WaveformView {
                 let ratio = outputRate / sr
                 let segments = signal.epochSegments.compactMap { segment -> EpochSegment? in
                     let start = Int((Double(segment.startSample) * ratio).rounded())
+                    // Scale the boundary AFTER the final sample, then convert back to the
+                    // inclusive end expected by EpochSegment. This preserves interval length
+                    // more consistently than scaling an inclusive endpoint directly.
                     let endExclusive = Int((Double(segment.endSample + 1) * ratio).rounded())
                     guard endExclusive > start else { return nil }
                     return EpochSegment(
@@ -1920,12 +1994,18 @@ extension WaveformView {
             .map { $0 + 1 }
     }
 
+    /// Queues source-informed PCA-S correction using the supplied pipeline-stage signal.
     func runSurrogateCorrection(signal: MFFSignalData) async {
         await processingQueue.run("BCG PCA-S Correction") { [self] in
             await runSurrogateCorrectionCore(signal: signal)
         }
     }
 
+    /// Collects beat anchors, usable rows, geometry, and PCA-S settings, then fits
+    /// the source-informed correction in a cancellable worker. Uses the median
+    /// marked BCG duration when available. Publishes corrected samples, diagnostics,
+    /// audit lines, and removed-variance accounting for the active recording, then
+    /// invalidates downstream results that were based on the previous signal.
     private func runSurrogateCorrectionCore(signal: MFFSignalData) async {
         let sessionID = recordingSessionID
         let beats = surrogateBeatTimes()
@@ -1944,6 +2024,8 @@ extension WaveformView {
             .compactMap(\.durationSeconds)
             .filter { $0 > 0 }
             .sorted()
+        // Use the median duration, averaging the middle pair for an even count,
+        // so a few unusually long/short markers do not dictate the fitting window.
         if !markedDurations.isEmpty {
             let middle = markedDurations.count / 2
             let duration = markedDurations.count.isMultiple(of: 2)
@@ -2021,6 +2103,8 @@ extension WaveformView {
         bcg.progress = nil
     }
 
+    /// Removes the installed correction and PCA-S diagnostics/audit accounting, then
+    /// invalidates downstream processing so it no longer uses that corrected base.
     func disableSurrogateCorrection() {
         bcg.correctedSignal = nil
         bcg.appliedCorrection = nil
@@ -2031,6 +2115,8 @@ extension WaveformView {
         invalidateDownstreamOfBaseSignalChange()
     }
 
+    /// Removes the installed correction and CWL progress/variance accounting, then
+    /// invalidates downstream processing that depended on the corrected base.
     func disableCWLCorrection() {
         bcg.correctedSignal = nil
         bcg.progress = nil

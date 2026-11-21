@@ -43,7 +43,7 @@ extension WaveformView {
         )
     }
 
-/// Advanced FIR mechanics, collapsed by default.
+    /// Advanced FIR mechanics, collapsed by default.
     ///
     /// Exists mainly to make the realized filter visible *before* Apply. The
     /// kernel a request needs can exceed what a recording can carry — a narrow
@@ -110,6 +110,8 @@ extension WaveformView {
     }
 
     /// Per-edge design reports for whichever edges actually resolve to FIR.
+    /// Uses the shortest channel to estimate each enabled FIR edge’s realizable kernel.
+    /// These are independent per-edge reports; no sample filtering happens here.
     func firDesignReports(for signal: MFFSignalData) -> [(label: String, report: EEGSignalFilter.FIRDesignReport)] {
         let sampleCount = signal.data.map(\.count).min() ?? 0
         guard signal.samplingRate > 0, sampleCount > 0 else { return [] }
@@ -136,6 +138,9 @@ extension WaveformView {
         return out
     }
 
+    /// Builds filter controls and conditionally exposes settings for active IIR/FIR modes.
+    /// Bindings edit the filter model; Apply starts processing, while this view only
+    /// configures it. Disabled controls remain visible to explain which settings apply.
     func filterPopover(for signal: MFFSignalData) -> some View {
         let lineNoiseMode = filter.activeLineNoiseMode
 
@@ -285,6 +290,8 @@ extension WaveformView {
                         Spacer()
                         Text("Transition")
                             .font(.caption)
+                        // A zero entry means use the automatic transition rule. The Binding maps
+                        // that UI convention to nil in the configuration, rather than a zero-width filter.
                         TextField("Auto", value: Binding(
                             get: { filter.firTransitionHz ?? 0 },
                             set: { filter.firTransitionHz = $0 > 0 ? $0 : nil }
@@ -535,6 +542,9 @@ extension WaveformView {
         .frame(width: 430)
     }
 
+    /// Starts queued filtering from the supplied EEG signal and optional PNS source.
+    /// Replaces the owned task and captures the recording identity so the completion
+    /// callback only invalidates downstream results in the same recording session.
     func applyBandpassFilter(to signal: MFFSignalData) {
         let pnsInput = filter.filterPNS ? pnsFilterBaseSignal() : nil
         // The interactive path fires the shared async apply without awaiting;
@@ -559,6 +569,8 @@ extension WaveformView {
     }
 
     /// Downstream invalidation shared by interactive filtering and replay.
+    /// Clears dependent processing/review results through the shared invalidation policy
+    /// after filter output changes, preventing epochs or corrections from using stale samples.
     func postFilterInvalidation() {
         PipelineInvalidation.downstreamOfFilterChange(
             store: recordingStore,
@@ -570,6 +582,8 @@ extension WaveformView {
     }
 
     /// Launches the interactive replay once the user confirms the config pane.
+    /// Dismisses configuration and replaces the owned replay task. A session check
+    /// prevents an old task from clearing the task handle for a newly opened recording.
     func startInteractiveReplay() {
         replay.showsConfigPane = false
         replayTask?.cancel()
@@ -586,10 +600,16 @@ extension WaveformView {
     /// Pauses (via the controller's async gate) for review/decision steps, then
     /// resumes. Awaits each transform so downstream steps see settled output.
     @MainActor
+    /// Walks the planned actions, restoring each action’s settings before applying it.
+    /// An awaited gate suspends the loop until the UI supplies Proceed/Skip/Cancel;
+    /// labels such as break loop and continue loop exit/advance the outer action loop.
+    /// Export is awaited before the batch advances to its next recording.
     func interactiveReplay() async {
         guard let rawSignal = recording.signal else { replay.state = .finished; return }
         let actions = replay.plannedActions()
 
+        // actionOrdinal is the position among planned actions; stepIndex is the
+        // identity in the original script. They differ when actions are omitted.
         loop: for (actionOrdinal, action) in actions.enumerated() {
             // A cancel pressed while the previous step was running had no gate
             // to resolve; stop here rather than starting the next step.
@@ -787,6 +807,8 @@ extension WaveformView {
                         showsSkip: true, progress: nil
                     )
                 )
+                // Read the final selection only after the gate resumes: the sheet may have
+                // changed it while this async function was suspended.
                 let kept = recordingStore.status.replayChannelDecisionSelection
                 channelDecisionReplayRequest = nil
                 switch decision {
@@ -838,6 +860,8 @@ extension WaveformView {
 
     /// The replayed channel decision currently being asked about — the sheet
     /// host presents it, the loop sets and clears it.
+    /// Computed forwarding property into the reference-type recording store.
+    /// The nonmutating setter changes that store without replacing this SwiftUI view value.
     var channelDecisionReplayRequest: ChannelDecisionReplayRequest? {
         get { recordingStore.status.replayChannelDecision }
         nonmutating set { recordingStore.status.replayChannelDecision = newValue }
@@ -846,6 +870,8 @@ extension WaveformView {
     /// Resolves the channel-decision gate from the sheet (Apply, Skip, or a
     /// dismissal, which counts as Skip). Clearing the request first is what
     /// takes the sheet down before the loop moves on.
+    /// Clears the sheet request, then releases the replay controller’s suspended gate
+    /// with the user’s chosen resolution.
     func resolveChannelDecisionReplay(_ resolution: ReplayController.Resolution) {
         channelDecisionReplayRequest = nil
         replay.resume(resolution)
@@ -853,6 +879,7 @@ extension WaveformView {
 
     /// This file's own channel names, so the confirmation sheet says `E45` when
     /// the montage does rather than only `Ch 45`.
+    /// Maps nonempty supplied names by zero-based channel index; missing names yield no entry.
     func replayChannelNames(for signal: MFFSignalData) -> [Int: String] {
         guard let names = signal.channelNames else { return [:] }
         var result: [Int: String] = [:]
@@ -869,6 +896,8 @@ extension WaveformView {
     /// Absolute for `markBad`, matching `ProcessingCore`: the step carries the
     /// whole set, so the kept channels *are* the bad set afterwards rather than
     /// being unioned into whatever this file already had.
+    /// Applies only the confirmed channel set. Mark Bad replaces the full bad set;
+    /// interpolation processes sorted targets and gathers failures into one status message.
     func applyReplayedChannelDecision(
         _ operation: EVAProcessingStep.Operation,
         channels kept: Set<Int>,
@@ -906,6 +935,9 @@ extension WaveformView {
     /// a suffix based on the final output kind). Panel-free so Batch can call it
     /// per file. Uses renamed PNS without the synthetic-channel prompt.
     @MainActor
+    /// Snapshots current export data and writes it with replay provenance/payloads.
+    /// Reports success/failure in status and records successful batch outputs; a missing
+    /// export snapshot returns without creating a file.
     func exportReplayResult(to folder: URL) async {
         guard let snapshot = currentMFFExportSnapshot() else { return }
         let base = (recording.packageName as NSString).deletingPathExtension
@@ -942,6 +974,9 @@ extension WaveformView {
 
     /// Top banner shown while an interactive replay is running or paused.
     @ViewBuilder
+    /// Displays the current replay step, review actions, and optional batch progress.
+    /// Continue/Skip resolve a gate; Cancel abandons this file, while Stop Batch also
+    /// stops the batch controller.
     func replayBanner() -> some View {
         if let info = replay.banner {
             let stepProgress = replayCurrentStepProgress(info: info)
@@ -1010,6 +1045,8 @@ extension WaveformView {
         }
     }
 
+    /// Chooses explicit banner progress or the active operation’s progress source.
+    /// Nil requests an indeterminate indicator, including while exporting.
     private func replayCurrentStepProgress(info: ReplayController.BannerInfo) -> Double? {
         if batch.isActive, batch.currentStepName == "Exporting" { return nil }
         if let progress = info.progress { return progress }
@@ -1032,11 +1069,13 @@ extension WaveformView {
         }
     }
 
+    /// Looks up the operation for the replay state’s step ID; returns nil outside an active step.
     private func replayCurrentOperation() -> EVAProcessingStep.Operation? {
         guard let index = replayCurrentStepIndex() else { return nil }
         return replay.steps.first { $0.id == index }?.step.operation
     }
 
+    /// Extracts the associated step index from running/review/decision enum cases.
     private func replayCurrentStepIndex() -> Int? {
         switch replay.state {
         case .running(let index), .awaitingReview(let index), .awaitingDecision(let index):
@@ -1046,12 +1085,17 @@ extension WaveformView {
         }
     }
 
+    /// Combines completed files and this file’s fractional progress, giving each file
+    /// equal weight. Returns nil when no active batch can supply a denominator.
     private func replayBatchOverallProgress(stepProgress: Double?) -> Double? {
         guard batch.isActive, batch.currentIndex >= 0, !batch.jobs.isEmpty else { return nil }
         let fileProgress = replayBatchCurrentFileProgress(stepProgress: stepProgress)
         return min(max((Double(batch.currentIndex) + fileProgress) / Double(batch.jobs.count), 0), 1)
     }
 
+    /// Combines completed planned actions with the current action’s fraction.
+    /// A waiting gate without numeric progress counts as a complete step; export uses
+    /// the batch controller’s separate file-progress estimate.
     private func replayBatchCurrentFileProgress(stepProgress: Double?) -> Double {
         if batch.currentStepName == "Exporting" {
             return batch.currentFileProgress
@@ -1062,10 +1106,14 @@ extension WaveformView {
               let position = actions.firstIndex(where: { $0.stepIndex == currentStep }) else {
             return batch.currentFileProgress
         }
+        // This is equal-weight step progress, not a prediction of remaining time:
+        // a fast settings step and a long numerical operation occupy the same fraction.
         let progress = min(max(stepProgress ?? (replay.state.isAwaiting ? 1 : 0), 0), 1)
         return min(max((Double(position) + progress) / Double(actions.count), 0), 1)
     }
 
+    /// Removes filter output and invalidates artifact cleaning, detection, epochs, and
+    /// interpolation that depended on it through the filter model’s clear callback.
     func clearBandpassFilter() {
         filter.clear(onCleared: { [self] in
             clearAppliedArtifactCleaning()
@@ -1085,6 +1133,7 @@ struct InfoPopoverButton: View {
     let message: String
     @State private var isPresented = false
 
+    /// Builds a question-mark button whose local State controls an explanatory popover.
     var body: some View {
         Button {
             isPresented.toggle()

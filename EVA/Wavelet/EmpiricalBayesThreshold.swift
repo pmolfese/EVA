@@ -84,6 +84,10 @@ import Foundation
 
 /// Johnstone–Silverman empirical Bayes threshold selection with the
 /// quasi-Cauchy prior. Stateless; all entry points are pure functions.
+/// Reading aid: coefficients describe signal detail at one wavelet level. This
+/// estimator fits how sparse that detail is, then returns a magnitude gate in the
+/// original coefficient units. It chooses a threshold; it does not apply cleaning.
+/// The derivation above explains the statistical model and the helper formulas.
 nonisolated enum EmpiricalBayesThreshold {
 
     // MARK: - Public entry point

@@ -344,7 +344,7 @@ nonisolated enum SimulationWriter {
                 events.append(MFFEvent(
                     id: "sim-\(trial.id)",
                     code: trial.eventCode,
-                    label: trial.condition,
+                    label: trial.conditionName ?? trial.condition,
                     eventDescription: trial.omitted
                         ? "Stimulus presented; neural response deliberately omitted"
                         : "Simulated \(trial.condition) ERP trial",

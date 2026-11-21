@@ -38,6 +38,7 @@ nonisolated enum CWLCorrector {
         case noReferenceChannels
         case tooShortForWindow(windowSamples: Int, sampleCount: Int)
 
+        /// Explains missing references or a recording too short for the requested fit window.
         var errorDescription: String? {
             switch self {
             case .noReferenceChannels:
@@ -68,6 +69,7 @@ nonisolated enum CWLCorrector {
 
         var id: String { rawValue }
 
+        /// Full picker label for the filter used before decimation.
         var label: String {
             switch self {
             case .windowedSinc:
@@ -77,6 +79,7 @@ nonisolated enum CWLCorrector {
             }
         }
 
+        /// Compact filter name used in progress and completion messages.
         var shortLabel: String {
             switch self {
             case .windowedSinc:
@@ -91,6 +94,7 @@ nonisolated enum CWLCorrector {
         case cwRegrTool
         case evaFast
 
+        /// User-facing name of the selected regression implementation.
         var label: String {
             switch self {
             case .cwRegrTool:
@@ -111,13 +115,20 @@ nonisolated enum CWLCorrector {
     ///     between wire-loop motion and its EEG signature.
     ///   - lagStepMs: Spacing between lag taps within `lagRangeMs`.
     ///   - windowSeconds: Length of the sliding regression window. Windows
-    ///     overlap 50% and are cross-faded (triangular weights) on
+    ///     overlap approximately 50% and are cross-faded (triangular weights
+    ///     for EVA Fast, Hann weights for CWRegrTool-compatible) on
     ///     reconstruction, which is what makes the fit "adaptive" — the
     ///     coupling coefficients can drift slowly over the recording instead
     ///     of being fixed globally.
     ///   - progress: Optional 0...1 completion callback with phase details.
     ///   - debugLog: Optional diagnostic logger for long-running corrections.
-    /// - Returns: Corrected channels, same shape as `eeg`.
+    /// - Returns: A corrected copy. The sample count is reduced when downsampling
+    ///   succeeds and upsampleToOriginalRate is false; otherwise it matches eeg.
+    /// Dispatches to optional downsampling and the requested regression algorithm.
+    /// Callers must supply rectangular EEG/reference arrays on the same sample grid,
+    /// a positive rate, and sensible finite settings. Missing references or an
+    /// insufficient fit window throw. Progress/log callbacks can run on workers and
+    /// should marshal UI updates to the main actor.
     nonisolated static func correct(
         eeg: [[Float]],
         references: [[Float]],
@@ -198,6 +209,8 @@ nonisolated enum CWLCorrector {
         // transient at the recording boundary).
         let lagSamples = stride(from: lagRangeMs.lowerBound, through: lagRangeMs.upperBound, by: max(lagStepMs, 1))
             .map { Int(($0 / 1000.0 * samplingRate).rounded()) }
+        // Different millisecond delays can round to the same sample offset.
+        // Deduplicate them before building columns to avoid identical regressors.
         let uniqueLags = Array(Set(lagSamples)).sorted()
 
         var design: [[Float]] = []
@@ -274,6 +287,8 @@ nonisolated enum CWLCorrector {
         let capturedWeightSum = weightSum
         let capturedRanges = channelRanges
 
+        // Each worker owns a disjoint channel range in this buffer. The unsafe
+        // annotation relies on that invariant; no two workers write the same row.
         result.withUnsafeMutableBufferPointer { out in
             nonisolated(unsafe) let out = out
             evaConcurrentPerform(iterations: capturedRanges.count) { batchIndex in
@@ -350,6 +365,11 @@ nonisolated enum CWLCorrector {
 
     // MARK: - CWRegrTool-compatible tapered Hann regression
 
+    /// Fits dense, sample-spaced delay taps in overlapping Hann-tapered windows.
+    /// Uses SVD least squares to estimate all EEG channels together, accumulates
+    /// tapered fitted artifacts, then subtracts their weighted average. Unsolvable
+    /// windows are skipped; samples with no positive weight retain original values.
+    /// Checks cancellation between windows and returns a new channel matrix.
     private static func correctCWRegrToolCompatible(
         eeg: [[Float]],
         references: [[Float]],
@@ -440,6 +460,8 @@ nonisolated enum CWLCorrector {
             for offset in 0..<windowSamples {
                 let sample = start + offset
                 guard sample < sampleCount else { continue }
+                // The fitted design already contains the Hann taper. Accumulate it once,
+                // then divide by the sum of tapers when overlapping fits are combined.
                 let weight = hann[offset]
                 guard weight > 0 else { continue }
                 weightSum[sample] += weight
@@ -479,6 +501,8 @@ nonisolated enum CWLCorrector {
         return corrected
     }
 
+    /// Converts seconds to an odd sample count so (windowSamples − 1)/2 is an
+    /// integer half-window step. The minimum produced by this formula is nine samples.
     private static func cwRegrToolWindowSamples(samplingRate: Double, windowSeconds: Double) -> Int {
         var windowSamples = max(Int(floor(samplingRate * windowSeconds + 1)), 8)
         while (windowSamples - 1) % 2 != 0 {
@@ -487,6 +511,9 @@ nonisolated enum CWLCorrector {
         return windowSamples
     }
 
+    /// Generates full-window onsets at the requested positive step, appending a final
+    /// right-aligned window when necessary to cover the recording’s end. Returns
+    /// empty if no full window fits; unlike the fast path, no window is shortened.
     private static func cwRegrToolWindowStarts(
         sampleCount: Int,
         windowSamples: Int,
@@ -506,6 +533,9 @@ nonisolated enum CWLCorrector {
         return starts
     }
 
+    /// Builds a time-by-regressor matrix with one column per reference/lag pair.
+    /// Reflects lagged indices within this window and multiplies each row by its
+    /// Hann weight. Column-major storage keeps all times for one regressor contiguous.
     private static func cwRegrToolDesignColumnMajor(
         references: [[Float]],
         start: Int,
@@ -529,6 +559,8 @@ nonisolated enum CWLCorrector {
         return design
     }
 
+    /// Builds the tapered EEG right-hand-side matrix: time rows, EEG-channel columns,
+    /// column-major storage. Uses the same taper as the design for weighted fitting.
     private static func cwRegrToolRHSColumnMajor(
         eeg: [[Float]],
         start: Int,
@@ -545,6 +577,9 @@ nonisolated enum CWLCorrector {
         return rhs
     }
 
+    /// Solves X × beta ≈ Y for all EEG channels and returns X × beta, still tapered
+    /// and column-major (time × EEG channels). Invalid dimensions or solver failure
+    /// return nil so the caller can skip this window without subtracting a bad fit.
     private static func fitCWRegrToolWindow(
         designColumnMajor: [Double],
         rhsColumnMajor: [Double],
@@ -587,6 +622,10 @@ nonisolated enum CWLCorrector {
         return fitted
     }
 
+    /// Uses LAPACK dgelsd to solve a possibly rank-deficient least-squares system
+    /// for multiple right-hand sides. Expects validated column-major input shapes.
+    /// Returns regressor-by-EEG-channel coefficients or nil on LAPACK failure;
+    /// input arrays are copied because LAPACK overwrites its work buffers.
     private static func solveLeastSquaresSVD(
         designColumnMajor: [Double],
         rhsColumnMajor: [Double],
@@ -594,6 +633,8 @@ nonisolated enum CWLCorrector {
         columns: Int,
         rightHandSideCount: Int
     ) -> [Double]? {
+        // LAPACK overwrites the RHS buffer with coefficients. It needs room for
+        // either the original observations or the solution, whichever has more rows.
         let leadingB = max(rows, columns)
         var paddedRHS = [Double](repeating: 0, count: leadingB * rightHandSideCount)
         for rhs in 0..<rightHandSideCount {
@@ -610,6 +651,8 @@ nonisolated enum CWLCorrector {
         var singularValues = [Double](repeating: 0, count: min(rows, columns))
         var rcond = -1.0
         var rank = LAPACKInt(0)
+        // A −1 workspace length requests the required floating-point workspace size.
+        // The later dgelsd call allocates that space and performs the actual solve.
         var lwork = LAPACKInt(-1)
         var workQuery = [Double](repeating: 0, count: 1)
         var iwork = [LAPACKInt](repeating: 0, count: gelsdIWorkLength(rows: rows, columns: columns))
@@ -670,6 +713,9 @@ nonisolated enum CWLCorrector {
         return beta
     }
 
+    /// Allocates the integer workspace for dgelsd’s divide-and-conquer SVD using
+    /// the smaller matrix dimension and the number of subdivision levels. This is
+    /// scratch capacity, separate from the floating-point workspace queried below.
     private static func gelsdIWorkLength(rows: Int, columns: Int) -> Int {
         let minDimension = max(min(rows, columns), 1)
         let smallSize = 25
@@ -678,6 +724,11 @@ nonisolated enum CWLCorrector {
         return max(1, 3 * minDimension * levels + 11 * minDimension)
     }
 
+    /// Filters/decimates EEG and references onto the same lower-rate grid, then
+    /// calls correct with factor 1 to avoid recursive downsampling. Returns the
+    /// lower-rate correction or maps its removed artifact back to original samples.
+    /// Very short recordings fall back to a full-rate fit; progress reserves space
+    /// for downsampling and optional reconstruction.
     private static func correctDownsampled(
         eeg: [[Float]],
         references: [[Float]],
@@ -733,6 +784,8 @@ nonisolated enum CWLCorrector {
         let downsampledReferences = downsampleChannels(references, factor: factor, filter: downsampleFilter)
         try Task.checkCancellation()
 
+        // The recursive call uses factor 1: downsampling has already happened.
+        // Rates change, but lag/window parameters remain in milliseconds/seconds.
         let correctedDownsampled = try correct(
             eeg: downsampledEEG,
             references: downsampledReferences,
@@ -809,6 +862,8 @@ nonisolated enum CWLCorrector {
         return corrected
     }
 
+    /// Decimates channel rows independently in parallel using the selected filter.
+    /// Returns input unchanged for factor ≤ 1 or no channels; output row order is preserved.
     private static func downsampleChannels(
         _ channels: [[Float]],
         factor: Int,
@@ -830,6 +885,10 @@ nonisolated enum CWLCorrector {
         return downsampled
     }
 
+    /// Subtracts an interpolated low-rate ARTIFACT estimate from the original EEG.
+    /// It does not upsample the entire cleaned signal, so original high-frequency
+    /// data are retained apart from the interpolated removal. Missing low-rate rows
+    /// or empty estimates leave their original channel unchanged.
     private static func reconstructFullRateCorrection(
         originalEEG: [[Float]],
         downsampledEEG: [[Float]],
@@ -850,6 +909,8 @@ nonisolated enum CWLCorrector {
 
                 var lowArtifact = [Double](repeating: 0, count: lowCount)
                 for index in 0..<lowCount {
+                    // Estimate only what the low-rate solver removed. Upsampling this difference
+                    // lets us subtract the artifact without replacing full-rate EEG by smoothed data.
                     lowArtifact[index] = Double(lowOriginal[index] - lowCorrected[index])
                 }
                 let artifact = Downsampler.linearUpsample(
@@ -874,6 +935,10 @@ nonisolated enum CWLCorrector {
         let factorization: LinearAlgebra.LUFactorization?
     }
 
+    /// Plans half-overlapping fast-regression ranges and caches their linear-system
+    /// factorizations in parallel. Includes a short final range only if it has more
+    /// samples than regressors. Preserves range order and throws after cancellation
+    /// so a partially prepared cache is not returned.
     private static func makeRegressionWindows(
         design: [[Float]],
         sampleCount: Int,
@@ -940,6 +1005,9 @@ nonisolated enum CWLCorrector {
         return windows.compactMap { $0 }
     }
 
+    /// Centers each regressor within a range, forms XᵀX, and adds a small ridge
+    /// penalty before factorizing. Caches means and the reusable factorization;
+    /// if factorization fails, retains the matrix for per-right-hand-side fallback solves.
     private static func makeRegressionWindow(
         design: [[Float]],
         nCols: Int,
@@ -966,6 +1034,8 @@ nonisolated enum CWLCorrector {
         )
 
         let diagonalMean = (0..<nCols).reduce(0.0) { $0 + xtx[$1 * nCols + $1] } / Double(nCols)
+        // Lagged references are often nearly dependent. A small positive diagonal
+        // penalty stabilizes XᵀX; the absolute floor also handles an all-zero design.
         let ridge = 1e-6 * diagonalMean + 1e-12
         for i in 0..<nCols { xtx[i * nCols + i] += ridge }
 
@@ -978,6 +1048,9 @@ nonisolated enum CWLCorrector {
         )
     }
 
+    /// Precomputes the total reconstruction weight at each sample for windows with
+    /// a cached solve route. Full windows use triangular weights; short final windows
+    /// use weight 1. The same convention is used when subtracting fitted artifacts.
     private static func overlapWeightSum(
         sampleCount: Int,
         windows: [RegressionWindow],
@@ -999,6 +1072,8 @@ nonisolated enum CWLCorrector {
         return weightSum
     }
 
+    /// Partitions EEG indices into contiguous, nonoverlapping batches of at most
+    /// 16 channels, sizing them for the available worker count. Empty input gives [].
     private static func channelBatches(channelCount: Int) -> [Range<Int>] {
         guard channelCount > 0 else { return [] }
         let targetWorkers = max(evaMaxWorkers, 1)
@@ -1018,6 +1093,10 @@ nonisolated enum CWLCorrector {
     /// then Xβ reconstruction. Windows are cross-faded with precomputed
     /// overlap weights so we do not need a full-size artifact accumulation
     /// buffer per channel.
+    /// Returns rows in channelRange order. Skips windows whose solve fails and
+    /// keeps their original contribution. A cancellation observed between windows
+    /// returns the batch’s partially corrected copy; callers must handle cancellation
+    /// before publishing it as a completed result.
     private static func correctChannelBatch(
         eeg: [[Float]],
         channelRange: Range<Int>,
@@ -1035,6 +1114,8 @@ nonisolated enum CWLCorrector {
         guard !windows.isEmpty, nCols > 0, batchCount > 0 else { return corrected }
 
         for (windowIndex, window) in windows.enumerated() {
+            // defer runs at the end of the iteration even when a guard skips this window,
+            // so progress counts attempted work rather than only successful fits.
             defer { progress?(windowIndex) }
             guard !Task.isCancelled else { return corrected }
             let length = window.range.count
@@ -1065,6 +1146,8 @@ nonisolated enum CWLCorrector {
                 Int32(batchCount)
             )
 
+            // BLAS formed XᵀY in row-major layout, but the solver expects LAPACK’s
+            // column-major layout. Convert storage only; matrix dimensions stay the same.
             let rhsColumnMajor = rowMajorToColumnMajor(xtyRowMajor, rows: nCols, columns: batchCount)
             guard let betaColumnMajor = solveWindowRHS(
                 window: window,
@@ -1108,6 +1191,9 @@ nonisolated enum CWLCorrector {
         return corrected
     }
 
+    /// Solves the cached regularized XᵀX system against column-major XᵀY. Uses
+    /// one multi-RHS factorized solve when available; otherwise solves each EEG
+    /// column with a fresh matrix copy. Returns nil if a fallback solve fails.
     private static func solveWindowRHS(
         window: RegressionWindow,
         rhsColumnMajor: [Double],
@@ -1136,6 +1222,9 @@ nonisolated enum CWLCorrector {
         return solvedColumnMajor
     }
 
+    /// Subtracts this window’s fitted artifact from the batch in place, scaled by
+    /// its share of each sample’s total overlap weight. fitted is time-by-batch
+    /// row-major; corrected is channel-by-time. Zero-weight samples are left alone.
     private static func subtractFitted(
         _ fitted: [Double],
         from corrected: inout [[Float]],
@@ -1162,10 +1251,15 @@ nonisolated enum CWLCorrector {
 
     // MARK: - Utilities
 
+    /// Checks whether a window has a cached factorization or fallback matrix.
+    /// This indicates an available solve route, not a guarantee that solving will succeed.
     private static func canSolve(_ window: RegressionWindow) -> Bool {
         window.factorization != nil || !window.fallbackMatrix.isEmpty
     }
 
+    /// Packs the requested interval into time rows and regressor columns, subtracting
+    /// the supplied per-regressor means. Input design is stored as regressor arrays;
+    /// output is a flat row-major matrix for BLAS.
     private static func centeredDesignRowMajor(
         design: [[Float]],
         range: Range<Int>,
@@ -1182,6 +1276,8 @@ nonisolated enum CWLCorrector {
         return matrix
     }
 
+    /// Packs selected EEG channels into a row-major time-by-channel matrix after
+    /// subtracting each channel’s mean within this window.
     private static func centeredYRowMajor(
         eeg: [[Float]],
         channels: [Int],
@@ -1199,6 +1295,8 @@ nonisolated enum CWLCorrector {
         return matrix
     }
 
+    /// Reorders a flat rows × columns matrix for LAPACK without changing its shape
+    /// or mathematical values. Both dimensions and input length must agree.
     private static func rowMajorToColumnMajor(_ values: [Double], rows: Int, columns: Int) -> [Double] {
         var converted = [Double](repeating: 0, count: rows * columns)
         for row in 0..<rows {
@@ -1209,6 +1307,8 @@ nonisolated enum CWLCorrector {
         return converted
     }
 
+    /// Reorders a flat column-major matrix for row-major BLAS operations. This is
+    /// a storage conversion, not a matrix transpose.
     private static func columnMajorToRowMajor(_ values: [Double], rows: Int, columns: Int) -> [Double] {
         var converted = [Double](repeating: 0, count: rows * columns)
         for row in 0..<rows {
@@ -1219,6 +1319,8 @@ nonisolated enum CWLCorrector {
         return converted
     }
 
+    /// Computes the Double-precision mean over an in-bounds half-open sample range.
+    /// An empty range returns zero.
     private static func mean(of values: [Float], in range: Range<Int>) -> Double {
         guard !range.isEmpty else { return 0 }
         var total = 0.0
@@ -1243,6 +1345,8 @@ nonisolated enum CWLCorrector {
         return out
     }
 
+    /// Maps an out-of-window index by mirroring once at the nearest edge, then
+    /// clamping extreme offsets. For count ≤ 1 returns zero; callers use nonempty windows.
     private static func reflectedIndex(_ index: Int, count: Int) -> Int {
         guard count > 1 else { return 0 }
         if index < 0 {
@@ -1254,6 +1358,8 @@ nonisolated enum CWLCorrector {
         return index
     }
 
+    /// Returns a symmetric Hann taper with zero endpoints for length > 1.
+    /// Used to soften window boundaries in the CWRegrTool-compatible fit.
     private static func hannWindow(_ length: Int) -> [Double] {
         guard length > 1 else { return [Double](repeating: 1, count: max(length, 0)) }
         return (0..<length).map { sample in
@@ -1261,16 +1367,21 @@ nonisolated enum CWLCorrector {
         }
     }
 
+    /// Returns triangular overlap weights with nonzero endpoints. The mid + 1
+    /// denominator prevents edge samples from losing all weight in the fast path.
     private static func triangularWindow(_ length: Int) -> [Double] {
         guard length > 1 else { return [Double](repeating: 1, count: max(length, 0)) }
         let mid = Double(length - 1) / 2.0
         return (0..<length).map { 1.0 - abs(Double($0) - mid) / (mid + 1) }
     }
 
+    /// Formats a diagnostic number to three significant digits.
     private static func format(_ value: Double) -> String {
         String(format: "%.3g", value)
     }
 
+    /// Formats elapsed monotonic uptime nanoseconds as seconds. now defaults to
+    /// the current uptime and must not precede startedAt.
     private static func elapsedString(since startedAt: UInt64, now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> String {
         String(format: "%.2fs", Double(now - startedAt) / 1_000_000_000.0)
     }

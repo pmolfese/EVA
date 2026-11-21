@@ -35,3 +35,15 @@ Keep the CPU path authoritative and mirror it in `WaveletMetalBackend` — the t
 must match numerically (there is an established parity discipline here). The
 reducer historically over-smoothed when a threshold model was mismatched, so
 validate any new shrinkage against a reference implementation before shipping.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [WICAExplorationViews.swift](../../../EVA/Wavelet/WICAExplorationViews.swift) | Presents wavelet-ICA configuration and exploration. |
+| [WICAProcessor.swift](../../../EVA/Wavelet/WICAProcessor.swift) | Runs the wavelet-ICA processing workflow. |
+| [WICAViewModel.swift](../../../EVA/Wavelet/WICAViewModel.swift) | Owns wavelet-ICA settings, jobs, and output state. |

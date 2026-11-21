@@ -29,8 +29,15 @@ nonisolated struct ChannelInterpolationSnapshot: Sendable {
     let cachedReplacements: [Int: [Float]]
     let recipes: [Int: ChannelInterpolationRecipe]
 
+    /// Whether there are no active replacement targets. Recipes alone do not activate
+    /// an interpolation; cachedReplacements supplies the target-key set.
     var isEmpty: Bool { cachedReplacements.isEmpty }
 
+    /// Returns a copy with active interpolation targets replaced. Recomputes each
+    /// valid donor recipe from the CURRENT input signal; falls back to a length-matched
+    /// cached row for older/incomplete recipe state. Invalid targets are ignored.
+    /// All donors come from the original input, so applying one target cannot alter
+    /// the donor data used to calculate another target.
     func applying(to signal: MFFSignalData) -> MFFSignalData {
         guard !isEmpty else { return signal }
         var data = signal.data
@@ -42,6 +49,8 @@ nonisolated struct ChannelInterpolationSnapshot: Sendable {
                !recipe.indices.isEmpty,
                recipe.indices.allSatisfy({ signal.data.indices.contains($0) && signal.data[$0].count == sampleCount }) {
                 var replacement = [Float](repeating: 0, count: sampleCount)
+                // zip pairs each donor index with its corresponding spline weight. Matching
+                // array lengths are checked above so no donor/weight pair is silently dropped.
                 for (sourceIndex, weight) in zip(recipe.indices, recipe.weights) {
                     vDSP.add(
                         multiplication: (signal.data[sourceIndex], weight),
@@ -73,6 +82,8 @@ final class ChannelModel {
         var revision = 0
     }
 
+    // Group samples, recipes, and revision in one value. Mutators prepare a copy
+    // and assign it once, so observers never see a half-updated repair definition.
     private var interpolationState = InterpolationState()
 
     /// Memo for `interpolationSnapshot`, keyed by `interpolationState.revision`.
@@ -124,6 +135,8 @@ final class ChannelModel {
     var healthRefreshToken = 0
     var healthWaveletToken = 0
 
+    /// Clears derived health scores and resets scan status/progress. Channel markings
+    /// and interpolation definitions remain separate from these cached measurements.
     func clearHealthResults() {
         healthResults.removeAll()
         isAnalyzingHealth = false
@@ -189,15 +202,20 @@ final class ChannelModel {
         interpolationLost[target] = reason
     }
 
+    /// Clears one saved repair-failure explanation without changing bad-channel status
+    /// or installing replacement samples.
     func clearInterpolationLoss(target: Int) {
         interpolationLost[target] = nil
     }
 
+    /// Clears all repair-failure explanations, doing nothing when none are present.
     func clearAllInterpolationLosses() {
         guard !interpolationLost.isEmpty else { return }
         interpolationLost.removeAll()
     }
 
+    /// Removes one target’s replacement and donor recipe together, advancing the
+    /// revision once. Does nothing when neither exists; bad/hidden markings are separate.
     func removeInterpolation(target: Int) {
         guard interpolationState.replacements[target] != nil
                 || interpolationState.sources[target] != nil else { return }
@@ -208,6 +226,8 @@ final class ChannelModel {
         interpolationState = next
     }
 
+    /// Removes all replacement rows and donor recipes in one observable update.
+    /// Advances the revision only when interpolation state actually existed.
     func removeAllInterpolations() {
         guard !interpolationState.replacements.isEmpty
                 || !interpolationState.sources.isEmpty else { return }
@@ -218,8 +238,9 @@ final class ChannelModel {
         interpolationState = next
     }
 
-    /// Applies each saved spherical-spline recipe to the signal currently at
-    /// the end of the processing pipeline. The donor weights are persistent;
+    /// Builds the immutable snapshot used to apply spherical-spline recipes to
+    /// the current pipeline signal. The getter packages state; the snapshot’s
+    /// applying(to:) method performs the calculation. Donor weights are persistent;
     /// the replacement samples are re-derived so filtering, OBS, wavelets, and
     /// other upstream transforms cannot reveal the original target channel.
     /// Cached on `revision` (ROADMAP C4). Rebuilding this `mapValues`-ed a fresh
@@ -231,6 +252,8 @@ final class ChannelModel {
     /// Reading `interpolationState` here still registers the observation
     /// dependency, so views refresh exactly as before when interpolation changes.
     var interpolationSnapshot: ChannelInterpolationSnapshot {
+        // Reading the tracked state registers an observation dependency even if the
+        // next branch reuses the memoized, untracked snapshot.
         let state = interpolationState
         if let cachedInterpolationSnapshot,
            cachedInterpolationSnapshot.revision == state.revision {
@@ -248,6 +271,8 @@ final class ChannelModel {
         return snapshot
     }
 
+    /// Applies an immutable snapshot of this model’s interpolation definitions to
+    /// the supplied signal. See ChannelInterpolationSnapshot.applying for fallback rules.
     func applyingInterpolations(to signal: MFFSignalData) -> MFFSignalData {
         interpolationSnapshot.applying(to: signal)
     }
@@ -276,6 +301,8 @@ final class ChannelModel {
 }
 
 extension FocusedValues {
+    /// Typed focused-value slot carrying the active window’s observable channel model.
+    /// FocusedValueKey provides the storage key; nil means no focused provider.
     var channelModel: ChannelModel? {
         get { self[ChannelModelKey.self] }
         set { self[ChannelModelKey.self] = newValue }
@@ -285,6 +312,8 @@ extension FocusedValues {
         typealias Value = ChannelModel
     }
 
+    /// Request-token binding used by the channel menu to ask the active window
+    /// to export channel labels and metrics.
     var channelLabelMetricsExportRequest: Binding<Int>? {
         get { self[ChannelLabelMetricsExportRequestKey.self] }
         set { self[ChannelLabelMetricsExportRequestKey.self] = newValue }
@@ -304,6 +333,9 @@ struct ChannelsCommands: View {
     @FocusedValue(\.channelHealthViewControls) private var healthControls
     @Environment(\.openWindow) private var openWindow
 
+    /// Builds channel menu actions for the focused recording. @FocusedValue reads
+    /// the model supplied by the active window; commands are disabled or replaced
+    /// with a placeholder when no recording provides that value.
     var body: some View {
         Button("Channels…") {
             openWindow(id: EVAApp.channelSetsWindowID)
@@ -353,6 +385,8 @@ struct ChannelsCommands: View {
                 if let healthControls {
                     healthControls.refreshRequest.wrappedValue += 1
                 } else {
+                    // A token changes on every click, including repeated requests for the same
+                    // action. Observers can react to the change without a Boolean reset handshake.
                     model.healthRefreshToken += 1
                 }
             }
@@ -419,6 +453,8 @@ struct ChannelsCommands: View {
         }
     }
 
+    /// Builds a channel-set menu item that writes through the focused window’s
+    /// selection binding. A nil ID selects all channels; the current choice gets a checkmark.
     @ViewBuilder
     private func displayChannelMenuButton(
         title: String,
@@ -438,6 +474,9 @@ struct ChannelsCommands: View {
     }
 }
 
+/// Values and writable bindings exported by a waveform window to global menus.
+/// A Binding is a read/write connection to the owner’s state; copying this small
+/// struct does not create independent copies of those bound values.
 struct ArtifactMenuControls {
     var artifacts: [DefinedArtifact]
     var deleteRequest: Binding<DefinedArtifact.ID?>
@@ -447,6 +486,7 @@ struct ArtifactMenuControls {
 }
 
 extension FocusedValues {
+    /// Focused artifact list and bindings used by the Artifacts menu.
     var artifactMenuControls: ArtifactMenuControls? {
         get { self[ArtifactMenuControlsKey.self] }
         set { self[ArtifactMenuControlsKey.self] = newValue }
@@ -456,6 +496,7 @@ extension FocusedValues {
         typealias Value = ArtifactMenuControls
     }
 
+    /// Focused request token for asking the window to produce an ICA debug report.
     var icaDebugReportRequest: Binding<Int>? {
         get { self[ICADebugReportRequestKey.self] }
         set { self[ICADebugReportRequestKey.self] = newValue }
@@ -465,6 +506,7 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    /// Focused request token for restoring the recording’s original processing state.
     var resetToOriginalRequest: Binding<Int>? {
         get { self[ResetToOriginalRequestKey.self] }
         set { self[ResetToOriginalRequestKey.self] = newValue }
@@ -474,6 +516,7 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    /// Focused bindings for averaged-display mode and PSA overlay/butterfly choices.
     var psaViewControls: PSAViewControls? {
         get { self[PSAViewControlsKey.self] }
         set { self[PSAViewControlsKey.self] = newValue }
@@ -483,6 +526,7 @@ extension FocusedValues {
         typealias Value = PSAViewControls
     }
 
+    /// Focused segment-health visibility, availability, progress, and action bindings.
     var segmentHealthViewControls: SegmentHealthViewControls? {
         get { self[SegmentHealthViewControlsKey.self] }
         set { self[SegmentHealthViewControlsKey.self] = newValue }
@@ -492,6 +536,7 @@ extension FocusedValues {
         typealias Value = SegmentHealthViewControls
     }
 
+    /// Focused channel-health visibility, progress, and details/settings/refresh requests.
     var channelHealthViewControls: ChannelHealthViewControls? {
         get { self[ChannelHealthViewControlsKey.self] }
         set { self[ChannelHealthViewControlsKey.self] = newValue }
@@ -501,6 +546,7 @@ extension FocusedValues {
         typealias Value = ChannelHealthViewControls
     }
 
+    /// Focused request token for opening the MFF export workflow.
     var mffExportRequest: Binding<Int>? {
         get { self[MFFExportRequestKey.self] }
         set { self[MFFExportRequestKey.self] = newValue }
@@ -510,6 +556,7 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    /// Focused request token for opening the copy-processing workflow.
     var copyProcessingRequest: Binding<Int>? {
         get { self[CopyProcessingRequestKey.self] }
         set { self[CopyProcessingRequestKey.self] = newValue }
@@ -519,6 +566,7 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    /// Focused request token for presenting the current dataset’s information.
     var datasetInfoRequest: Binding<Int>? {
         get { self[DatasetInfoRequestKey.self] }
         set { self[DatasetInfoRequestKey.self] = newValue }
@@ -528,6 +576,7 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    /// Focused request token for importing physiological channels into the current recording.
     var importPhysioRequest: Binding<Int>? {
         get { self[ImportPhysioRequestKey.self] }
         set { self[ImportPhysioRequestKey.self] = newValue }
@@ -537,6 +586,7 @@ extension FocusedValues {
         typealias Value = Binding<Int>
     }
 
+    /// Focused PNS visibility binding plus availability/channel-count metadata.
     var physioViewControls: PhysioViewControls? {
         get { self[PhysioViewControlsKey.self] }
         set { self[PhysioViewControlsKey.self] = newValue }
@@ -559,6 +609,8 @@ struct PhysioViewControls {
 struct ArtifactsCommands: View {
     @FocusedValue(\.artifactMenuControls) private var controls
 
+    /// Builds artifact display/deletion commands for the focused window. Requests
+    /// are written through bindings so the window performs its own state changes.
     var body: some View {
         if let controls {
             Toggle("Show Applied Correction", isOn: controls.showsAppliedCorrection)
@@ -625,6 +677,9 @@ struct FileExportCommands: View {
     @FocusedValue(\.datasetInfoRequest) private var datasetInfoRequest
     @FocusedValue(\.importPhysioRequest) private var importPhysioRequest
 
+    /// Builds file actions by incrementing request tokens owned by the focused window.
+    /// The window’s observers open the corresponding UI; these buttons do not export
+    /// or import data themselves.
     var body: some View {
         Button("Import Physio...") {
             importPhysioRequest?.wrappedValue += 1
@@ -665,6 +720,9 @@ struct ViewCommands: View {
     @FocusedValue(\.segmentHealthViewControls) private var segmentHealthControls
     @FocusedValue(\.physioViewControls) private var physioControls
 
+    /// Builds View-menu toggles and request actions for the focused recording.
+    /// @AppStorage persists toolbar-label visibility across launches; the focused
+    /// bindings route recording-specific choices only to the active window.
     var body: some View {
         Button(showsToolbarButtonLabels ? "Hide Button Labels" : "Show Button Labels") {
             showsToolbarButtonLabels.toggle()
@@ -682,6 +740,8 @@ struct ViewCommands: View {
             Divider()
         }
 
+        // Adapt optional focused controls to the nonoptional Binding required by a
+        // Toggle. No provider reads as false, and writes require an available feature.
         Toggle("Show Segment Health", isOn: Binding(
             get: { segmentHealthControls?.showsHealth.wrappedValue ?? false },
             set: { if segmentHealthControls?.isAvailable == true { segmentHealthControls?.showsHealth.wrappedValue = $0 } }

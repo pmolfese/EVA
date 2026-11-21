@@ -49,6 +49,9 @@
 
 import Foundation
 
+/// Owns publication rights, not a background thread or an immutable input snapshot.
+/// The caller chooses where work executes and supplies stable inputs.
+/// Read LatestOnlyRunnerTests for a deterministic example of two overlapping runs.
 @MainActor
 final class LatestOnlyRunner {
     enum Outcome<Success> {
@@ -81,6 +84,8 @@ final class LatestOnlyRunner {
         activeGeneration = thisGeneration
         activeLabel = label
 
+        // Suspension is the ownership boundary: B may start while A is awaiting.
+        // If A finishes after B starts, A must neither publish nor clear B's progress.
         let value = await work()
 
         // A newer run claimed ownership while this one was suspended. Standing
@@ -99,6 +104,8 @@ final class LatestOnlyRunner {
     ///
     /// Used when the thing a run was computing for goes away — closing a recording,
     /// say — where results arriving afterwards would land in reused state.
+    /// Disowning a run does not stop its computation; cancellation, when desired,
+    /// belongs to the caller's task. Its eventual result cannot reclaim ownership.
     func invalidate() {
         activeGeneration = nil
         activeLabel = nil

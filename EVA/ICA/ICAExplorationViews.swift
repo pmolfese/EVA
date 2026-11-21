@@ -23,6 +23,7 @@ import UniformTypeIdentifiers
 extension WaveformView {
     // MARK: - ICA artifact exploration
 
+    /// Clamp component count and fit rate to this recording, clear the previous status and open the sheet.
     func openICASheet(for signal: MFFSignalData) {
         ica.componentCount = min(max(ica.componentCount, 1), signal.numberOfChannels)
         ica.downsampleRate = min(ica.downsampleRate, signal.samplingRate)
@@ -30,6 +31,9 @@ extension WaveformView {
         ica.showsSheet = true
     }
 
+    /// Build the ICA settings, progress controls and lazy grid of component previews.
+    /// Bindings such as `$ica.method` connect controls directly to the shared ICA state.
+    /// Changing fit-band controls recalculates the suggested analysis rate.
     func icaSheet(for signal: MFFSignalData) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -314,13 +318,18 @@ extension WaveformView {
         return min(rounded, samplingRate)
     }
 
+    /// Replace the analysis-rate setting with the current recommendation when the source rate is valid.
     func autoScaleICAAnalysisRate(samplingRate: Double) {
         guard samplingRate > 0 else { return }
         ica.downsampleRate = recommendedICAAnalysisRate(samplingRate: samplingRate)
     }
 
+    /// Show one component’s selection toggle, relative contribution, spatial map and time course.
+    /// Component indices are zero-based internally and displayed to users starting at one.
     func icaComponentCard(_ component: Int, signal: MFFSignalData) -> some View {
         let isExcluded = ica.decomposition?.excludedComponents.contains(component) == true
+        // A custom binding reads and writes a dictionary entry inside the optional decomposition,
+        // which cannot be reached through a simple stored-property binding.
         let label = Binding<String>(
             get: { ica.decomposition?.labels[component] ?? "" },
             set: { newValue in ica.decomposition?.labels[component] = newValue }
@@ -391,6 +400,8 @@ extension WaveformView {
         .help(ica.decomposition?.labelSuggestions[component]?.reason ?? "Select components that look like eye, muscle, cardiac, or movement artifacts. Labels are saved with the JSON artifact set.")
     }
 
+    /// Adapt membership in the excluded-component set into the Bool binding a toggle needs.
+    /// Selecting also supplies a default artifact label when none exists; deselecting preserves labels.
     func icaComponentExcludedBinding(_ component: Int) -> Binding<Bool> {
         Binding(
             get: { ica.decomposition?.excludedComponents.contains(component) == true },
@@ -407,6 +418,9 @@ extension WaveformView {
         )
     }
 
+    /// Sum selected source time courses into a synthetic physiology channel and reveal it.
+    /// The output stays at the decomposition’s analysis rate; this does not reconstruct
+    /// components into electrode space or resample them to the recording rate.
     func synthesizeICAAsPNS(decomposition: ICADecomposition?, signal: MFFSignalData) {
         guard let decomposition else { return }
         let indices = decomposition.excludedComponents.sorted()
@@ -436,6 +450,8 @@ extension WaveformView {
         showsPhysioChannels = true
     }
 
+    /// Format one component’s contribution as a percentage of the summed contributions.
+    /// Missing values or a nonpositive total produce an empty caption.
     func icaExplainedVarianceText(_ component: Int) -> String {
         guard let value = ica.decomposition?.explainedVariance[safe: component],
               let total = ica.decomposition?.explainedVariance.reduce(0, +),
@@ -445,6 +461,8 @@ extension WaveformView {
         return String(format: "%.1f%%", (value / total) * 100)
     }
 
+    /// Convert the waveform viewport’s sample bounds into decimated source indices.
+    /// Clamp to the decomposition’s valid inclusive range; insufficient samples return nil.
     func icaVisibleSourceRange(for decomposition: ICADecomposition, in signal: MFFSignalData) -> ClosedRange<Int>? {
         guard decomposition.sampleCount > 1 else { return nil }
 
@@ -455,6 +473,10 @@ extension WaveformView {
         return lowerSource...upperSource
     }
 
+    /// Snapshot settings, queue a background fit and publish component suggestions for review.
+    /// A progress bridge sends worker updates to UI state. Cancellation is forwarded to
+    /// the detached worker, and session checks prevent a completed fit replacing another
+    /// recording’s decomposition. This operation alone does not remove components.
     func runICA(on signal: MFFSignalData, onComplete: (@MainActor () -> Void)? = nil) {
         ica.isRunning = true
         ica.progress = 0
@@ -488,6 +510,8 @@ extension WaveformView {
             minimumIterations: min(max(ica.minimumIterations, 0), max(ica.maxIterations, 1))
         )
 
+        // The continuation is the worker’s update endpoint; the task consumes updates
+        // and applies them to the observable state used by SwiftUI.
         let (progressContinuation, progressTask) = ProgressBridge.make { (update: ICAProgressUpdate) in
             ica.progress = min(max(update.fraction, 0), 1)
             ica.progressMessage = update.message
@@ -551,6 +575,8 @@ extension WaveformView {
                     try Task.checkCancellation()
                     return decomposition
                 }
+                // Detached tasks have separate lifetimes. Explicitly cancel the worker when
+                // the owning UI task is canceled rather than merely abandoning its result.
                 let decomposition = try await withTaskCancellationHandler(
                     operation: {
                         try await worker.value
@@ -630,11 +656,15 @@ extension WaveformView {
     /// Awaitable wrapper around `runICA` for the interactive replay loop.
     @MainActor
     func runICADecomposition(on signal: MFFSignalData) async {
+        // Bridge the completion callback into async/await. Resuming this continuation
+        // releases the replay caller waiting here; early-return paths must be considered
+        // when changing runICA’s callback behavior.
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             runICA(on: signal, onComplete: { cont.resume() })
         }
     }
 
+    /// Translate detector progress intervals into stage labels without accessing actor-isolated UI state.
     private nonisolated func icaProgressMessage(for detectorFraction: Double) -> String {
         switch detectorFraction {
         case ..<0.08:
@@ -654,6 +684,9 @@ extension WaveformView {
         }
     }
 
+    /// Reconstruct selected artifacts, commit the cleaned signal and restore display settings.
+    /// Use the fit-filtered activation copy when required; failure to create it aborts removal.
+    /// After success, close the sheet and release an interactive replay decision pause.
     func removeSelectedICAComponents(from signal: MFFSignalData) {
         guard let decomposition = ica.decomposition,
               !decomposition.excludedComponents.isEmpty else {
@@ -662,6 +695,8 @@ extension WaveformView {
         }
 
         let excludedComponents = decomposition.excludedComponents
+        // Capture the pre-removal display configuration before asynchronous work so
+        // the cleaned base can be displayed with the previous viewport and filter controls.
         let shouldRestoreFilter = filter.output != nil
         let beforeDisplaySignal = filter.output ?? signal
         let restoredFilterHighPassCutoff = filter.highPassCutoff
@@ -736,6 +771,8 @@ extension WaveformView {
             )
 
             guard !Task.isCancelled, sessionID == recordingSessionID else { return }
+            // Display filtering is a separate step after successful reconstruction. A failure
+            // here leaves no filtered display copy but still allows the cleaned base to commit.
             var restoredFilteredSignal: MFFSignalData?
             if shouldRestoreFilter {
                 do {
@@ -809,6 +846,8 @@ extension WaveformView {
         }
     }
 
+    /// Ask for a save location and atomically write the selected-artifact summary as JSON.
+    /// Cancel or missing decomposition does nothing; encoding/write errors become sheet status.
     func saveICAJSON(_ decomposition: ICADecomposition?) {
         guard let decomposition else { return }
         let panel = NSSavePanel()

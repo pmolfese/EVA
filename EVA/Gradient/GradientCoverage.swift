@@ -314,8 +314,11 @@ nonisolated struct GradientCoverage: Sendable, Equatable {
             } else {
                 status = .corrected
             }
-            let first = record.trigger - diagnostics.samplesBefore
-            let last = record.trigger + diagnostics.samplesAfter
+            let ownership = diagnostics.outputRanges.flatMap { ranges in
+                ranges.indices.contains(record.epoch) ? ranges[record.epoch] : nil
+            }
+            let first = ownership?.lowerBound ?? (record.trigger - diagnostics.samplesBefore)
+            let last = ownership.map { $0.upperBound - 1 } ?? (record.trigger + diagnostics.samplesAfter)
             let start = min(max(Int((Double(first) / Double(factor)).rounded(.down)), 0), sampleCount)
             let end = min(max(Int((Double(last + 1) / Double(factor)).rounded(.up)), 0), sampleCount)
             return GradientEpochCoverage(

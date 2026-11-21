@@ -60,6 +60,8 @@ final class ProcessingCore {
             : ElectrodeGeometry(name: "package coordinates", positions: electrodePositions)
     }
 
+    /// Keep references to the recording store and processing view models shared by this run.
+    /// No processing starts here. Geometry is optional, but stages requiring it may refuse to run.
     init(
         store: RecordingStore,
         filter: FilterViewModel,
@@ -122,6 +124,8 @@ final class ProcessingCore {
         artifactPayload: ArtifactReplayPayload? = nil,
         progress: ((ProgressUpdate) -> Void)? = nil
     ) async -> Result {
+        // Start from the most downstream available base correction. `current` tracks
+        // the signal passed between steps; view models also retain their stage outputs.
         var current = ica.cleanedSignal ?? bcg.correctedSignal ?? gradient.correctedSignal ?? signal
 
         // `icaClean` is `replayable: false` — correctly, because the fitted
@@ -198,6 +202,7 @@ final class ProcessingCore {
 
         for (index, step) in steps.enumerated() {
             let stepName = ReplayStepDisplay.label(for: step.operation)
+            // Allocate equal progress spans to steps, regardless of their actual runtime.
             let stepBase = steps.isEmpty ? 1 : Double(index) / Double(steps.count)
             let stepDone = steps.isEmpty ? 1 : Double(index + 1) / Double(steps.count)
             progress?(ProgressUpdate(stepName: stepName, stepProgress: nil, fileProgress: stepBase))
@@ -316,6 +321,8 @@ final class ProcessingCore {
                         segHealth: segHealth
                     )
                 }
+                // This branch retains the previous signal if filtering produces no output; unlike
+                // the explicit correction guards above, it does not return remaining steps here.
                 current = filter.output ?? current
 
             case .reference:
@@ -483,6 +490,8 @@ final class ProcessingCore {
                     }
                 }
 
+            // Restore thresholds here; actual rejection events are detected from the signal
+            // when a later segmentation step requests them.
             case .thresholdArtifactDetection:
                 artifactVM.blinkThresholdConfig = .fromFlatParameters(
                     step.parameters, prefix: "blink", base: artifactVM.blinkThresholdConfig)
@@ -510,6 +519,7 @@ final class ProcessingCore {
                         segHealth: segHealth
                     )
                 }
+                // Use the reduction output when present; otherwise retain the prior signal.
                 current = wavelet.reducedSignal ?? current
 
             case .trialExclusion:
@@ -536,6 +546,8 @@ final class ProcessingCore {
                 ) else {
                     return Result(signal: current, remainingSteps: Array(steps[index...]))
                 }
+                // The build job snapshots epoching inputs before asynchronous work. Only a
+                // returned average replaces `current`; a nil result leaves the current signal in place.
                 if let averaged = await epoching.applyBuildJob(
                     job,
                     averageReference: epoching.averageReference,
@@ -555,6 +567,8 @@ final class ProcessingCore {
         return Result(signal: current, remainingSteps: [])
     }
 
+    /// Choose the physiology input for filtering: use gradient-corrected PNS when enabled
+    /// and available, otherwise return the supplied raw PNS signal. No raw input means nil.
     private func pnsFilterBaseSignal(pnsSignal: MFFSignalData?) -> MFFSignalData? {
         guard let raw = pnsSignal else { return nil }
         if gradient.appliesToPNS, let correctedPNS = gradient.correctedPNSSignal {
@@ -563,19 +577,22 @@ final class ProcessingCore {
         return raw
     }
 
-    /// Eye-blink/movement rejection events for PSA, computed fresh via the L3
-    /// detector (matching `WaveformView.artifactEventsOrDetection`'s fallback
-    /// branch). Doesn't include defined-artifact-template rejection — this
-    /// core doesn't hold an `ArtifactTemplateViewModel` (that's the drawn,
-    /// per-subject decision step this core already stops at).
+    /// Build PSA rejection events from fresh blink/movement threshold detections
+    /// and optionally the signal’s unreliable-MRI markers. Apply corrected-event
+    /// filtering to eye detections when requested. This helper does not add
+    /// defined-template rejection events, even though the core holds a template model.
     private func psaArtifactRejectionEvents(for signal: MFFSignalData) -> [MFFEvent] {
         guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [] }
         let sensorLayoutName = SensorLayout.load(fromPackageContaining: signal.signalURL)?.name
         var events: [MFFEvent] = []
+        // Corrected event IDs connect cleaning summaries to rejection decisions, so
+        // successfully corrected events can be omitted under the uncorrected-only policy.
         let correctedIDs: Set<String> = artifactVM.cleaningIsEnabled && artifactVM.cleanedSignal != nil
             && epoching.artifactRejectionPolicy == .uncorrected
             ? Set(artifactVM.cleaningSummaries.flatMap(\.correctedEventIDs))
             : []
+        /// Exclude events already corrected when the policy requested only uncorrected artifacts.
+        /// The captured ID set is empty for policies that retain every detected candidate.
         func eligible(_ candidates: [MFFEvent]) -> [MFFEvent] {
             correctedIDs.isEmpty ? candidates : candidates.filter { !correctedIDs.contains($0.id) }
         }

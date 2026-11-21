@@ -53,8 +53,10 @@ nonisolated enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiabl
     case fastICA
     case infomax
 
+    /// Use the stored enum spelling as stable picker identity.
     var id: String { rawValue }
 
+    /// Human-readable solver name for menus and reports.
     var displayName: String {
         switch self {
         case .picard: return "Picard"
@@ -64,6 +66,7 @@ nonisolated enum ICAMethod: String, Codable, Sendable, CaseIterable, Identifiabl
         }
     }
 
+    /// Explain the selected solver’s objective and optimization method to the user.
     var summary: String {
         switch self {
         case .picard:
@@ -108,6 +111,7 @@ nonisolated struct ICAFitFilterSettings: Codable, Sendable, Hashable {
     /// reproduce exactly what they originally did.
     var family: FilterFamily = .iir
 
+    /// Store the filter settings associated with the data used for fitting and activation.
     init(lowCutoff: Double, highCutoff: Double, notch60HzEnabled: Bool, family: FilterFamily = .iir) {
         self.lowCutoff = lowCutoff
         self.highCutoff = highCutoff
@@ -138,6 +142,10 @@ nonisolated struct ICAComponentSuggestion: Sendable {
     var probabilities: [String: Double] = [:]
 }
 
+/// A fitted channel/component coordinate change plus the data used to inspect it.
+/// Matrix shapes: mixing[channel][component], unmixing[component][channel],
+/// componentMaps[component][channel], componentSources[component][analysisSample].
+/// Sources use the analysis sampling rate; they are not automatically full-rate traces.
 nonisolated struct ICADecomposition: Sendable {
     var sourceSignalPath: String
     var sourceSamplingRate: Double
@@ -191,7 +199,15 @@ nonisolated struct SavedICAComponent: Codable, Sendable, Hashable {
     var topography: [Double]
 }
 
+/// Fit pipeline: downsample/reference → center → PCA/whiten → ICA rotation
+/// → construct mixing/unmixing matrices and component summaries. Whitening rescales
+/// retained PCA directions before the selected solver searches for independence.
+/// Cleaning/reconstruction is a separate operation; fitting alone removes no components.
 nonisolated enum ICAArtifactDetector {
+    /// Estimate independent components from channel-by-sample data and return a decomposition.
+    /// Downsampling, optional average reference, centering and PCA prepare the solver input.
+    /// `fitFilter` is recorded as metadata here; filtering must already be done by the caller.
+    /// Throws on insufficient data or observed task cancellation; progress is fractional.
     static func fit(
         signal: MFFSignalData,
         configuration: ICAConfiguration,
@@ -255,6 +271,8 @@ nonisolated enum ICAArtifactDetector {
         try Task.checkCancellation()
         progress?(0.88)
         let sources = multiply(infomax.unmixing, whitened)
+        // Compose the learned feature-space transform with PCA transforms to obtain
+        // matrices that accept or produce the original channel coordinates.
         let inverseRotation = pseudoInverse(infomax.unmixing)
         let mixing = multiply(dewhitening, inverseRotation)
         let unmixing = multiply(infomax.unmixing, whitening)
@@ -288,6 +306,10 @@ nonisolated enum ICAArtifactDetector {
         )
     }
 
+    /// Return a signal copy after subtracting the selected components’ estimated artifacts.
+    /// An optional activation signal supplies the traces used to estimate artifacts, while
+    /// subtraction affects the original signal. Invalid selections or incompatible inputs
+    /// return the original; per-channel limits bound the subtracted artifact amplitude.
     static func cleanedSignal(
         from signal: MFFSignalData,
         activationSignal: MFFSignalData? = nil,
@@ -342,6 +364,8 @@ nonisolated enum ICAArtifactDetector {
             channelCount: channelCount,
             averageReference: decomposition.averageReference
         )
+        // Process full-rate activation in chunks so temporary source and artifact matrices
+        // do not scale with the entire recording duration.
         let blockSamples = 32_768
 
         for blockStart in stride(from: 0, to: sampleCount, by: blockSamples) {
@@ -444,6 +468,8 @@ nonisolated enum ICAArtifactDetector {
         )
     }
 
+    /// Create a serializable summary of excluded components, labels and normalized maps.
+    /// This describes selected artifacts; it is not the full mixing/unmixing decomposition.
     static func savedArtifactSet(from decomposition: ICADecomposition) -> SavedICAArtifactSet {
         let components = decomposition.excludedComponents.sorted().map { index in
             SavedICAComponent(
@@ -478,6 +504,7 @@ enum ICAError: LocalizedError {
     case emptySignal
     case singularMatrix
 
+    /// Translate an ICA failure into text suitable for an error alert.
     var errorDescription: String? {
         switch self {
         case .emptySignal:
@@ -488,6 +515,8 @@ enum ICAError: LocalizedError {
     }
 }
 
+/// Subtract the across-channel mean at each sample from every available channel.
+/// For ragged input the fallback still divides by the total channel count.
 nonisolated private func averageReferenced(_ data: [[Double]]) -> [[Double]] {
     guard let sampleCount = data.first?.count,
           sampleCount > 0,
@@ -533,6 +562,9 @@ nonisolated private func averageReferenced(_ data: [[Double]]) -> [[Double]] {
     return referenced
 }
 
+/// Keep the leading PCA directions up to the requested variance and component limits.
+/// Discard directions tiny relative to the largest eigenvalue, retaining at least one
+/// when candidates exist so near-zero directions do not dominate whitening.
 nonisolated private func selectedPCAIndices(
     ordered: [Int],
     eigenvalues: [Double],
@@ -567,6 +599,8 @@ nonisolated private func selectedPCAIndices(
     return Array(ordered.prefix(count))
 }
 
+/// Estimate each component’s sensor-space contribution as source variance × map energy.
+/// These are nonnegative magnitudes, not fractions normalized to sum to one.
 nonisolated private func componentContributions(mixingMatrix: [[Double]], sources: [[Double]]) -> [Double] {
     sources.indices.map { component in
         let sourceVariance = variance(sources[component])
@@ -579,6 +613,7 @@ nonisolated private func componentContributions(mixingMatrix: [[Double]], source
     }
 }
 
+/// Compute a temporal mean per requested channel, using zero for absent or empty channels.
 nonisolated private func channelMeans(_ data: [[Float]], channelCount: Int) -> [Float] {
     (0..<channelCount).map { channel in
         guard channel < data.count, !data[channel].isEmpty else { return 0 }
@@ -587,6 +622,8 @@ nonisolated private func channelMeans(_ data: [[Float]], channelCount: Int) -> [
     }
 }
 
+/// Compute temporal channel means after average referencing, without changing input data.
+/// Only full-length channels contribute; the reference divisor remains `channelCount`.
 nonisolated private func averageReferencedChannelMeans(_ data: [[Float]], channelCount: Int) -> [Float] {
     guard let sampleCount = data.first?.count,
           sampleCount > 0,
@@ -594,9 +631,8 @@ nonisolated private func averageReferencedChannelMeans(_ data: [[Float]], channe
         return Array(repeating: 0, count: channelCount)
     }
 
-    // Build a (channelCount × sampleCount) interleaved matrix so we can compute
-    // the per-sample average reference in one vDSP pass, then subtract it from
-    // each channel before accumulating the mean — all without per-sample scalar loops.
+    // Accumulate one reference trace, then reuse a scratch trace to subtract it
+    // from each channel. Vector operations avoid per-sample scalar loops.
     var channelSums = [Float](repeating: 0, count: channelCount)
     var referenceSums = [Float](repeating: 0, count: sampleCount)
 
@@ -624,6 +660,9 @@ nonisolated private func averageReferencedChannelMeans(_ data: [[Float]], channe
     return channelSums
 }
 
+/// Set a subtraction cap from sampled, centered absolute amplitudes for each channel.
+/// Twenty times the approximate 99th percentile is bounded to 500...5,000; missing
+/// usable samples use 500. These limits constrain artifact estimates, not output samples.
 nonisolated private func artifactCorrectionLimits(
     _ data: [[Float]],
     means: [Float],
@@ -670,6 +709,8 @@ nonisolated private func artifactCorrectionLimits(
     }
 }
 
+/// Subtract each channel’s supplied or computed temporal mean and return both.
+/// Supplied means must contain one entry for every channel.
 nonisolated private func center(_ data: [[Double]], means suppliedMeans: [Double]? = nil) -> (samples: [[Double]], means: [Double]) {
     let means = suppliedMeans ?? data.map { channel in
         channel.reduce(0, +) / Double(max(channel.count, 1))
@@ -680,6 +721,8 @@ nonisolated private func center(_ data: [[Double]], means suppliedMeans: [Double
     return (centered, means)
 }
 
+/// Compute channel covariance as X × Xᵀ / (sampleCount − 1) for already-centered data.
+/// Rows must have the supplied sample count so the packed BLAS dimensions agree.
 nonisolated private func covarianceMatrix(_ data: [[Double]], sampleCount: Int) -> [[Double]] {
     let channels = data.count
     guard channels > 0, sampleCount > 0 else { return [] }
@@ -708,6 +751,8 @@ nonisolated private func covarianceMatrix(_ data: [[Double]], sampleCount: Int) 
     return unflatten(covariance, rows: channels, columns: channels)
 }
 
+/// Build component-by-channel rows that project onto PCA directions and divide by
+/// their standard deviations, making retained directions approximately unit variance.
 nonisolated private func whiteningMatrix(eigenvectors: [[Double]], eigenvalues: [Double], selected: [Int]) -> [[Double]] {
     selected.map { eigenIndex in
         let scale = 1.0 / sqrt(max(eigenvalues[eigenIndex], 1e-12))
@@ -715,6 +760,8 @@ nonisolated private func whiteningMatrix(eigenvectors: [[Double]], eigenvalues: 
     }
 }
 
+/// Build the channel-by-component transform that restores retained PCA scales.
+/// It maps whitened coordinates back into the retained sensor-space subspace.
 nonisolated private func dewhiteningMatrix(eigenvectors: [[Double]], eigenvalues: [Double], selected: [Int]) -> [[Double]] {
     eigenvectors.map { row in
         selected.map { eigenIndex in
@@ -725,11 +772,14 @@ nonisolated private func dewhiteningMatrix(eigenvectors: [[Double]], eigenvalues
 
 // MARK: - ICA solver dispatch (flat Float / BLAS)
 //
-// All three solvers operate on the whitened data in a single contiguous
+// All four solvers operate on the whitened data in a single contiguous
 // row-major Float buffer (features × samples). Working in Float and reusing
 // preallocated scratch buffers (instead of allocating nested [[Double]] every
 // block) is what makes the decomposition fast enough to feel instant locally.
 
+/// Pack whitened data into Float buffers and dispatch to the requested solver.
+/// The returned unmixing matrix acts in whitened feature space. The outer fit function
+/// checks cancellation again before accepting a partial solver result.
 nonisolated private func solveICA(
     _ data: [[Double]],
     method: ICAMethod,
@@ -795,6 +845,9 @@ nonisolated private func solveICA(
 
 // MARK: - BLAS / vForce helpers
 
+/// Compute C = alpha × op(A) × op(B) + beta × C in row-major Float buffers.
+/// `m`, `n`, `k` describe the product; leading dimensions are stored row widths.
+/// Unsafe pointers remain valid only inside their buffer closures.
 @inline(__always)
 nonisolated private func blasSGEMM(
     transA: Bool, transB: Bool,
@@ -822,6 +875,7 @@ nonisolated private func blasSGEMM(
     }
 }
 
+/// Write tanh of the first `count` source elements into an already-sized destination.
 @inline(__always)
 nonisolated private func tanhInPlace(_ source: [Float], into destination: inout [Float], count: Int) {
     guard count > 0 else { return }
@@ -833,6 +887,7 @@ nonisolated private func tanhInPlace(_ source: [Float], into destination: inout 
     }
 }
 
+/// Create a flat square identity matrix: ones on its diagonal, zeros elsewhere.
 @inline(__always)
 nonisolated private func identityFloat(_ size: Int) -> [Float] {
     var result = [Float](repeating: 0, count: size * size)
@@ -842,6 +897,7 @@ nonisolated private func identityFloat(_ size: Int) -> [Float] {
     return result
 }
 
+/// Unpack a row-major Float buffer into Double rows for the public matrix representation.
 @inline(__always)
 nonisolated private func flatToNested(_ values: [Float], rows: Int, columns: Int) -> [[Double]] {
     (0..<rows).map { row in
@@ -851,6 +907,8 @@ nonisolated private func flatToNested(_ values: [Float], rows: Int, columns: Int
 }
 
 // Symmetric decorrelation: W <- (W Wᵀ)^(-1/2) W, used by FastICA.
+/// Normalize weight rows together so they become approximately orthonormal.
+/// This prevents multiple FastICA rows from converging to the same direction.
 nonisolated private func symmetricDecorrelate(_ weights: inout [Float], features: Int) {
     var gram = [Float](repeating: 0, count: features * features)
     blasSGEMM(transA: false, transB: true,
@@ -886,6 +944,8 @@ nonisolated private func symmetricDecorrelate(_ weights: inout [Float], features
 }
 
 // log|det(M)| via Gaussian elimination with partial pivoting. Returns nil if singular.
+/// Compute log of the absolute determinant using pivoted elimination.
+/// Adding logarithms avoids multiplying many scales; a near-zero pivot returns nil.
 nonisolated private func logAbsDeterminant(_ matrix: [Float], features: Int) -> Double? {
     var a = (0..<features).map { row in
         (0..<features).map { Double(matrix[row * features + $0]) }
@@ -915,6 +975,9 @@ nonisolated private func logAbsDeterminant(_ matrix: [Float], features: Int) -> 
 
 // MARK: - Extended Infomax (flat Float port of the previous implementation)
 
+/// Fit extended Infomax with shuffled sample blocks, adaptive signs and learning rate.
+/// Unstable weights trigger a restart at a lower rate. Return the last weights, completed
+/// iteration count and squared weight change when stopping or cancellation is observed.
 nonisolated private func infomaxFloat(
     _ data: [Float], features: Int, samples: Int,
     maxIterations: Int, learningRate: Double?,
@@ -1064,6 +1127,8 @@ nonisolated private func infomaxFloat(
             }
         }
 
+        // Discard the unstable trajectory and retry more cautiously. The iteration counter
+        // resets here, so it counts iterations in the current attempt.
         if weightsBlewUp {
             iterations = 0
             blockNumber = 1
@@ -1133,6 +1198,8 @@ nonisolated private func infomaxFloat(
     return (flatToNested(weights, rows: features, columns: features), iterations, finalChange)
 }
 
+/// Estimate source kurtosis on selected samples and smooth it with the previous estimate.
+/// Its sign selects the source-density behavior; inout arguments update solver state.
 nonisolated private func updateInfomaxSigns(
     weights: [Float], data: [Float], features: Int, samples: Int,
     indices: [Int], oldKurtosis: inout [Double], oldSigns: inout [Double],
@@ -1181,6 +1248,9 @@ nonisolated private func updateInfomaxSigns(
 
 // MARK: - FastICA (symmetric, logcosh nonlinearity)
 
+/// Fit all independent directions together with tanh fixed-point updates.
+/// Re-orthogonalize each step and stop when row directions change little, ignoring
+/// sign flips because a component and its negative represent the same separation.
 nonisolated private func fastICAFloat(
     _ data: [Float], features: Int, samples: Int,
     maxIterations: Int, convergenceTolerance: Double, minimumIterations: Int,
@@ -1273,6 +1343,9 @@ nonisolated private func fastICAFloat(
 // signals, using the relative gradient preconditioned by a diagonal Hessian
 // approximation and an L-BFGS memory, with a backtracking line search.
 
+/// Fit unconstrained ICA using curvature-scaled L-BFGS steps and a shrinking line search.
+/// L-BFGS remembers recent steps and gradient changes to improve search directions;
+/// failed searches discard that history before giving up. Return the last accepted fit.
 nonisolated private func picardFloat(
     _ data: [Float], features: Int, samples: Int,
     maxIterations: Int, convergenceTolerance: Double, minimumIterations: Int,
@@ -1305,6 +1378,8 @@ nonisolated private func picardFloat(
     var iterations = 0
     var finalChange = Double.infinity
 
+    /// Update captured gradient and curvature estimates from the current sources.
+    /// The gradient gives a descent direction; curvature rescales steps for stability.
     func computeGradientAndHessian() {
         tanhInPlace(signals, into: &psiY, count: n * samples)
         // G = (1/T) psiY · Yᵀ - I
@@ -1357,6 +1432,8 @@ nonisolated private func picardFloat(
     }
 
     // z = H^{-1} G via the 2×2 block structure of the relative Hessian.
+    /// Apply the approximate inverse Hessian to a gradient without forming a full inverse.
+    /// Each coupled pair uses a 2×2 solve, falling back when its determinant is too small.
     func solveHessian(_ g: [Float], into z: inout [Float]) {
         for i in 0..<n {
             for j in 0..<n {
@@ -1377,6 +1454,8 @@ nonisolated private func picardFloat(
     // Data term of the likelihood loss: sum over components of the per-sample
     // mean log cosh, i.e. the total divided by the sample count (NOT by n·T).
     // This is what makes the loss consistent with the (1/T)·ψ(Y)Yᵀ − I gradient.
+    /// Evaluate the source-density part of the objective using a numerically stable log-cosh.
+    /// The sample count, rather than the element count, is the normalization denominator.
     func dataLoss(_ buffer: [Float], elementCount: Int) -> Double {
         var total = 0.0
         for index in 0..<elementCount {
@@ -1386,6 +1465,7 @@ nonisolated private func picardFloat(
         return total / Double(samples)
     }
 
+    /// Accumulate an equal-length Float vector dot product in Double precision.
     func dot(_ a: [Float], _ b: [Float]) -> Double {
         var total = 0.0
         for index in 0..<a.count { total += Double(a[index]) * Double(b[index]) }
@@ -1530,6 +1610,9 @@ nonisolated private func picardFloat(
 //   3. The step is a rotation W ← expm(α·E)·W (E skew-symmetric) instead of the
 //      affine (I + α·D)·W. Because every step is orthogonal, |det| = 1 and the
 //      log|det| term drops out of the line-search loss.
+/// Fit ICA while constraining updates to rotations of the whitened data.
+/// Use curvature and recent-step history to choose a rotation, then shrink it until
+/// the loss decreases sufficiently. Return the last accepted weights on termination.
 nonisolated private func picardOFloat(
     _ data: [Float], features: Int, samples: Int,
     maxIterations: Int, convergenceTolerance: Double, minimumIterations: Int,
@@ -1564,6 +1647,8 @@ nonisolated private func picardOFloat(
     var finalChange = Double.infinity
 
     // Γ = G − Gᵀ with G = (1/T)·ψ(Y)·Yᵀ, and κ_i = E[y_i ψ(y_i)] − E[ψ'(y_i)].
+    /// Refresh the captured rotational gradient and per-component curvature estimates.
+    /// Subtracting the transpose makes the gradient skew-symmetric (opposite off-diagonal pairs).
     func computeGradientAndHessian() {
         tanhInPlace(signals, into: &psiY, count: n * samples)
         // full[i,j] = (1/T) Σ_t ψ(y_i)·y_j
@@ -1594,6 +1679,8 @@ nonisolated private func picardOFloat(
     }
 
     // z = H^{-1} Γ with the diagonal orthogonal-constraint Hessian h_ij = κ_i + κ_j.
+    /// Scale the rotational gradient by positive, floored pairwise curvature.
+    /// Keep diagonal entries zero so the proposed step remains a rotation direction.
     func solveHessian(_ g: [Float], into z: inout [Float]) {
         for i in 0..<n {
             for j in 0..<n {
@@ -1610,6 +1697,7 @@ nonisolated private func picardOFloat(
     // Data term of the likelihood loss: Σ over elements of per-sample mean log cosh.
     // No log|det| term — orthogonal steps have |det| = 1. Matches `picardFloat`'s
     // `dataLoss` so the two solvers report comparable objectives.
+    /// Compute mean-per-sample log-cosh loss. A rotation needs no determinant penalty.
     func dataLoss(_ buffer: [Float], elementCount: Int) -> Double {
         var total = 0.0
         for index in 0..<elementCount {
@@ -1619,6 +1707,7 @@ nonisolated private func picardOFloat(
         return total / Double(samples)
     }
 
+    /// Accumulate an equal-length Float vector dot product in Double precision.
     func dot(_ a: [Float], _ b: [Float]) -> Double {
         var total = 0.0
         for index in 0..<a.count { total += Double(a[index]) * Double(b[index]) }
@@ -1745,6 +1834,9 @@ nonisolated private func picardOFloat(
 // truncated Taylor series. The result is orthogonal (a rotation), which is what
 // keeps Picard-O's unmixing on the orthogonal manifold. Written into `result`
 // (row-major, features × features).
+/// Approximate the matrix exponential of a scaled skew-symmetric matrix into `result`.
+/// Scale down, evaluate a seventh-order Taylor series, then repeatedly square to
+/// restore scale. In exact arithmetic the exponential is a rotation.
 nonisolated private func skewMatrixExponential(
     _ skew: [Float], scale: Float, features n: Int, into result: inout [Float]
 ) {
@@ -1794,6 +1886,8 @@ nonisolated private func skewMatrixExponential(
     result = acc
 }
 
+/// Shuffle indices in place with a seeded Fisher–Yates pass for reproducible block order.
+/// Swift’s &* and &+ intentionally wrap integer overflow in the pseudorandom generator.
 nonisolated private func deterministicShuffle(_ values: inout [Int], seed: Int) {
     var state = UInt64(seed) &* 6364136223846793005 &+ 1
     guard values.count > 1 else { return }
@@ -1805,6 +1899,7 @@ nonisolated private func deterministicShuffle(_ values: inout [Int], seed: Int) 
 }
 
 
+/// Return sample variance about the mean, or zero for empty/single-value input.
 nonisolated private func variance(_ values: [Double]) -> Double {
     guard !values.isEmpty else { return 0 }
     let mean = values.reduce(0, +) / Double(values.count)
@@ -1816,6 +1911,8 @@ nonisolated private func variance(_ values: [Double]) -> Double {
     return total / Double(max(values.count - 1, 1))
 }
 
+/// Replace nonfinite map values with zero, remove the mean and scale by peak magnitude.
+/// Return zeros for a constant map; the result emphasizes spatial shape over amplitude.
 nonisolated func normalizedTopography(_ values: [Double]) -> [Double] {
     guard !values.isEmpty else { return [] }
     let finiteValues = values.map { $0.isFinite ? $0 : 0 }
@@ -1828,6 +1925,8 @@ nonisolated func normalizedTopography(_ values: [Double]) -> [Double] {
     return centered.map { $0 / scale }
 }
 
+/// Multiply rectangular Double matrices through Accelerate’s BLAS implementation.
+/// Check the shared dimension, then pack/unpack row-major buffers; callers supply regular rows.
 nonisolated private func multiply(_ lhs: [[Double]], _ rhs: [[Double]]) -> [[Double]] {
     guard let lhsColumns = lhs.first?.count,
           lhsColumns == rhs.count,
@@ -1860,6 +1959,7 @@ nonisolated private func multiply(_ lhs: [[Double]], _ rhs: [[Double]]) -> [[Dou
     return unflatten(result, rows: lhsRows, columns: rhsColumns)
 }
 
+/// Concatenate matrix rows in row-major order for numerical-library calls.
 nonisolated private func flatten(_ matrix: [[Double]]) -> [Double] {
     guard let columns = matrix.first?.count else { return [] }
     var values: [Double] = []
@@ -1870,6 +1970,7 @@ nonisolated private func flatten(_ matrix: [[Double]]) -> [Double] {
     return values
 }
 
+/// Split a sufficiently long row-major buffer into the requested rectangular rows.
 nonisolated private func unflatten(_ values: [Double], rows: Int, columns: Int) -> [[Double]] {
     guard rows > 0, columns > 0 else { return [] }
     return (0..<rows).map { row in
@@ -1878,6 +1979,9 @@ nonisolated private func unflatten(_ values: [Double], rows: Int, columns: Int) 
     }
 }
 
+/// Compute A⁺ = (AᵀA)⁺Aᵀ using an eigenvalue cutoff to ignore unstable directions.
+/// A pseudoinverse handles reduced rank; invalid shapes return empty and failed
+/// eigendecomposition falls back to the local inverse routine.
 nonisolated private func pseudoInverse(_ matrix: [[Double]], relativeTolerance: Double = 1e-12) -> [[Double]] {
     guard let columns = matrix.first?.count,
           !matrix.isEmpty,
@@ -1894,6 +1998,8 @@ nonisolated private func pseudoInverse(_ matrix: [[Double]], relativeTolerance: 
     }
 
     let maxEigenvalue = max(eigen.values.map(abs).max() ?? 0, 1e-18)
+    // The cutoff is relative to the strongest direction; omitted eigenvectors contribute
+    // zero rather than amplifying numerical noise through division by tiny values.
     let tolerance = maxEigenvalue * relativeTolerance
     var gramPseudoInverse = Array(repeating: Array(repeating: 0.0, count: columns), count: columns)
 
@@ -1912,6 +2018,9 @@ nonisolated private func pseudoInverse(_ matrix: [[Double]], relativeTolerance: 
     return multiply(gramPseudoInverse, matrixT)
 }
 
+/// Apply pivoted Gauss–Jordan elimination to a square matrix alongside an identity matrix.
+/// Small pivots use a numerical floor rather than throwing, so singular inputs do not
+/// produce a guaranteed mathematical inverse.
 nonisolated private func inverse(_ matrix: [[Double]]) -> [[Double]] {
     let n = matrix.count
     var a = matrix

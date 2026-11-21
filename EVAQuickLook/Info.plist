@@ -8,7 +8,7 @@
 		<dict>
 			<key>QLSupportedContentTypes</key>
 			<array>
-				<string>com.egi.mff</string>
+				<string>com.egi.mffrecording</string>
 				<string>org.nitrc.cifti-2</string>
 				<string>gov.nih.nifti-1</string>
 				<string>gov.nih.nifti-1-gzip</string>

@@ -329,3 +329,32 @@ PCA-S classes use included artifact events, so R-wave fallback cannot bypass
 held/excluded candidates. Threshold descendants retain the original separation
 from automatic epoch-rejection selection. Source-revision/replay limitations
 noted above still apply; cross-recording detector re-execution remains separate.
+
+## Additional source files
+
+These entries complete the source-group inventory at this review. The
+[checked repository inventory](../source-inventory.md) lists nested/shared groups
+and test/tool sources as well.
+
+| File | Responsibility |
+| --- | --- |
+| [ArtifactCleanRunGrade.swift](../../../EVA/Artifacts/ArtifactCleanRunGrade.swift) | Defines and evaluates the quality report for an artifact-cleaning run. |
+| [ArtifactCleaningExecutor.swift](../../../EVA/Artifacts/ArtifactCleaningExecutor.swift) | Coordinates execution of selected artifact-cleaning work. |
+| [ArtifactSpatialGrouping.swift](../../../EVA/Artifacts/ArtifactSpatialGrouping.swift) | Groups artifacts using their spatial/channel patterns. |
+| [ArtifactWaveformGrouping.swift](../../../EVA/Artifacts/ArtifactWaveformGrouping.swift) | Groups artifact waveforms by waveform similarity for review/cleaning. |
+| [CorneoRetinalCorrection.swift](../../../EVA/Artifacts/CorneoRetinalCorrection.swift) | Computes correction of corneo-retinal ocular contributions. |
+| [CorneoRetinalCorrectionViews.swift](../../../EVA/Artifacts/CorneoRetinalCorrectionViews.swift) | Presents corneo-retinal correction setup, review, and application. |
+| [CorneoRetinalHelp.swift](../../../EVA/Artifacts/CorneoRetinalHelp.swift) | Explains corneo-retinal correction methods and controls. |
+| [CorneoRetinalViewModel.swift](../../../EVA/Artifacts/CorneoRetinalViewModel.swift) | Owns corneo-retinal settings, jobs, and correction outputs. |
+| [MAACPreliminaryBlinkDetector.swift](../../../EVA/Artifacts/MAACPreliminaryBlinkDetector.swift) | Finds preliminary blink candidates for the MAAC artifact workflow. |
+| [MovementPCACorrection.swift](../../../EVA/Artifacts/MovementPCACorrection.swift) | Fits and applies movement-related PCA correction. |
+| [MovementPCACorrectionViews.swift](../../../EVA/Artifacts/MovementPCACorrectionViews.swift) | Presents movement PCA settings, previews, and apply actions. |
+| [MovementPCAViewModel.swift](../../../EVA/Artifacts/MovementPCAViewModel.swift) | Owns movement PCA configuration, asynchronous run state, and results. |
+| [MuscleBSSCCACorrection.swift](../../../EVA/Artifacts/MuscleBSSCCACorrection.swift) | Computes muscle-artifact correction using BSS/CCA components. |
+| [MuscleBSSCCACorrectionViews.swift](../../../EVA/Artifacts/MuscleBSSCCACorrectionViews.swift) | Presents muscle BSS/CCA setup and correction review. |
+| [MuscleBSSCCAViewModel.swift](../../../EVA/Artifacts/MuscleBSSCCAViewModel.swift) | Owns muscle BSS/CCA settings, background work, and results. |
+| [SaccadicSpikeCorrection.swift](../../../EVA/Artifacts/SaccadicSpikeCorrection.swift) | Detects/models and corrects saccadic-spike contributions. |
+| [SaccadicSpikeCorrectionViews.swift](../../../EVA/Artifacts/SaccadicSpikeCorrectionViews.swift) | Presents saccadic-spike correction settings, preview, and application. |
+| [SaccadicSpikeHelp.swift](../../../EVA/Artifacts/SaccadicSpikeHelp.swift) | Explains saccadic-spike correction choices and limitations. |
+| [SaccadicSpikeViewModel.swift](../../../EVA/Artifacts/SaccadicSpikeViewModel.swift) | Owns saccadic-spike settings, work state, and correction outputs. |
+| [ThresholdOcularReviewViews.swift](../../../EVA/Artifacts/ThresholdOcularReviewViews.swift) | Presents threshold-based ocular detection review controls. |

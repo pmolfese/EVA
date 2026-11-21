@@ -57,6 +57,7 @@ nonisolated struct MovementPCAEpochDiagnostic: Sendable, Equatable {
     let factors: [MovementPCAFactorDiagnostic]
     let skippedReason: String?
 
+    /// Number of fitted factors selected for subtraction in this epoch.
     var removedFactorCount: Int { factors.count(where: \.removed) }
 }
 
@@ -65,9 +66,13 @@ nonisolated struct MovementPCADiagnostics: Sendable, Equatable {
     let resolvedMode: MovementPCARangeMode
     let epochs: [MovementPCAEpochDiagnostic]
 
+    /// Epochs with a usable decomposition, including those needing no subtraction.
     var analyzedEpochCount: Int { epochs.count(where: { $0.skippedReason == nil }) }
+    /// Epochs left unchanged because their data or decomposition was unusable.
     var skippedEpochCount: Int { epochs.count - analyzedEpochCount }
+    /// Total removed factors across epochs; factors are fitted separately in each epoch.
     var removedFactorCount: Int { epochs.reduce(0) { $0 + $1.removedFactorCount } }
+    /// Epochs in which at least one fitted factor exceeded the removal threshold.
     var affectedEpochCount: Int { epochs.count(where: { $0.removedFactorCount > 0 }) }
 }
 
@@ -95,6 +100,9 @@ nonisolated struct MovementPCAProgress: Sendable, Equatable {
     let workerCount: Int
     let elapsedSeconds: Double
 
+    /// Maps phases to a progress fraction from zero to one. Decomposition receives
+    /// most of the bar and is weighted by samples, so a short final window contributes
+    /// less than a full one. Preparing and assembly retain small fixed portions.
     var fraction: Double {
         switch phase {
         case .preparing:
@@ -109,11 +117,14 @@ nonisolated struct MovementPCAProgress: Sendable, Equatable {
         }
     }
 
+    /// Average completed epochs per elapsed second, or zero before time has elapsed.
     var rangesPerSecond: Double {
         guard elapsedSeconds > 0 else { return 0 }
         return Double(completedRangeCount) / elapsedSeconds
     }
 
+    /// Extrapolates remaining processing time from completed samples. Returns nil
+    /// until progress exists, or when all samples have already been accounted for.
     var estimatedSecondsRemaining: Double? {
         guard completedSampleCount > 0,
               completedSampleCount < totalSampleCount,
@@ -132,6 +143,9 @@ nonisolated enum MovementPCAArtifactMarkerBuilder {
     static let eventCode = "MOV"
     static let sourceFile = "MAAC-3 Movement PCA"
 
+    /// Creates one onset-anchored MOV event for every epoch with removed factors.
+    /// Converts half-open sample ranges into onset/duration seconds and keeps
+    /// epoch order. Invalid sampling rates produce no events.
     static func events(
         from diagnostics: MovementPCADiagnostics,
         samplingRate: Double
@@ -167,6 +181,7 @@ nonisolated enum MovementPCACorrectionError: Error, LocalizedError, Equatable {
     case invalidConfiguration
     case noEpochSegments
 
+    /// Provides a user-readable explanation for signal, settings, or epoch errors.
     var errorDescription: String? {
         switch self {
         case .invalidSignal:
@@ -194,6 +209,9 @@ private nonisolated final class MovementPCAProgressTracker: @unchecked Sendable 
     private var skippedRangeCount = 0
     private var removedFactorCount = 0
 
+    /// Creates a lock-protected accumulator shared by the parallel epoch workers.
+    /// The callback runs on the reporting worker, while the tracker’s lock is held;
+    /// it should enqueue UI work rather than synchronously reentering this tracker.
     init(
         totalRangeCount: Int,
         totalSampleCount: Int,
@@ -206,6 +224,8 @@ private nonisolated final class MovementPCAProgressTracker: @unchecked Sendable 
         self.callback = callback
     }
 
+    /// Adds one epoch’s sample count and outcome totals, then reports decomposition
+    /// progress. The lock keeps simultaneous workers from losing counter updates.
     func recordCompleted(_ diagnostic: MovementPCAEpochDiagnostic) {
         lock.lock()
         completedRangeCount += 1
@@ -217,12 +237,15 @@ private nonisolated final class MovementPCAProgressTracker: @unchecked Sendable 
         lock.unlock()
     }
 
+    /// Reports a phase transition with a consistent snapshot of the current counters.
     func report(phase: MovementPCAProgress.Phase) {
         lock.lock()
         emitLocked(phase: phase)
         lock.unlock()
     }
 
+    /// Builds the progress snapshot and invokes the optional callback. Callers must
+    /// already hold lock; this helper deliberately does not acquire it again.
     private func emitLocked(phase: MovementPCAProgress.Phase) {
         callback?(MovementPCAProgress(
             phase: phase,
@@ -242,6 +265,11 @@ private nonisolated final class MovementPCAProgressTracker: @unchecked Sendable 
 nonisolated enum MovementPCACorrector {
     private static let minimumEpochSamples = 3
 
+    /// Returns a corrected copy of a rectangular channel-by-sample signal plus
+    /// per-epoch diagnostics. Resolves analysis windows, fits each independently in
+    /// parallel, then installs corrected rows in range order. Excluded channels and
+    /// skipped epochs retain their input values. Invalid inputs/settings throw;
+    /// numerical failures within an epoch are recorded as skips instead.
     static func correct(
         data: [[Float]],
         samplingRate: Double,
@@ -328,12 +356,19 @@ nonisolated enum MovementPCACorrector {
         )
     }
 
+    /// Caps the reported worker count by available workers and the number of ranges,
+    /// with a minimum of one even when there are no ranges.
     static func workerCount(for rangeCount: Int) -> Int {
         min(max(rangeCount, 1), evaMaxWorkers)
     }
 
     /// Public to the test target so the two range contracts stay pinned without
     /// needing a numerically non-trivial PCA fixture for every boundary case.
+    /// Resolves automatic mode and builds half-open sample ranges within the signal.
+    /// Continuous windows include a shorter final window. Stored epoch endpoints
+    /// are inclusive, so their end is advanced by one before clipping. Explicit
+    /// epoch mode throws when no usable recorded boundaries remain. Sampling rate
+    /// and settings are expected to have been validated by correct.
     static func analysisRanges(
         sampleCount: Int,
         samplingRate: Double,
@@ -383,6 +418,11 @@ nonisolated enum MovementPCACorrector {
         let diagnostic: MovementPCAEpochDiagnostic
     }
 
+    /// Fits temporal PCA and Promax rotation within one validated sample range.
+    /// Channels are observations; time points are variables. Subtracts factors whose
+    /// back-projection exceeds the peak-to-peak threshold on any usable channel.
+    /// Returns only changed channel rows and a diagnostic, or a skip explanation
+    /// when the data/decomposition cannot support the model.
     private static func correctEpoch(
         original: [[Float]],
         range: Range<Int>,
@@ -400,6 +440,8 @@ nonisolated enum MovementPCACorrector {
             return skipped(range: range, usableChannels: channels.count, reason: "fewer than three finite, usable channels")
         }
 
+        // This is TEMPORAL PCA: columns represent times, rows represent channels.
+        // Center across channels at each time, rather than across time within a channel.
         let observationCount = channels.count
         let timeCount = range.count
         var means = [Double](repeating: 0, count: timeCount)
@@ -414,6 +456,8 @@ nonisolated enum MovementPCACorrector {
         }
         let scale = standardDeviations.max() ?? 0
         let flatTolerance = max(scale * 1e-12, Double.leastNonzeroMagnitude)
+        // A time point with effectively no cross-channel variance cannot contribute
+        // a temporal loading. Leave those samples out of fitting and subtraction.
         let activeTimes = (0..<timeCount).filter { standardDeviations[$0] > flatTolerance }
         guard activeTimes.count >= 2 else {
             return skipped(range: range, usableChannels: channels.count, reason: "epoch has no cross-channel variance")
@@ -435,6 +479,8 @@ nonisolated enum MovementPCACorrector {
               largestSingular > 0 else {
             return skipped(range: range, usableChannels: channels.count, reason: "PCA decomposition failed")
         }
+        // Only singular values larger than numerical roundoff count as independent
+        // factors. This prevents fitting noise directions in nearly dependent data.
         let rankTolerance = Double(max(centeredWork.rows, centeredWork.cols)) * Double.ulpOfOne * largestSingular
         let numericalRank = svd.s.count(where: { $0 > rankTolerance })
         let requestedFactorCount = min(configuration.maximumFactorCount, numericalRank)
@@ -471,6 +517,8 @@ nonisolated enum MovementPCACorrector {
                 var minimum = Double.infinity
                 var maximum = -Double.infinity
                 for column in 0..<activeTimes.count {
+                    // One factor’s reconstructed value = channel score × temporal pattern.
+                    // Measure that factor alone before deciding whether to subtract it.
                     let value = decomposition.scores[row, factor] * decomposition.pattern[column, factor]
                     minimum = min(minimum, value)
                     maximum = max(maximum, value)
@@ -499,6 +547,8 @@ nonisolated enum MovementPCACorrector {
             )
         }
 
+        // Start from the original epoch and subtract only selected contributions.
+        // Times omitted from activeTimes and channels omitted from fitting stay intact.
         var correctedRows: [(Int, [Float])] = []
         correctedRows.reserveCapacity(channels.count)
         for (row, channel) in channels.enumerated() {
@@ -524,6 +574,8 @@ nonisolated enum MovementPCACorrector {
         )
     }
 
+    /// Represents an unchanged epoch with a diagnostic explaining why fitting was
+    /// skipped. An empty correctedRows array lets assembly retain the original data.
     private static func skipped(
         range: Range<Int>,
         usableChannels: Int = 0,
@@ -541,6 +593,10 @@ nonisolated enum MovementPCACorrector {
         )
     }
 
+    /// Converts retained singular vectors to standardized temporal loadings, rotates
+    /// them with Varimax then Promax, and fits channel scores against the raw data.
+    /// Returns time-by-factor patterns in microvolts and dimensionless channel-by-factor
+    /// scores. Throws when the rotated model cannot yield usable scores.
     private static func fittedFactors(
         scoringWork: MovementDenseMatrix,
         variableSD: [Double],
@@ -559,6 +615,9 @@ nonisolated enum MovementPCACorrector {
             }
         }
 
+        // Communality is the sum of squared retained loadings for a time point.
+        // Dividing by its square root is Kaiser normalization, so high-amplitude
+        // time points do not dominate rotation merely because of their scale.
         let communalities = (0..<variables).map { variable in
             (0..<factorCount).reduce(0.0) { $0 + loadings[variable, $1] * loadings[variable, $1] }
         }
@@ -578,6 +637,8 @@ nonisolated enum MovementPCACorrector {
             for factor in 0..<factorCount { pattern[variable, factor] *= undoKaiser }
         }
 
+        // The pseudoinverse solves for channel coefficients even when the pattern
+        // is rectangular. Matrix shapes are (channels × times) × (times × factors).
         let coefficients = try pattern.pseudoinverse().transposed()
         var scores = scoringWork.multiply(coefficients)
         for factor in 0..<factorCount {
@@ -603,12 +664,15 @@ private nonisolated struct MovementDenseMatrix {
     let cols: Int
     var grid: [Double]
 
+    /// Allocates rows × cols values in column-major order, initially filled with value.
+    /// Dimensions are assumed valid; this private helper does not validate negatives.
     init(rows: Int, cols: Int, repeating value: Double = 0) {
         self.rows = rows
         self.cols = cols
         grid = [Double](repeating: value, count: rows * cols)
     }
 
+    /// Wraps an existing column-major array. Its length must exactly match the shape.
     init(rows: Int, cols: Int, columnMajor: [Double]) {
         precondition(columnMajor.count == rows * cols)
         self.rows = rows
@@ -616,21 +680,27 @@ private nonisolated struct MovementDenseMatrix {
         grid = columnMajor
     }
 
+    /// Accesses a matrix element by zero-based row/column. Each column occupies
+    /// rows consecutive array entries; callers must provide in-bounds indices.
     subscript(_ row: Int, _ column: Int) -> Double {
         get { grid[column * rows + row] }
         set { grid[column * rows + row] = newValue }
     }
 
+    /// Copies one column into a vector in row order. The column index must be valid.
     func column(_ column: Int) -> [Double] {
         Array(grid[(column * rows)..<((column + 1) * rows)])
     }
 
+    /// Returns a copy with one column replaced; does not mutate the receiver.
+    /// The caller supplies a valid column and at least rows values.
     func settingColumn(_ column: Int, to values: [Double]) -> Self {
         var result = self
         for row in 0..<rows { result[row, column] = values[row] }
         return result
     }
 
+    /// Returns a new matrix with rows and columns swapped: result[c, r] = self[r, c].
     func transposed() -> Self {
         var result = Self(rows: cols, cols: rows)
         for column in 0..<cols {
@@ -639,6 +709,8 @@ private nonisolated struct MovementDenseMatrix {
         return result
     }
 
+    /// Computes the matrix product self × other using Accelerate’s Double BLAS routine.
+    /// Requires self.cols == other.rows; the result has self.rows × other.cols entries.
     func multiply(_ other: Self) -> Self {
         precondition(cols == other.rows)
         var result = Self(rows: rows, cols: other.cols)
@@ -651,12 +723,17 @@ private nonisolated struct MovementDenseMatrix {
         return result
     }
 
+    /// Constructs a square matrix with ones on the diagonal and zeros elsewhere.
     static func identity(_ size: Int) -> Self {
         var result = Self(rows: size, cols: size)
         for index in 0..<size { result[index, index] = 1 }
         return result
     }
 
+    /// Solves self × X = rightHandSide using LAPACK’s pivoted linear solver.
+    /// Self must be square and the right-hand side must have the same row count.
+    /// Works on copies because LAPACK overwrites its inputs; reports solver errors
+    /// by throwing rather than returning a partially computed solution.
     func solve(_ rightHandSide: Self) throws -> Self {
         guard rows == cols, rightHandSide.rows == rows else { throw Error.singular }
         var matrix = grid
@@ -674,14 +751,20 @@ private nonisolated struct MovementDenseMatrix {
         return Self(rows: rows, cols: rightHandSide.cols, columnMajor: solution)
     }
 
+    /// Computes a square matrix inverse by solving A × X = I. Throws if solving fails.
     func inverse() throws -> Self { try solve(.identity(rows)) }
 
+    /// Computes a thin singular value decomposition A = U × diag(s) × Vᵀ.
+    /// For an m × n matrix and k = min(m, n), U is m × k and Vᵀ is k × n.
+    /// Thin outputs avoid allocating a large square time-by-time matrix. LAPACK
+    /// errors throw; the original matrix stays unchanged.
     func svd() throws -> (u: Self, s: [Double], vt: Self) {
         let minimum = min(rows, cols)
         var matrix = grid
         var singularValues = [Double](repeating: 0, count: minimum)
         var u = [Double](repeating: 0, count: rows * minimum)
         var vt = [Double](repeating: 0, count: minimum * cols)
+        // LAPACK expects the ASCII code for S, requesting only the thin vectors.
         var jobU: CChar = 83
         var jobVT: CChar = 83
         var rowCount = LAPACKInt(rows)
@@ -691,6 +774,8 @@ private nonisolated struct MovementDenseMatrix {
         var leadingVT = LAPACKInt(minimum)
         var info = LAPACKInt(0)
         var workQuery = 0.0
+        // A workspace length of −1 asks LAPACK how much scratch memory it needs.
+        // The second call below allocates that memory and performs the decomposition.
         var workCount = LAPACKInt(-1)
         dgesvd_(
             &jobU, &jobVT, &rowCount, &columnCount, &matrix, &leadingA,
@@ -713,9 +798,14 @@ private nonisolated struct MovementDenseMatrix {
         )
     }
 
+    /// Builds the tolerance-truncated pseudoinverse V × diag(1/s) × Uᵀ.
+    /// Tiny singular values receive zero instead of being inverted, which avoids
+    /// amplifying nearly unsupported directions. Throws if no usable direction remains.
     func pseudoinverse(relativeTolerance: Double = 1e-12) throws -> Self {
         let (u, singularValues, vt) = try svd()
         let cutoff = relativeTolerance * Double(max(rows, cols)) * (singularValues.first ?? 0)
+        // Inverting a near-zero singular value would magnify roundoff enormously.
+        // Zeroing it discards that unsupported direction from the least-squares fit.
         let inverseValues = singularValues.map { $0 > cutoff ? 1 / $0 : 0 }
         guard inverseValues.contains(where: { $0 > 0 }) else { throw Error.singular }
         var vScaled = vt.transposed()
@@ -727,6 +817,9 @@ private nonisolated struct MovementDenseMatrix {
 }
 
 private nonisolated enum MovementPCARotations {
+    /// Tries seeded orthogonal starting rotations, refines each with pairwise Varimax
+    /// sweeps, and keeps the candidate with the largest local criterion. Returns
+    /// the loadings unchanged for a single factor; the seed makes restarts repeatable.
     static func varimax(
         _ loadings: MovementDenseMatrix,
         restartCount: Int = 10,
@@ -759,6 +852,10 @@ private nonisolated enum MovementPCARotations {
         return best
     }
 
+    /// Builds a signed-power target from Varimax loadings and fits an oblique
+    /// (non-orthogonal) transform toward it, allowing correlated factors. Normalizes
+    /// the transform and adjusts its scale before returning rotated patterns.
+    /// Throws if a solve or normalization exposes a singular model.
     static func promax(_ varimaxLoadings: MovementDenseMatrix, power: Double) throws -> MovementDenseMatrix {
         guard varimaxLoadings.cols > 1 else { return varimaxLoadings }
         let factorCount = varimaxLoadings.cols
@@ -787,6 +884,8 @@ private nonisolated enum MovementPCARotations {
             for row in 0..<transform.rows { transform[row, factor] /= norm }
         }
 
+        // Oblique columns can correlate. The inverse Gram matrix supplies the
+        // additional scaling needed for the Promax transform’s factor normalization.
         let inversePsi = try transform.transposed().multiply(transform).inverse()
         for factor in 0..<factorCount {
             let diagonal = inversePsi[factor, factor]
@@ -797,6 +896,9 @@ private nonisolated enum MovementPCARotations {
         return varimaxLoadings.multiply(transform)
     }
 
+    /// Repeatedly rotates pairs of factor columns to improve the Varimax objective.
+    /// Stops after enough unchanged pair checks or the iteration limit. The matrix
+    /// shape must match variableCount × factorCount, with at least two factors.
     private static func varimaxSweep(
         _ start: MovementDenseMatrix,
         variableCount: Int,
@@ -826,6 +928,8 @@ private nonisolated enum MovementPCARotations {
                     let denominator = c - (a * a - b * b) / Double(variableCount)
                     if denominator != 0, abs(numerator / denominator) > tolerance {
                         let magnitude = hypot(numerator, denominator)
+                        // The pairwise objective gives a four-angle relation. Half-angle identities
+                        // recover the actual rotation’s cosine and sine without an explicit angle.
                         let cosine4 = denominator / magnitude
                         let cosine2 = sqrt(max((1 + cosine4) / 2, 0))
                         let cosine = sqrt(max((1 + cosine2) / 2, 0))
@@ -850,6 +954,9 @@ private nonisolated enum MovementPCARotations {
         return rotated
     }
 
+    /// Scores a candidate by summing each row’s sample variance of squared loadings
+    /// across factors. Larger values favor concentration on fewer factors; a single
+    /// factor has no between-factor spread and receives zero.
     private static func criterion(_ matrix: MovementDenseMatrix) -> Double {
         guard matrix.cols > 1 else { return 0 }
         var result = 0.0
@@ -862,6 +969,8 @@ private nonisolated enum MovementPCARotations {
         return result
     }
 
+    /// Scales each nonzero row to unit Euclidean length. Zero rows remain zero,
+    /// avoiding division by zero while preserving their lack of loading information.
     private static func rowNormalized(_ matrix: MovementDenseMatrix) -> MovementDenseMatrix {
         var result = matrix
         for row in 0..<matrix.rows {
@@ -875,6 +984,9 @@ private nonisolated enum MovementPCARotations {
         return result
     }
 
+    /// Builds an orthogonal starting rotation by applying seeded random plane
+    /// rotations to identity. inout lets this helper advance the caller’s generator
+    /// so each restart uses a different, reproducible sequence of angles.
     private static func randomOrthogonal(
         _ size: Int,
         generator: inout MovementSplitMix64
@@ -905,8 +1017,11 @@ private nonisolated enum MovementPCARotations {
 private nonisolated struct MovementSplitMix64 {
     private var state: UInt64
 
+    /// Initializes the repeatable SplitMix64 generator used only for rotation restarts.
     init(seed: UInt64) { state = seed &+ 0x9E3779B97F4A7C15 }
 
+    /// Advances the generator and returns a mixed 64-bit value. Swift’s &+ and &*
+    /// operators intentionally wrap on overflow, as this integer algorithm requires.
     mutating func next() -> UInt64 {
         state = state &+ 0x9E3779B97F4A7C15
         var value = state
@@ -915,6 +1030,7 @@ private nonisolated struct MovementSplitMix64 {
         return value ^ (value >> 31)
     }
 
+    /// Converts 53 random bits to a Double in [0, 1), matching Double’s precision.
     mutating func nextUnit() -> Double {
         Double(next() >> 11) * (1 / 9_007_199_254_740_992.0)
     }

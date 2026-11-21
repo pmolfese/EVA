@@ -55,8 +55,10 @@ nonisolated enum WaveletTransformKind: String, CaseIterable, Identifiable, Codab
     case dwt = "DWT"
     case swt = "SWT"
 
+    /// Stable transform identity for SwiftUI pickers.
     var id: String { rawValue }
 
+    /// Short description of the transform’s sampling and computational tradeoffs.
     var explanation: String {
         switch self {
         case .dwt:
@@ -74,6 +76,7 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
     case bior44 = "bior4.4"
     case bior68 = "bior6.8"
 
+    /// Stable wavelet-family identity for SwiftUI pickers.
     var id: String { rawValue }
 
     /// The analysis/synthesis filter bank for this family. `coif4`/`sym4`/`db4`
@@ -105,6 +108,7 @@ nonisolated enum WaveletReductionFamily: String, CaseIterable, Identifiable, Cod
         }
     }
 
+    /// Describe the family’s filter shape and intended default use.
     var explanation: String {
         switch self {
         case .coif4:
@@ -129,8 +133,10 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
     case continuousEEG = "Continuous EEG"
     case erp = "Task / ERP"
 
+    /// Stable reduction-mode identity for SwiftUI pickers.
     var id: String { rawValue }
 
+    /// Explain the mode’s default family, threshold rule and quality-assessment scope.
     var explanation: String {
         switch self {
         case .continuousEEG:
@@ -145,6 +151,7 @@ nonisolated enum WaveletReductionMode: String, CaseIterable, Identifiable, Codab
     /// convention.
     var assessesInBand: Bool { self == .erp }
 
+    /// Build rate-dependent defaults for this reduction mode, probing Metal availability for the backend choice.
     func defaultConfiguration(samplingRate: Double) -> WaveletReductionConfiguration {
         switch self {
         case .continuousEEG:
@@ -231,7 +238,8 @@ nonisolated struct WaveletReductionConfiguration: Sendable, Codable {
     }
 
     /// The sample span this configuration analyzes, clamped into the
-    /// recording. Returns nil if the requested span is too short to transform.
+    /// recording. An explicitly bounded span of at most four samples returns nil;
+    /// an unbounded request returns the full range and leaves short-input handling to the reducer.
     func analysisRange(sampleCount: Int, samplingRate: Double) -> Range<Int>? {
         guard sampleCount > 0 else { return nil }
         guard analysisStartSeconds != nil || analysisEndSeconds != nil else { return 0..<sampleCount }
@@ -271,6 +279,7 @@ nonisolated struct WaveletChannelReductionMetrics: Identifiable, Sendable {
     /// level first). Useful for "which scale/band was cleaned" teaching views.
     var removedEnergyByLevel: [Double]
 
+    /// Use the zero-based channel index as the metric row’s identity.
     var id: Int { channelIndex }
 }
 
@@ -299,11 +308,18 @@ nonisolated struct WaveletReductionCandidate: Identifiable, Sendable {
     var removedRMSMicrovolts: Double
     var peakRemovedMicrovolts: Double
 
+    /// Current implementation returns the interval length in samples as a Double, despite this name.
+    /// Convert using the recording’s sampling rate when a duration in seconds is needed.
     var durationSeconds: Double { Double(endSample - startSample) }
 }
 
 // MARK: - Engine
 
+/// The cleaning pipeline is decompose → choose thresholds → modify coefficients
+/// → reconstruct. The returned cleaned and artifact signals share the input's
+/// channel/sample indexing. Read configuration.analysisRange for the active span,
+/// reduceChannel for one CPU channel, and reduceOnGPU for batched execution.
+/// Detection scores from WaveletArtifactAnalyzer are a different output contract.
 nonisolated enum WaveletReducer {
     static let maximumLevelCount = 12
 
@@ -312,6 +328,7 @@ nonisolated enum WaveletReducer {
         max(evaMaxWorkers / 2, 1)
     }
 
+    /// Maximum CPU worker count allowed by the application’s processing policy.
     static var maximumCoreCount: Int {
         evaMaxWorkers
     }
@@ -344,6 +361,8 @@ nonisolated enum WaveletReducer {
         nonisolated(unsafe) var artifactData = signal.data.map { [Float](repeating: 0, count: $0.count) }
         nonisolated(unsafe) var perChannel: [Int: WaveletChannelReductionMetrics] = [:]
 
+        // Global variance retention is the ratio of summed per-channel variances,
+        // not the mean of per-channel percentages. This weights higher-variance channels more.
         nonisolated(unsafe) var globalOriginalVariance = 0.0
         nonisolated(unsafe) var globalCleanedVariance = 0.0
         nonisolated(unsafe) var correlationSum = 0.0
@@ -356,6 +375,7 @@ nonisolated enum WaveletReducer {
         // Only `analysisRange` is transformed — samples outside it are passed
         // through untouched, and every metric is scoped to the analyzed span so
         // an excluded stretch can't skew the numbers the user reads.
+        /// Reduce one selected channel’s analysis span and return full-length arrays plus local quality metrics.
         @Sendable func process(_ channelIndex: Int) -> (
             cleaned: [Float], artifact: [Float],
             metrics: WaveletChannelReductionMetrics,
@@ -397,6 +417,8 @@ nonisolated enum WaveletReducer {
             return (cleaned.map(Float.init), artifact.map(Float.init), metrics, originalVariance, cleanedVariance, corr)
         }
 
+        /// Merge one completed channel into shared outputs and metric totals.
+        /// Parallel callers must hold the aggregation lock; the serial path needs no lock.
         @Sendable func store(_ channelIndex: Int, _ result: (cleaned: [Float], artifact: [Float], metrics: WaveletChannelReductionMetrics, originalVariance: Double, cleanedVariance: Double, correlation: Double)) {
             cleanedData[channelIndex] = result.cleaned
             artifactData[channelIndex] = result.artifact
@@ -424,6 +446,8 @@ nonisolated enum WaveletReducer {
                     guard !Task.isCancelled else { return }
                     let channelIndex = indices[offset]
                     let result = process(channelIndex)
+                    // Expensive transforms run independently; serialize only shared result writes.
+                    // Progress callbacks happen after unlocking and can arrive from different workers.
                     lock.lock()
                     store(channelIndex, result)
                     completed += 1
@@ -499,9 +523,9 @@ nonisolated enum WaveletReducer {
         }
 
         // Detrend first (see `WaveletReductionConfiguration.detrend`): the
-        // trend is added back into the artifact estimate below, so the cleaned
-        // output is identical to what a drift-swallowing approximation band
-        // would have produced — minus the boundary seam.
+        // trend is added back into the artifact estimate below. Thus explicit
+        // detrending removes that fitted trend from the cleaned signal while
+        // reducing the seam seen by the periodic transform.
         var work = samples
         var slope = 0.0
         var intercept = 0.0
@@ -575,6 +599,8 @@ nonisolated enum WaveletReducer {
         // Artifact estimate = reconstruction of the thresholded (large) detail
         // coefficients plus the approximation band — the public wdenoise-style
         // artifact estimate. Cleaned = original - artifact.
+        // The approximation (lowest-frequency content) is included in the removed
+        // artifact even when some detail levels are protected from thresholding.
         let artifactDecomposition = WaveletDecomposition(
             approx: decomposition.approx,
             details: artifactDetails,
@@ -706,6 +732,7 @@ nonisolated enum WaveletReducer {
         var correlationSum = 0.0
         var correlationCount = 0
 
+        /// Package the current GPU-path outputs and accumulated quality metrics, including any completed batches.
         func assembled() -> WaveletReductionResult {
             WaveletReductionResult(
                 cleaned: signal.replacingSamples(cleanedData, signalTypeSuffix: "Wavelet Reduced"),
@@ -756,6 +783,7 @@ nonisolated enum WaveletReducer {
                 paddedLength: paddedLength, levelCount: levels, kind: configuration.kind),
             max(indices.count, 1)
         )
+        // Ceiling division includes a final partial batch without requiring padding channels.
         let batchCount = (indices.count + batchSize - 1) / batchSize
 
         for batchIndex in 0..<batchCount {
@@ -842,6 +870,8 @@ nonisolated enum WaveletReducer {
                         for windowIndex in starts.indices {
                             let windowStart = starts[windowIndex]
                             let windowEnd = min(windowStart + windowSamples, bandLength)
+                            // Estimate robust statistics from a subset, but pass the full window count
+                            // so the universal-threshold logarithm still represents the original population.
                             let sampleStride = max((windowEnd - windowStart) / 4096, 1)
                             let subsample = bands.detailSubsample(
                                 level: level, channel: slot,
@@ -1032,6 +1062,8 @@ nonisolated enum WaveletReducer {
             events.append(peak)
         }
 
+        // Search and ranking above are scoped to sampleRange. Display windows here
+        // are clamped to the full channel, so their preview can extend outside that search span.
         return events.enumerated().map { offset, peak in
             let channelCount = artifact.data[peak.channel].count
             let start = max(peak.sample - half, 0)
@@ -1051,6 +1083,7 @@ nonisolated enum WaveletReducer {
         }
     }
 
+    /// Limit decomposition depth by the requested count, the engine cap and available samples.
     static func boundedLevelCount(_ requested: Int, sampleCount: Int) -> Int {
         let maxBySamples = max(Int(floor(log2(Double(max(sampleCount, 2))))) - 1, 1)
         return min(max(requested, 1), maximumLevelCount, maxBySamples)
@@ -1125,7 +1158,8 @@ nonisolated enum WaveletReducer {
         return min(universal, max(bayes, sigma * 0.25))
     }
 
-    /// Robust noise σ estimate (MAD / 0.6745). Shared with `WaveletDenoiser`.
+    /// Estimate noise σ as median(abs(coefficient))/0.6745, assuming zero-centered bands.
+    /// This does not subtract the sample median. Shared with `WaveletDenoiser`.
     static func robustSigma(_ values: [Double]) -> Double {
         let absValues = values.map(abs).sorted()
         guard !absValues.isEmpty else { return 0 }
@@ -1134,18 +1168,22 @@ nonisolated enum WaveletReducer {
 
     // MARK: Small math
 
+    /// Compute population variance (divide by N), returning zero for an empty array.
     private static func variance(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let mean = values.reduce(0, +) / Double(values.count)
         return values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
     }
 
+    /// Compute root-mean-square amplitude, returning zero for an empty array.
     private static func rms(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
         let sum = values.reduce(0.0) { $0 + $1 * $1 }
         return (sum / Double(values.count)).squareRoot()
     }
 
+    /// Compute Pearson correlation over the common prefix of two arrays.
+    /// Return zero for fewer than two samples and one when the variance denominator is negligible.
     private static func correlation(_ lhs: [Double], _ rhs: [Double]) -> Double {
         let count = min(lhs.count, rhs.count)
         guard count > 1 else { return 0 }
@@ -1163,12 +1201,14 @@ nonisolated enum WaveletReducer {
         return denominator > 1e-12 ? numerator / denominator : 1
     }
 
+    /// Measure the percent decrease in peak absolute amplitude, flooring increases and negligible inputs at zero.
     private static func peakReductionPercent(original: [Double], cleaned: [Double]) -> Double {
         let originalPeak = original.map(abs).max() ?? 0
         let cleanedPeak = cleaned.map(abs).max() ?? 0
         return originalPeak > 1e-9 ? max(originalPeak - cleanedPeak, 0) / originalPeak * 100 : 0
     }
 
+    /// Interpolate a clamped percentile within an already-sorted array; empty input returns zero.
     private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
         guard let first = sortedValues.first else { return 0 }
         guard sortedValues.count > 1 else { return first }
@@ -1197,6 +1237,7 @@ nonisolated struct WaveletFilterBank: Sendable {
     /// `biorthogonal(...)` below); the high-pass branch takes the negated shift.
     let reconstructionShift: Int
 
+    /// Length of the decomposition low-pass filter, used to estimate padding and tap reach.
     var length: Int { decompositionLowPass.count }
 
     /// Builds an orthonormal analysis/synthesis bank from a scaling filter using
@@ -1254,6 +1295,8 @@ nonisolated struct WaveletTransform: Sendable {
 
     // DWT (decimated) ----------------------------------------------------------
 
+    /// Pad to a multiple of 2^levels, then repeatedly split the approximation into half-length bands.
+    /// Keep details finest-first and remember the unpadded length for reconstruction.
     func forwardDWT(_ samples: [Double], levels: Int) -> WaveletDecomposition {
         let originalLength = samples.count
         let padded = padToMultiple(samples, of: 1 << levels)
@@ -1268,6 +1311,7 @@ nonisolated struct WaveletTransform: Sendable {
         return WaveletDecomposition(approx: approx, details: details, originalLength: originalLength)
     }
 
+    /// Reconstruct from coarsest to finest details, then trim the transform’s length padding.
     func inverseDWT(_ decomposition: WaveletDecomposition) -> [Double] {
         var approx = decomposition.approx
         for level in stride(from: decomposition.details.count - 1, through: 0, by: -1) {
@@ -1276,6 +1320,8 @@ nonisolated struct WaveletTransform: Sendable {
         return Array(approx.prefix(decomposition.originalLength))
     }
 
+    /// Compute one decimated low/high filter pair with periodic boundary wrapping.
+    /// Each output samples the filters at input positions 2i+k, producing half as many values.
     private func dwtStep(_ x: [Double]) -> (approx: [Double], detail: [Double]) {
         let n = x.count
         let half = n / 2
@@ -1300,6 +1346,8 @@ nonisolated struct WaveletTransform: Sendable {
         return (approx, detail)
     }
 
+    /// Synthesize one doubled-length signal from matching approximation/detail arrays.
+    /// Apply the filter bank’s alignment shifts separately to its low/high branches.
     private func idwtStep(_ approx: [Double], _ detail: [Double]) -> [Double] {
         let half = approx.count
         let n = half * 2
@@ -1324,6 +1372,8 @@ nonisolated struct WaveletTransform: Sendable {
 
     // SWT (undecimated, a-trous) ----------------------------------------------
 
+    /// Build full-length stationary-wavelet bands by doubling tap spacing at each level.
+    /// Unlike DWT, each detail band keeps the original number of samples.
     func forwardSWT(_ samples: [Double], levels: Int) -> WaveletDecomposition {
         let n = samples.count
         var approx = samples
@@ -1338,6 +1388,7 @@ nonisolated struct WaveletTransform: Sendable {
         return WaveletDecomposition(approx: approx, details: details, originalLength: n)
     }
 
+    /// Combine stationary-wavelet details from coarse to fine, using each level’s original dilation.
     func inverseSWT(_ decomposition: WaveletDecomposition) -> [Double] {
         var approx = decomposition.approx
         for level in stride(from: decomposition.details.count - 1, through: 0, by: -1) {
@@ -1365,6 +1416,8 @@ nonisolated struct WaveletTransform: Sendable {
         let maxReach = max(lowLength - 1, highLength - 1) * dilation
         let interiorEnd = max(n - maxReach, 0)
 
+        // Pointers are borrowed only for these nested closures. Input filters/samples
+        // are read-only; each output index is written once without resizing its array.
         x.withUnsafeBufferPointer { xp in
             bank.decompositionLowPass.withUnsafeBufferPointer { lp in
                 bank.decompositionHighPass.withUnsafeBufferPointer { hp in
@@ -1404,6 +1457,8 @@ nonisolated struct WaveletTransform: Sendable {
         return (approx, detail)
     }
 
+    /// Reconstruct one stationary-wavelet level by accumulating low/high synthesis taps.
+    /// The factor 0.5 compensates for the redundant, undecimated representation.
     private func iswtStep(_ approx: [Double], _ detail: [Double], dilation: Int) -> [Double] {
         let n = approx.count
         let lowLength = bank.reconstructionLowPass.count
@@ -1427,6 +1482,8 @@ nonisolated struct WaveletTransform: Sendable {
         return y
     }
 
+    /// Extend the right edge until the length is divisible by the requested factor.
+    /// Reflect available samples first, then repeat the original last value if reflection runs out.
     private func padToMultiple(_ samples: [Double], of multiple: Int) -> [Double] {
         guard multiple > 1 else { return samples }
         let remainder = samples.count % multiple

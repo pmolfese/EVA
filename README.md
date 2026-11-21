@@ -12,7 +12,7 @@ EVA stands for **Electrophysiology Viewer and Analysis**.
 
 ## What EVA Does
 
-EVA opens EGI/MagStim `.mff`.  Thanks to MNE-Python also can read BrainVision, EDF, Persyst, and BESA `.avr` / `.mul` recordings. The main waveform view is intentionally direct: channels on the left, events above the trace, and analysis tools close by without hiding the data.
+EVA uses native readers to open EGI/MagStim `.mff`, BrainVision, EDF, Persyst, and BESA `.avr` / `.mul` recordings. The main waveform view is intentionally direct: channels on the left, events above the trace, and analysis tools close by without hiding the data.
 
 EVA supports:
 
@@ -126,7 +126,12 @@ Those JSON files are meant to become the raw material for future Core ML models.
 
 ## Development Notes
 
-EVA is an Xcode macOS project.
+EVA is an Xcode macOS project. New contributors should start with the
+[developer guide](docs/developers/README.md), then follow
+[setup](docs/developers/setup.md) and the
+[first tested change](docs/developers/first-change.md). The
+[onboarding milestones](docs/developers/onboarding-milestones.md) track the
+delivered chapters and remaining acceptance checks for the development and maintenance manual.
 
 ```bash
 xcodebuild -project EVA.xcodeproj -scheme EVA -destination platform=macOS build
@@ -144,6 +149,9 @@ references are searchable alongside the user manual.
 
 ### Building the documentation
 
+The site includes a **Developer Guide** tab with setup, feature maps, extension
+recipes, testing, compatibility and release guidance.
+
 The site is MkDocs + Material. `docs_dir` is `docs/manual`, and the root
 planning files are mirrored into it at build time by
 `scripts/sync-planning-docs.py` — the root files stay the only source of truth,
@@ -151,7 +159,8 @@ and the generated copies under `docs/manual/development/` are git-ignored.
 
 ```bash
 pip install -r requirements-docs.txt
-python3 scripts/sync-planning-docs.py   # mirror ROADMAP/design into docs_dir
+python3 scripts/check-developer-docs.py # links, inventory, entry points and tutorial patches
+python3 scripts/sync-planning-docs.py   # mirror roadmaps/design/developer guide into docs_dir
 mkdocs serve                            # live preview at 127.0.0.1:8000/EVA/
 ```
 

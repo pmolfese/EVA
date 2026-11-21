@@ -265,6 +265,11 @@ struct GradientBackendParityTests {
             $0.templateScheme = .correlationRanked
             $0.correlationThreshold = 0.8
         }
+        try expectParity(recording, "first-difference correlation") {
+            $0.templateScheme = .correlationRanked
+            $0.correlationFeature = .firstDifference
+            $0.correlationThreshold = 0.8
+        }
         try expectParity(recording, "squared-correlation-ranked") {
             $0.templateScheme = .squaredCorrelationRanked
             $0.allowsSelfDonation = true

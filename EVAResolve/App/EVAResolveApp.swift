@@ -91,7 +91,7 @@ private struct OpenAveragedRecordingButton: View {
             panel.canChooseFiles = true
             panel.canChooseDirectories = true
             panel.allowsMultipleSelection = false
-            panel.allowedContentTypes = [UTType(importedAs: "com.egi.mff")]
+            panel.allowedContentTypes = [UTType(importedAs: "com.egi.mffrecording")]
             panel.message = "Choose an averaged .mff recording to fit."
             guard panel.runModal() == .OK, let url = panel.url else { return }
             SourceFitImporter.importAndQueue(url)

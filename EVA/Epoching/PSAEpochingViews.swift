@@ -22,6 +22,8 @@ import SwiftUI
 extension WaveformView {
     // MARK: - PSA epoching
 
+    /// Opens PSA configuration and reconciles selections with the available events/artifacts.
+    /// This changes presentation state; it does not rebuild waveform evidence.
     func openPSASheet(for signal: MFFSignalData) {
         recordingStore.selection.matrixReviewRequest = nil
         epoching.showsDecisionMatrix = false
@@ -35,6 +37,8 @@ extension WaveformView {
         epoching.showsSheet = true
     }
 
+    /// Removes stale event/group/regex selections and repairs DIN timing-marker choices.
+    /// Existing valid choices survive; a missing choice uses the first available alternative.
     func reconcilePSAEventSelection(for events: [MFFEvent]) {
         let summaries = groupedPSAEventSummaries(events)
         let availableValues = Set(summaries.map(\.code))
@@ -72,6 +76,8 @@ extension WaveformView {
         epoching.timingMarkerValuesBySegmentValue = timingMarkerValues
     }
 
+    /// Returns time-ordered segmentation events from artifacts or recording/user markers,
+    /// depending on the chosen segment field.
     func segmentableEvents(for signal: MFFSignalData) -> [MFFEvent] {
         switch epoching.segmentField {
         case .artifact:
@@ -81,6 +87,8 @@ extension WaveformView {
         }
     }
 
+    /// Switches the sheet between configuration and the prepared decision-matrix review.
+    /// ViewBuilder permits these branches to return different concrete SwiftUI view types.
     @ViewBuilder
     func psaSheet(for signal: MFFSignalData) -> some View {
         if epoching.decisionMatrixIsInSheet, let matrix = epoching.decisionMatrix {
@@ -90,6 +98,8 @@ extension WaveformView {
         }
     }
 
+    /// Hosts the floating review panel through a zero-sized SwiftUI bridge when review
+    /// is not embedded in the sheet. Its presentation Binding shares the model’s visibility flag.
     @ViewBuilder
     var decisionMatrixPanelHost: some View {
         if !epoching.decisionMatrixIsInSheet, let matrix = epoching.decisionMatrix {
@@ -104,6 +114,8 @@ extension WaveformView {
         }
     }
 
+    /// Connects the reusable matrix view to this recording’s progress and action callbacks.
+    /// Floating review also navigates the waveform when the user selects a cell.
     private func decisionMatrixReview(
         for signal: MFFSignalData, model: PSADecisionMatrixModel, isFloating: Bool
     ) -> some View {
@@ -137,6 +149,7 @@ extension WaveformView {
         .onAppear { ensurePreferredDecisionMatrixChannelPrior(signal: signal, model: model) }
     }
 
+    /// Explains which fallback channel-health prior is currently requested by the strategy.
     var decisionMatrixFallbackMessage: String {
         switch goodnessSettings.psaDecisionMatrixHealthStrategy {
         case .adaptive:
@@ -150,6 +163,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds the event table, settings inspector, and apply/cancel controls. Apply owns
+    /// a cancellable task; the processing methods below perform the actual signal work.
     func psaConfigurationSheet(for signal: MFFSignalData) -> some View {
         let events = segmentableEvents(for: signal)
         let allSummaries = groupedPSAEventSummaries(events)
@@ -227,6 +242,8 @@ extension WaveformView {
         )
     }
 
+    /// Builds epoch timing, artifact rejection, interpolation, and output controls.
+    /// Bindings beginning with $ write directly to observable configuration properties.
     private func psaConfigurationInspector(events: [MFFEvent]) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -352,6 +369,8 @@ extension WaveformView {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    /// Builds the searchable table of event, pooled-group, and regex category rows.
+    /// The row helpers below render individual columns according to each row’s kind.
     private func psaCategoryTable(
         events: [MFFEvent], allSummaries: [EventSummary], summaries: [EventSummary]
     ) -> some View {
@@ -470,6 +489,8 @@ extension WaveformView {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    /// Creates stable table-row identities and counts for ordinary events, pooled groups,
+    /// and regex rules. Filtering ordinary event rows does not hide configured groups/rules.
     func psaCategoryTableRows(
         events: [MFFEvent], allSummaries: [EventSummary], summaries: [EventSummary]
     ) -> [PSACategoryTableRow] {
@@ -494,6 +515,7 @@ extension WaveformView {
         return rows
     }
 
+    /// Renders the inclusion checkbox for an event, or identifying information for a group/rule.
     @ViewBuilder
     private func psaCategoryEventCell(_ row: PSACategoryTableRow) -> some View {
         switch row.kind {
@@ -534,6 +556,7 @@ extension WaveformView {
         }
     }
 
+    /// Edits an event’s category name or explains the category produced by a group/regex rule.
     @ViewBuilder
     private func psaCategoryNameCell(_ row: PSACategoryTableRow, events: [MFFEvent]) -> some View {
         switch row.kind {
@@ -569,6 +592,7 @@ extension WaveformView {
         }
     }
 
+    /// Shows per-event DIN onset controls, a group-wide DIN toggle, or inherited regex timing.
     @ViewBuilder
     private func psaCategoryOnsetCell(_ row: PSACategoryTableRow, allSummaries: [EventSummary]) -> some View {
         switch row.kind {
@@ -590,6 +614,7 @@ extension WaveformView {
         }
     }
 
+    /// Provides deletion for user-created groups/rules; ordinary event rows have no delete action.
     @ViewBuilder
     private func psaCategoryRemoveCell(_ row: PSACategoryTableRow) -> some View {
         switch row.kind {
@@ -616,6 +641,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds DIN enable/marker controls. A source used only by a regex category remains
+    /// eligible for timing adjustment even when its ordinary event category is unchecked.
     private func psaEventOnsetControls(summary: EventSummary, allSummaries: [EventSummary]) -> some View {
         let timingOptions = psaTimingMarkerOptions(in: allSummaries, excluding: summary.code)
         let isSelected = epoching.selectedEventCodes.contains(summary.code)
@@ -818,6 +845,8 @@ extension WaveformView {
         return "\(text) \(epochText)"
     }
 
+    /// Reusable artifact toggle with a secondary explanation and native hover help.
+    /// The supplied Binding determines which rejection setting the toggle edits.
     func psaArtifactRejectionRow(
         title: String,
         detail: String,
@@ -836,6 +865,8 @@ extension WaveformView {
         .help(help)
     }
 
+    /// Adapts membership in the selected artifact-ID set into a Boolean Binding.
+    /// Both selecting and deselecting mark the artifact as known, preserving an explicit choice.
     func psaDefinedArtifactBinding(_ id: DefinedArtifact.ID) -> Binding<Bool> {
         Binding(
             get: { epoching.skippedDefinedArtifactIDs.contains(id) },
@@ -851,6 +882,8 @@ extension WaveformView {
         )
     }
 
+    /// Converts the stored 0…1 bad-channel fraction to a 0…100 percentage for text entry
+    /// and clamps edited values before converting them back.
     private var maxBadChannelPercentBinding: Binding<Double> {
         Binding(
             get: { epoching.epochBadChannelThresholds.maxBadChannelFraction * 100 },
@@ -970,6 +1003,8 @@ extension WaveformView {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Adapts event-code membership into a checkbox Binding. Selecting seeds a category
+    /// name when needed; deselecting also disables that code’s DIN correction.
     func psaEventCodeBinding(_ code: String) -> Binding<Bool> {
         Binding(
             get: { epoching.selectedEventCodes.contains(code) },
@@ -987,11 +1022,9 @@ extension WaveformView {
         )
     }
 
-    /// Combines several event codes/labels into one shared category name.
-    /// Pooling happens for free at averaging time — `buildEpochs`/averaging
-    /// groups segments by `EpochSegment.category`, so codes sharing a category
-    /// name pool into one averaged trace, while each code stays individually
-    /// selectable/toggleable (the group isn't a distinct data structure).
+    /// Opens the editor for an additional pooled category or a regex category rule.
+    /// Pooled membership is stored in categoryGroups; each member retains its own
+    /// category and also contributes to the extra group category during epoch building.
     @ViewBuilder
     func categoryGroupPopover(events: [MFFEvent], allSummaries: [EventSummary]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1017,6 +1050,8 @@ extension WaveformView {
         .frame(width: 340)
     }
 
+    /// Builds the pooled-category editor. Local draft membership is committed only by
+    /// Create Group; Cancel simply closes the popover.
     @ViewBuilder
     private func categoryGroupCodesPopoverBody(allSummaries: [EventSummary]) -> some View {
         Text("Pools the selected codes/labels into one category for averaging. Each one stays individually selectable.")
@@ -1065,6 +1100,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds the regex editor with live matches, resolved category names, and suggestions.
+    /// A category template can use capture groups such as $1 to produce multiple categories.
     @ViewBuilder
     private func categoryGroupRegexPopoverBody(events: [MFFEvent], allSummaries: [EventSummary]) -> some View {
         let preview = regexMatchPreview(
@@ -1332,6 +1369,8 @@ extension WaveformView {
         let rule = CategoryRegexRule(sourceCode: sourceCode, pattern: pattern, matchField: matchField, categoryName: categoryNameTemplate)
         let codeEvents = events.filter { $0.code == sourceCode }
         var matchedCount = 0
+        // Keep one example per resolved category, not merely the first few matches:
+        // several matching descriptions can all resolve to the same category name.
         var exampleByCategory: [String: String] = [:]
         for event in codeEvents {
             let matchText = matchField == .label ? event.label : event.eventDescription
@@ -1415,6 +1454,7 @@ extension WaveformView {
         )
     }
 
+    /// Two-way access to a code’s category name, using the code itself as a display fallback.
     func psaCategoryBinding(_ code: String) -> Binding<String> {
         Binding(
             get: { epoching.categoryNames[code] ?? code },
@@ -1422,6 +1462,7 @@ extension WaveformView {
         )
     }
 
+    /// Toggles DIN use for one segment value and seeds a valid default marker when enabling it.
     func psaTimingMarkerEnabledBinding(_ segmentValue: String, options: [EventSummary]) -> Binding<Bool> {
         Binding(
             get: { epoching.timingMarkerEnabledValues.contains(segmentValue) },
@@ -1440,6 +1481,8 @@ extension WaveformView {
         )
     }
 
+    /// Reads only a valid timing-marker choice and ignores writes outside the available options.
+    /// An empty option list is represented by an empty string for the picker.
     func psaTimingMarkerSelectionBinding(_ segmentValue: String, options: [EventSummary]) -> Binding<String> {
         Binding(
             get: {
@@ -1458,10 +1501,13 @@ extension WaveformView {
         )
     }
 
+    /// Offers every other event summary as a timing-marker source, excluding self-pairing.
     func psaTimingMarkerOptions(in summaries: [EventSummary], excluding segmentValue: String) -> [EventSummary] {
         summaries.filter { $0.code != segmentValue }
     }
 
+    /// Cheap UI eligibility check for Apply: requires events, selection, valid timing bounds,
+    /// category names, and selected DIN mappings. Job construction performs further validation.
     func canApplyPSA(events: [MFFEvent]) -> Bool {
         !events.isEmpty
             && epoching.hasSegmentSelection
@@ -1491,6 +1537,8 @@ extension WaveformView {
         return categoriesByCode
     }
 
+    /// Builds DIN mappings for selected enabled codes. Returns nil when a mapping is missing,
+    /// refers to an unavailable value, or tries to pair a value with itself.
     func selectedPSATimingMarkersBySegmentValue(events: [MFFEvent]) -> [String: String]? {
         let availableValues = Set(groupedPSAEventSummaries(events).map(\.code))
         var timingMarkersBySegmentValue = [String: String]()
@@ -1505,6 +1553,8 @@ extension WaveformView {
         return timingMarkersBySegmentValue
     }
 
+    /// Validates/snapshots a build job, then serializes the interactive operation through
+    /// the processing queue so competing recording operations do not overlap it.
     func applyPSA(to signal: MFFSignalData) async {
         // Validate and capture all inputs on the main actor before going off-thread.
         guard let job = psaBuildJob(from: signal) else { return }
@@ -1538,6 +1588,8 @@ extension WaveformView {
         }
     }
 
+    /// Starts automatic Segment Health only for single trials when configured to do so.
+    /// For averages, clears single-trial analysis while preserving manual labels for re-averaging.
     func enableSegmentHealthAfterSegmentationIfNeeded() {
         guard !epoching.isAveraged, epoching.epochedSignal?.isAveraged != true else {
             // Preserve manual labels long enough for re-averaging exclusions,
@@ -1552,6 +1604,7 @@ extension WaveformView {
         segHealth.refreshRequest += 1
     }
 
+    /// Formats excluded original epoch indices as one-based identifiers and display category names.
     func psaSkippedLabeledBadSegmentsSummary(for segments: [EpochSegment], excludedIndices: Set<Int>) -> [String] {
         guard !excludedIndices.isEmpty else { return [] }
         return segments.enumerated()
@@ -1561,6 +1614,8 @@ extension WaveformView {
             }
     }
 
+    /// Publishes per-channel/per-epoch diagnostics from a build result. Retains non-artifact
+    /// rejection reasons separately so artifact settings can later be reevaluated.
     func refreshPSAEpochDiagnostics(from result: PSABuildResult) {
         epoching.epochBadChannelSegments = result.epochBadChannelSegments
         epoching.epochNonArtifactRejectionReasons = result.suggestedRejectedEpochReasons.compactMapValues { reasons in
@@ -1602,6 +1657,8 @@ extension WaveformView {
             let epochStart = -Double(segment.stimulusOffsetSamples) / samplingRate
             let epochEnd = Double(segment.endSample - segment.startSample + 1 - segment.stimulusOffsetSamples) / samplingRate
             let relativeWindow = epoching.effectiveArtifactRejectionWindow ?? epochStart...epochEnd
+            // The saved segment’s source time is its original stimulus time. Translate
+            // stimulus-relative rejection bounds back into the continuous recording clock.
             let start = segment.sourceTimeSeconds + relativeWindow.lowerBound
             let end = segment.sourceTimeSeconds + relativeWindow.upperBound
             let matched = groups.compactMap { label, events in
@@ -1613,6 +1670,8 @@ extension WaveformView {
         return reasons
     }
 
+    /// Merges retained non-artifact reasons with current artifact/window rules, deduplicating
+    /// and sorting each epoch’s reasons for stable presentation.
     func psaDecisionMatrixRejectionReasons(
         for segments: [EpochSegment],
         sourceSignal: MFFSignalData
@@ -1744,6 +1803,8 @@ extension WaveformView {
         return inputs.map { byID[$0.segmentID] ?? 100 }
     }
 
+    /// Transfers manual Segment Health labels into matrix hints: Good trusts epoch health;
+    /// Bad suggests rejection. These hints do not overwrite existing explicit matrix choices.
     func applySegmentHealthLabels(to model: PSADecisionMatrixModel, segments: [EpochSegment]) {
         for (index, segment) in segments.enumerated() {
             switch segHealth.qualityLabels[SegmentHealthAnalyzer.segmentID(index: index, segment: segment)] {
@@ -1786,6 +1847,8 @@ extension WaveformView {
         model.psaRejectionSettings = settings
     }
 
+    /// Appends rejection/interpolation diagnostics to a status string and updates the
+    /// visible labeled-Bad summary. Reports unresolved saved exclusions as well as counts.
     func appendPSAEpochDiagnostics(
         to baseStatus: String,
         sourceSegments: [EpochSegment],
@@ -1839,6 +1902,8 @@ extension WaveformView {
     /// Segment Health label exclusions, background SNR so the sheet can close
     /// immediately, the richer status line, and the UI teardown.
     private func applyPSACore(to signal: MFFSignalData, job: PSABuildJob) async {
+        // Capture the recording identity before any await. Another recording may be
+        // opened while detached work runs, so later guards reject that stale result.
         let sessionID = recordingSessionID
         let pausesForDecisionMatrix = epoching.defersPSADecisionsForReview
         let reviewInSheet = epoching.presentsPSADecisionMatrixSheet
@@ -2206,7 +2271,7 @@ extension WaveformView {
         )
     }
 
-    /// Count of selected events that have no DIN candidate within the current tolerance window.
+    /// Counts events whose enabled DIN mapping has no candidate within the tolerance window.
     /// Used for the live unmatched-DIN warning in the PSA sheet.
     func psaMissedDINCount(events: [MFFEvent]) -> Int {
         let tolerance = epoching.timingTolerance
@@ -2222,6 +2287,8 @@ extension WaveformView {
         return missed
     }
 
+    /// Finds the closest timing event by absolute time difference, breaking ties toward
+    /// the earlier event. An empty candidate list returns nil; no tolerance is applied here.
     func nearestPSATimingEvent(to event: MFFEvent, in candidates: [MFFEvent]) -> MFFEvent? {
         candidates.min { lhs, rhs in
             let lhsDistance = abs(lhs.beginTimeSeconds - event.beginTimeSeconds)
@@ -2233,10 +2300,14 @@ extension WaveformView {
         }
     }
 
+    /// Flattens labeled rejection-event groups for callers that only need event intervals.
     func psaArtifactEventsForRejection(in signal: MFFSignalData) -> [MFFEvent] {
         psaArtifactEventsForRejectionByLabel(in: signal).values.flatMap { $0 }
     }
 
+    /// Collects selected artifact families under their rejection labels. In uncorrected-only
+    /// mode, removes events with an actively applied cleaning result. Artifact-based
+    /// segmentation bypasses this rejection to avoid discarding its own trigger events.
     func psaArtifactEventsForRejectionByLabel(in signal: MFFSignalData) -> [String: [MFFEvent]] {
         // When segmenting on artifacts themselves, don't reject epochs for containing those artifacts.
         guard epoching.skipIfContainsArtifact, epoching.segmentField != .artifact else { return [:] }
@@ -2246,6 +2317,7 @@ extension WaveformView {
             && epoching.artifactRejectionPolicy == .uncorrected
             ? Set(artifactVM.cleaningSummaries.flatMap(\.correctedEventIDs))
             : []
+        /// Removes actively corrected event IDs when the uncorrected-only rejection policy applies.
         func eligible(_ events: [MFFEvent]) -> [MFFEvent] {
             correctedIDs.isEmpty ? events : events.filter { !correctedIDs.contains($0.id) }
         }
@@ -2277,6 +2349,8 @@ extension WaveformView {
         signal?.events.filter { $0.code == GradientCoverage.unreliableEventCode } ?? []
     }
 
+    /// Reuses detected events of this eye-artifact kind, or runs its threshold detector
+    /// with the current configuration when no matching events have been stored.
     func artifactEventsOrDetection(for kind: EyeArtifactKind, in signal: MFFSignalData) -> [MFFEvent] {
         let existingEvents = artifactVM.events.filter { $0.code == kind.eventCode }
         if !existingEvents.isEmpty {
@@ -2296,6 +2370,8 @@ extension WaveformView {
         )
     }
 
+    /// Tests whether any artifact overlaps the supplied sample interval after converting
+    /// it to seconds. This helper does not apply the optional stimulus-relative subwindow.
     func shouldSkipEpochForArtifact(
         startSample: Int,
         endSample: Int,
@@ -2310,6 +2386,8 @@ extension WaveformView {
         return artifactEvents.contains { $0.overlaps(startSeconds: startSeconds, endSeconds: endSeconds) }
     }
 
+    /// Summarizes selected artifact rejection kinds for status text; this describes settings,
+    /// not the number of actual overlaps found in an epoch.
     func psaArtifactRejectionLabel() -> String {
         var labels: [String] = []
         if epoching.skipEyeBlinks {
@@ -2356,6 +2434,9 @@ extension WaveformView {
         return result
     }
 
+    /// Opens review for existing raw epochs, reusing valid evidence when possible.
+    /// Otherwise asynchronously rebuilds health/evidence, restores manual decisions by
+    /// stable identity, and publishes only if the recording session still matches.
     func averageCurrentEpochs(reviewInSheet: Bool = false) {
         guard let segmentedEpochSignal, !segmentedEpochSegments.isEmpty else {
             epoching.statusMessage = "Create epochs before averaging."
@@ -2512,6 +2593,9 @@ extension WaveformView {
         }
     }
 
+    /// Starts the requested recording-wide prior upgrade when the matrix lacks it.
+    /// Adaptive/segment-only strategies do nothing here; a valid full prior is never
+    /// replaced merely because the saved fallback preference is Fast recording.
     @MainActor
     func ensurePreferredDecisionMatrixChannelPrior(
         signal: MFFSignalData, model: PSADecisionMatrixModel
@@ -2532,6 +2616,8 @@ extension WaveformView {
         }
     }
 
+    /// Builds a cache identity from the signal-health signature plus serialized base/impedance
+    /// settings, so changing those settings invalidates the abbreviated recording prior.
     func decisionMatrixFastChannelPriorSignature(for signal: MFFSignalData) -> String {
         let encoder = JSONEncoder()
         let base = (try? encoder.encode(goodnessSettings.base).base64EncodedString()) ?? ""
@@ -2693,6 +2779,9 @@ extension WaveformView {
         }
     }
 
+    /// Checks review freshness, freezes the decisions, then materializes, averages, and
+    /// post-processes kept trials off MainActor. Session/cancellation checks prevent stale
+    /// results from being committed; SNR is scheduled from the reviewed single trials.
     func averageReviewedDecisionMatrix() {
         guard let matrix = epoching.decisionMatrix,
               let currentSource = segmentedEpochSignal else { return }
@@ -2713,6 +2802,8 @@ extension WaveformView {
             matrix, segments: segmentedEpochSegments,
             sourceSignal: continuousProcessedSignal ?? recording.signal ?? currentSource
         )
+        // Freeze all choices before crossing the actor boundary. Subsequent UI edits
+        // cannot change the inputs halfway through materialization/averaging.
         let snapshot = matrix.snapshot()
         let sourceCount = snapshot.preparation.segments.count
         let shouldAvgRef = epoching.averageReference
@@ -2788,6 +2879,8 @@ extension WaveformView {
         }
     }
 
+    /// Averages a valid epoch result using category colors and labeled-Bad exclusions.
+    /// Returns nil with status text when there are no usable epochs or sampling rate.
     func averageEpochResult(_ result: PSABuildResult) -> PSABuildResult? {
         guard result.signal.samplingRate > 0, !result.segments.isEmpty else {
             epoching.statusMessage = "No epochs are available to average."
@@ -2845,6 +2938,7 @@ extension WaveformView {
         return PSABuildResult(signal: referenced, segments: result.segments, message: result.message)
     }
 
+    /// Formats enabled reference/baseline processing choices as a short status suffix.
     func psaPostProcessingSuffix() -> String {
         var parts: [String] = []
         if epoching.averageReference { parts.append("avg ref") }
@@ -2867,6 +2961,8 @@ extension WaveformView {
             message: "\(segmentedEpochSegments.count) epochs"
         )
         let isAveraged = epoching.isAveraged
+        // A saved matrix applies only to these exact raw samples and segment IDs.
+        // Otherwise refresh from the raw epoch source without reusing stale cell decisions.
         let reviewedSnapshot = epoching.decisionMatrix.flatMap { matrix in
             matrix.preparation.sourceSignal.dataRevision == base.signal.dataRevision
                 && matrix.preparation.segments.map(\.id) == base.segments.map(\.id)
@@ -2964,6 +3060,8 @@ extension WaveformView {
         }
     }
 
+    /// Aggregates displayed segments by category, summing contributing trial counts
+    /// so a category average still reports the number of trials that formed it.
     func epochCategorySummaries() -> [EpochCategorySummary] {
         let grouped = Dictionary(grouping: epoching.epochSegments, by: \.category)
         return grouped.map { category, segments in
@@ -2976,6 +3074,7 @@ extension WaveformView {
         .sorted { $0.category.localizedStandardCompare($1.category) == .orderedAscending }
     }
 
+    /// Cycles a nonnegative category color index through the fixed six-color palette.
     func epochColor(for index: Int) -> Color {
         let palette: [Color] = [.green, .blue, .orange, .pink, .teal, .indigo]
         return palette[index % palette.count]

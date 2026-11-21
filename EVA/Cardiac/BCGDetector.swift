@@ -47,6 +47,10 @@
 import Accelerate
 import Foundation
 
+/// Detection methods operate on channel-by-sample arrays and return beat times
+/// in seconds. Most numerical helpers assume equal-length channel rows.
+/// nonisolated keeps this stateless namespace independent of UI actor state;
+/// callers still choose an execution context for CPU-heavy work.
 nonisolated enum BCGDetector {
     static let eventCode  = "BCG"
     static let sourceFile = "BCG Detection"
@@ -54,6 +58,9 @@ nonisolated enum BCGDetector {
     // MARK: - Method 1: GFP Periodicity
 
     /// Bandpass EEG to the cardiac band, compute per-sample GFP, detect peaks.
+    /// Converts heart rate from beats/minute to Hz to define the filter band.
+    /// Returns no events for short/empty input, an invalid rate, or filter failure.
+    /// The returned times are recording-relative seconds, not sample indices.
     static func periodicityEvents(
         channels: [[Float]],
         samplingRate: Double,
@@ -101,6 +108,10 @@ nonisolated enum BCGDetector {
     /// - **Respiratory envelope normalization**: a short (~6 s) sliding window tracks the
     ///   ~0.2 Hz respiratory modulation of BCG amplitude, keeping sensitivity uniform
     ///   across the breath cycle.
+    /// Rows must share a sample grid. A supplied exemplar matrix takes priority;
+    /// otherwise an inclusive, in-bounds exemplar range is used when long enough,
+    /// falling back to at most the first 30 seconds. Returns peak times in seconds,
+    /// without changing input samples or constructing MFFEvent records.
     static func spatialPCAEvents(
         channels: [[Float]],
         samplingRate: Double,
@@ -193,6 +204,8 @@ nonisolated enum BCGDetector {
         // full recording so the projection is in the same space as the eigenvectors.
         let projChannels: [[Float]]
         if spatialWhiten, whiteningMatrix.count == nCh * nCh {
+            // Flattening concatenates complete channel rows: sample s of channel c
+            // is stored at c * nAll + s. BLAS needs this contiguous row-major buffer.
             let chFlat = channels.flatMap { $0 }
             var wChFlat = [Float](repeating: 0, count: nCh * nAll)
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -211,6 +224,8 @@ nonisolated enum BCGDetector {
             var proj = [Float](repeating: 0, count: nAll)
             for i in projChannels.indices {
                 var w = vec[i]
+                // vsma is vector-times-scalar plus vector: accumulate channel[i] * w
+                // into proj. The stride arguments of 1 mean consecutive samples.
                 vDSP_vsma(projChannels[i], 1, &w, proj, 1, &proj, 1, vDSP_Length(nAll))
             }
             // score += proj²
@@ -247,9 +262,13 @@ nonisolated enum BCGDetector {
 
     /// Epoch the recording at `detectedTimes`, score each epoch by PC1 projection power,
     /// reject the worst `rejectFraction`, average the survivors, re-detect using the
-    /// refined template, and return the new event times + the averaged template waveforms.
+    /// refined template, and return the new event times, a one-value-per-channel
+    /// topomap from the refined average, and the number of retained epochs.
     ///
     /// Returns `nil` when there are too few detected events to work with.
+    /// Assumes rectangular rows and a positive sampling rate. Requires at least
+    /// four complete input epochs and at least two survivors. Epochs near recording
+    /// edges are excluded because their complete centered window cannot be read.
     static func refineSpatialPCA(
         channels: [[Float]],
         samplingRate: Double,
@@ -333,6 +352,8 @@ nonisolated enum BCGDetector {
         }
 
         // ── 4. Reject bottom `rejectFraction` by score ───────────────────────
+        // Sorting the scores below changes only which epochs are retained; original
+        // time order remains in the packed epoch buffer used for averaging.
         let rejectCount = max(0, Int(Double(nEpochs) * rejectFraction))
         let keepCount   = nEpochs - rejectCount
         guard keepCount >= 2 else { return nil }
@@ -388,6 +409,9 @@ nonisolated enum BCGDetector {
 
     /// Weight each channel by its cardiac-band RMS, sum to a single weighted time series,
     /// and detect peaks. Channels that carry the most BCG energy dominate the signal.
+    /// Uses RMS as a nonnegative channel weight, then detects magnitude peaks in
+    /// the weighted signed sum. Opposite-polarity channels can cancel before the
+    /// absolute value is taken. Returns times in seconds, or [] for unusable input/filtering.
     static func cardiacPowerEvents(
         channels: [[Float]],
         samplingRate: Double,
@@ -434,6 +458,8 @@ nonisolated enum BCGDetector {
     // MARK: - Method 4: QRS Locking
 
     /// Shift existing R-wave event times by a fixed BCG mechanical lag.
+    /// Inputs and output are seconds. Preserves input order while dropping shifted
+    /// times outside [0, recordingDuration); this method does not inspect EEG samples.
     static func qrsLockingEvents(
         qrsTimes: [Double],
         lagSeconds: Double,
@@ -453,6 +479,9 @@ nonisolated enum BCGDetector {
     /// magnitude of that single trace. Requires no ECG and is cheap to compute; it
     /// depends on the right/left groups actually straddling the asymmetric field
     /// (temporal/facial coverage with clear inter-hemispheric voltage gradient).
+    /// Each group must have rectangular rows on the same sample grid. Returns
+    /// times in seconds from the smoothed absolute right-minus-left trace.
+    /// maxHR sets minimum spacing; minHR is currently unused by this implementation.
     static func hemisphericTopographyEvents(
         rightChannels: [[Float]],
         leftChannels: [[Float]],
@@ -492,6 +521,8 @@ nonisolated enum BCGDetector {
     /// channel-specific noise — the generalization of FMRIB/OBS's "best EEG
     /// channel" step to a whole channel group. Feed the result into a QRS
     /// detector (e.g. Pan-Tompkins) to get beat times.
+    /// Returns one sample per input time point, not event times. Invalid/short input
+    /// or filter failure returns nil. The caller performs peak/QRS detection afterward.
     static func virtualECGComponent(
         channels: [[Float]],
         samplingRate: Double,
@@ -554,6 +585,8 @@ nonisolated enum BCGDetector {
 
     // MARK: - MFFEvent helpers
 
+    /// Wraps times in default BCG event records with a manually specified peak-centered
+    /// window. Use the overload below for custom codes or learned duration estimates.
     static func makeEvents(times: [Double], windowSeconds: Double) -> [MFFEvent] {
         makeEvents(
             times: times,
@@ -600,6 +633,9 @@ nonisolated enum BCGDetector {
     /// Global field power: spatial standard deviation across channels at each
     /// sample, i.e. `sqrt(mean(x^2) - mean(x)^2)` after removing the
     /// instantaneous cross-channel mean (average reference).
+    /// Requires equally sized channel rows; returns [] when there are no channels.
+    /// Subtracting the instantaneous channel mean makes the result insensitive to
+    /// a common reference offset. Output has one amplitude value per sample.
     static func computeGFP(channels: [[Float]]) -> [Float] {
         guard let first = channels.first else { return [] }
         let n = first.count
@@ -619,6 +655,8 @@ nonisolated enum BCGDetector {
         vDSP_vsq(mean1, 1, &mean1Squared, 1, vDSP_Length(n))
         var variance = [Float](repeating: 0, count: n)
         vDSP_vsub(mean1Squared, 1, mean2, 1, &variance, 1, vDSP_Length(n))
+        // Roundoff in E[x²] − E[x]² can create tiny negative variances. Clamp them
+        // to zero before taking square roots, which would otherwise produce NaN.
         var zero: Float = 0
         vDSP_vthr(variance, 1, &zero, &variance, 1, vDSP_Length(n))
         var len = Int32(n)
@@ -627,6 +665,8 @@ nonisolated enum BCGDetector {
     }
 
     /// Per-sample average across a channel group.
+    /// Intended for equal-length rows. Mismatched rows are skipped in the sum but
+    /// still counted in the divisor, so callers should ensure a rectangular group.
     static func channelMean(_ channels: [[Float]]) -> [Float] {
         guard let first = channels.first, !first.isEmpty else { return [] }
         let n = first.count
@@ -641,6 +681,9 @@ nonisolated enum BCGDetector {
     }
 
     /// Non-maximum suppression peak finder.
+    /// Finds local maxima above a trimmed-baseline threshold, keeps stronger peaks
+    /// when candidates are closer than minSpacingSamples, and returns sorted seconds.
+    /// Requires a positive sampling rate; recordings with at most four samples return [].
     static func findPeaks(
         in signal: [Float],
         samplingRate: Double,
@@ -659,6 +702,8 @@ nonisolated enum BCGDetector {
             }
         }
 
+        // Process strongest candidates first. A surviving peak suppresses weaker
+        // nearby candidates; sorting times happens only after those decisions.
         candidates.sort { $0.value > $1.value }
         var kept = [Bool](repeating: true, count: candidates.count)
         for i in 0 ..< candidates.count {
@@ -689,6 +734,9 @@ nonisolated enum BCGDetector {
     /// the all-ones and alternating-sign seeds). An exact eigendecomposition
     /// has no seed to be unlucky with, and `nCh` is small enough (tens of
     /// channels) that the full solve is cheap.
+    /// Expects rectangular, already mean-centered rows: this helper forms covariance
+    /// but does not subtract the means itself. Each returned vector has one weight
+    /// per channel. Invalid input or eigensolver failure uses the fallback described below.
     private static func topEigenvectors(exemplar: [[Float]], k: Int) -> [[Float]] {
         let nCh = exemplar.count
         guard nCh > 0, let firstCh = exemplar.first, firstCh.count > 0, k >= 1 else {
@@ -747,9 +795,12 @@ nonisolated enum BCGDetector {
     /// directions are equalised before PCA. Suppresses dominant non-BCG sources
     /// (alpha oscillations, muscle) whose large power would otherwise capture early PCs.
     ///
-    /// Whitening matrix: W = V * diag(1 / sqrt(λ + ε)) * V^T
+    /// Whitening matrix: W = V * diag(1 / sqrt(max(λ, ε))) * V^T
     /// Applied to each frame of the exemplar: X_white = W * X
     /// Returns the whitened exemplar and the nCh×nCh whitening matrix W (row-major).
+    /// Exemplar and background must have the same channel count and rectangular,
+    /// mean-centered rows. Insufficient background or solver failure returns the
+    /// original exemplar and an empty W, signaling that whitening was not applied.
     private static func applyWhitening(exemplar: [[Float]], background: [[Float]]) -> (whitened: [[Float]], W: [Float]) {
         let nCh = exemplar.count
         guard nCh > 1, let bgFirst = background.first, bgFirst.count > nCh else {
@@ -783,8 +834,10 @@ nonisolated enum BCGDetector {
 
         // ssyev_ (Fortran column-major) returns eigenvectors as its columns; viewed
         // from Swift (row-major) those columns become rows: bgCov[i, :] = eigenvector i.
-        // Build W = V * diag(1/sqrt(λ+ε)) * V^T where V has eigenvectors as columns.
+        // Build W = V * diag(1/sqrt(max(λ, ε))) * V^T where V has eigenvectors as columns.
         // With eigenvectors as rows E: V = E^T, so W = E^T * diag(invSqrtLambda) * E.
+        // Whitening divides by the square root of background variance. Flooring
+        // tiny eigenvalues limits amplification of nearly absent spatial directions.
         let eps: Float = max(eigenvalues.max() ?? 1, 1e-6) * 1e-3
         let invSqrtLambda = eigenvalues.map { 1.0 / sqrt(max($0, eps)) }
         // Scale row i of bgCov by 1/sqrt(λ_i): Vscaled[i, :] = invSqrtLambda[i] * E[i, :]
@@ -826,7 +879,11 @@ nonisolated enum BCGDetector {
     // MARK: - Signal normalisation
 
     /// Sliding z-score: subtract a rolling mean and divide by a rolling SD.
-    /// Makes the detection threshold independent of slow (< 1/windowSamples Hz) drift.
+    /// Adapts the detection score to drift over a window of samples; its duration
+    /// in seconds depends on the sampling rate.
+    /// Returns the input unchanged for a trivial window or a signal no longer than
+    /// the window. Clips centered neighborhoods at the edges and uses SD = 1 for
+    /// a zero-variance neighborhood, avoiding division by zero.
     private static func slidingZScore(_ x: [Float], windowSamples w: Int) -> [Float] {
         guard w > 1, x.count > w else { return x }
         let n    = x.count
@@ -843,6 +900,8 @@ nonisolated enum BCGDetector {
             let lo    = max(0, i - half)
             let hi    = min(n, i + half + 1)
             let cnt   = Double(hi - lo)
+            // A prefix entry contains the sum BEFORE its index. Subtracting endpoints
+            // therefore sums the half-open neighborhood lo..<hi in constant time.
             let mean  = (pSum[hi]  - pSum[lo])  / cnt
             let mean2 = (pSum2[hi] - pSum2[lo]) / cnt
             let vari  = max(mean2 - mean * mean, 0)
@@ -855,6 +914,9 @@ nonisolated enum BCGDetector {
     /// Divides the signal by its local RMS (computed over `windowSamples`), which
     /// tracks the ~0.2 Hz respiratory amplitude modulation of BCG. The result is
     /// dimensionless so the fixed SD threshold remains calibrated.
+    /// Uses clipped centered neighborhoods and a small power floor to avoid dividing
+    /// by zero. Returns input unchanged when the requested window is unusable or
+    /// at least as long as the signal.
     private static func slidingRMSNormalize(_ x: [Float], windowSamples w: Int) -> [Float] {
         guard w > 1, x.count > w else { return x }
         let n    = x.count
@@ -873,6 +935,9 @@ nonisolated enum BCGDetector {
 
     // MARK: - Utilities
 
+    /// Computes a centered moving average using prefix sums. Edge neighborhoods
+    /// are clipped; interior half-width is w/2, giving w+1 samples for even w.
+    /// Trivial windows or signals no longer than the requested window are unchanged.
     private static func boxCarSmooth(_ x: [Float], window w: Int) -> [Float] {
         guard w > 1, x.count > w else { return x }
         let n    = x.count
@@ -889,6 +954,10 @@ nonisolated enum BCGDetector {
         return out
     }
 
+    /// Estimates the threshold baseline from the middle half of sorted values,
+    /// reducing the influence of large peaks and extreme lows. Floors SD above zero;
+    /// for fewer than four values it returns the ordinary mean and SD = 1.
+    /// The peak finder supplies nonempty input.
     private static func robustMeanSD(_ x: [Float]) -> (mean: Double, sd: Double) {
         guard x.count >= 4 else {
             var m: Float = 0; vDSP_meanv(x, 1, &m, vDSP_Length(x.count))

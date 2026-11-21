@@ -405,7 +405,31 @@ shorter averaging window than eight volume epochs. Other strategies can select
 epochs from different volumes. The control was previously labeled Donor Volumes;
 the label correction does not change saved parameter values or donor selection.
 
+### FASTR-like Starting Settings
+
+The **FASTR-like** menu item uses EVA's independent implementation, not an exact
+reproduction of the FMRIB plugin. Its saved method identifier remains `FASTR`
+so existing runs continue to resolve. New FASTR-family settings use **Whole TR**
+timing: one template covers each TR using matching positions in 30 neighboring
+volumes. Subtraction is unscaled; alignment, upsampling, OBS, ANC and filtering
+are off. The alignment profile is Custom with alignment disabled. Slice/MB and
+JSON timing remain available as explicit alternatives. FARM and Moosmann share
+these starting controls but use their respective donor selection rules.
+
+Saved runs retain their explicit settings. Older runs without a timing-mode key
+continue to use their saved slice count rather than silently adopting whole-TR
+geometry. Template-family donor count and trigger-position defaults remain 8 and 0.
+
 ### Motion And Timing Checks
+
+In the FASTR family's **JSON** timing source, **Use JSON slice timing** is on
+after import. It places group starts at the imported offsets relative to each
+TR trigger. Turn it off to space the same number of distinct acquisition groups
+evenly across the TR. The imported offsets remain available when you turn it
+back on, and the choice is saved with the processing settings. Importing a new
+timing file enables its offsets again. This switch selects group start times;
+it does not infer an idle interval or suppress correction based on an assumed
+end of acquisition.
 
 All fMRI gradient-removal methods assume regularly spaced scanner markers and a known relationship between TR markers, slice timing, and EEG samples. Before applying correction:
 
@@ -423,7 +447,11 @@ groups), or the imported JSON offsets. The Allen AAS path uses its uniform epoch
 count. The check warns about inconsistent timing and about fractional EEG-sample
 intervals when neither interpolation nor sub-sample alignment is enabled. Even
 scanner-synchronized clocks can have fractional slice intervals: a 2 s TR split
-into 23 groups is 86.96 samples per group at 1,000 Hz.
+into 23 groups is 86.96 samples per group at 1,000 Hz. This warning does not
+measure a trailing acquisition gap. Rounding each group's absolute start time
+distributes the sample-rounding error across the TR; it does not imply a
+separate residual window. Modeling a separate tail requires an acquisition-end
+boundary in addition to TR and group count.
 
 This is a heuristic comparison, not a measurement of anatomical slice count.
 Alternating gradient waveforms can produce a different repeat, and weak artifact,
@@ -531,3 +559,48 @@ Moosmann, M., Schoenfelder, V. H., Specht, K., Scheeringa, R., Nordby, H., & Hug
 Niazy, R. K., Beckmann, C. F., Iannetti, G. D., Brady, J. M., & Smith, S. M. (2005). Removal of FMRI environment artifacts from EEG data using optimal basis sets. *NeuroImage, 28*(3), 720-737. https://doi.org/10.1016/j.neuroimage.2005.06.067
 
 van der Meer, J. N., Tijssen, M. A. J., Bour, L. J., van Rootselaar, A. F., & Nederveen, A. J. (2010). Robust EMG-fMRI artifact reduction for motion (FARM). *Clinical Neurophysiology, 121*(5), 766-776.
+
+### FARM-style default settings
+
+FARM-style (experimental) starts with whole-TR windows, 30 donors excluding the target,
+and candidates within ±20 volumes. Donors are ranked using Pearson correlation of
+first differences, with threshold 0.9 and temporal fallback when fewer than 30 qualify
+(or the requested donor count, if smaller). First differences are used only for ranking;
+templates and subtraction use the original signals. Scaling, alignment, upsampling,
+OBS, ANC, and output filtering remain off in the starting preset.
+
+These settings were selected from the NNU pilot recording experiments. They did not
+consistently outperform the simpler FASTR-like temporal-donor baseline, which remains
+the preferred starting point. Slice timing is still available as an explicit option.
+Older saved settings without a scoring feature retain raw-waveform ranking.
+
+### Slice groups, fallback, and correction boundaries
+
+An acquisition group contains the slices acquired simultaneously in one multiband
+excitation. For example, 42 slices with MB2 give 21 groups per TR. Group position
+means the acquisition-order slot, not the anatomical slice number; multiple echoes
+are part of that group's acquisition and do not add groups.
+
+FARM ranks candidates at the same group position in neighboring TRs. When too few
+qualify, its temporal fallback now preserves that position too, while respecting
+censoring and donor-policy limits. The correlation search radius limits the ranked
+candidate search; fallback may reach farther to obtain enough eligible donors.
+
+Slice correction now assigns each sample to one interval, from a group start to
+the next, with the final interval ending at the next TR. Missing-TR gaps remain
+uncovered. Scoring retains the original nominal windows; subtraction templates
+extend as needed to cover the assigned intervals. Whole-TR correction is unchanged.
+The final interval is not evidence of a physically inactive scanner tail.
+
+Validation on the GE and NNU recordings reproduced the isolated repaired outputs
+exactly over complete TRs with unscaled, unaligned correction and OBS/ANC off.
+This fixes coverage and fallback failures; it does not establish that slice-based
+FARM preserves EEG better than whole-TR temporal averaging.
+
+The GE/Gilmore and NNU sweeps retained this FARM preset: 30 donors, ±20 TRs,
+first-difference scoring, threshold 0.9, minimum 30 qualified donors, alignment off.
+The 40-donor/±30-TR alternative did not improve both datasets consistently, and
+bounded fractional alignment did not show a clear preservation advantage.
+Whole TR remains the starting timing mode; slice modes use the corrected
+same-position fallback and disjoint boundaries described above. Saved explicit
+settings are preserved rather than overwritten by the current preset.
