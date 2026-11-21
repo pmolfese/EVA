@@ -31,6 +31,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
             case mff(MFFThumbnailRenderer)
             case cifti(CIFTIThumbnailRenderer)
             case nifti(NIfTIThumbnailRenderer)
+            case niml(NIMLThumbnailRenderer)
             case gifti(GIFTIThumbnailRenderer)
             case mgh(MGHThumbnailRenderer)
             case dicom(DICOMThumbnailRenderer)
@@ -41,6 +42,7 @@ final class ThumbnailProvider: QLThumbnailProvider {
                 case .mff(let renderer): renderer.draw(in: context, size: size)
                 case .cifti(let renderer): renderer.draw(in: context, size: size)
                 case .nifti(let renderer): renderer.draw(in: context, size: size)
+                case .niml(let renderer): renderer.draw(in: context, size: size)
                 case .gifti(let renderer): renderer.draw(in: context, size: size)
                 case .mgh(let renderer): renderer.draw(in: context, size: size)
                 case .dicom(let renderer): renderer.draw(in: context, size: size)
@@ -69,6 +71,9 @@ final class ThumbnailProvider: QLThumbnailProvider {
             case .nifti:
                 let model = try NIfTIQuickLookReader.read(from: request.fileURL)
                 renderer = .nifti(NIfTIThumbnailRenderer(model: model))
+            case .niml:
+                let model = try NIMLQuickLookReader.read(from: request.fileURL)
+                renderer = .niml(NIMLThumbnailRenderer(model: model))
             case .gifti:
                 let model = try GIFTIQuickLookReader.read(from: request.fileURL)
                 renderer = .gifti(GIFTIThumbnailRenderer(model: model))

@@ -51,6 +51,11 @@ final class PreviewViewController: NSViewController, QLPreviewingController {
                 try NIfTIQuickLookReader.read(from: url)
             }.value
             content = AnyView(NIfTIPreviewView(model: model))
+        case .niml:
+            let model = try await Task.detached(priority: .userInitiated) {
+                try NIMLQuickLookReader.read(from: url)
+            }.value
+            content = AnyView(NIMLPreviewView(model: model))
         case .gifti:
             let model = try await Task.detached(priority: .userInitiated) {
                 try GIFTIQuickLookReader.read(from: url)

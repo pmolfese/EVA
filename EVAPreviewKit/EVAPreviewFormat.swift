@@ -14,6 +14,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
     case cifti
     case nifti
     case gifti
+    case niml
     case mgh
     case dicom
     case fif
@@ -25,6 +26,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
         case .mff: "EGI MFF"
         case .cifti: "CIFTI"
         case .nifti: "NIfTI"
+        case .niml: "AFNI NIML"
         case .gifti: "GIFTI"
         case .mgh: "FreeSurfer MGH/MGZ"
         case .dicom: "DICOM"
@@ -37,6 +39,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
         case .mff: ".mff"
         case .cifti: ".dscalar.nii, .dtseries.nii, and related"
         case .nifti: ".nii, .nii.gz"
+        case .niml: ".niml, .niml.dset"
         case .gifti: ".gii"
         case .mgh: ".mgh, .mgz, .mgh.gz"
         case .dicom: ".dcm, .ima"
@@ -58,6 +61,7 @@ nonisolated enum EVAPreviewFormat: String, CaseIterable, Identifiable, Sendable 
         if name.hasSuffix(".mff") { return .mff }
         if isCIFTIFileName(name) { return .cifti }
         if name.hasSuffix(".nii") || name.hasSuffix(".nii.gz") { return .nifti }
+        if name.hasSuffix(".niml") || name.hasSuffix(".niml.dset") { return .niml }
         if name.hasSuffix(".gii") { return .gifti }
         if name.hasSuffix(".mgh") || name.hasSuffix(".mgz") || name.hasSuffix(".mgh.gz") { return .mgh }
         if name.hasSuffix(".dcm") || name.hasSuffix(".ima") { return .dicom }

@@ -12,6 +12,7 @@
 				<string>org.nitrc.cifti-2</string>
 				<string>gov.nih.nifti-1</string>
 				<string>gov.nih.nifti-1-gzip</string>
+				<string>org.afni.niml</string>
 				<string>org.nitrc.gifti</string>
 				<string>org.freesurfer.mgh</string>
 				<string>org.gnu.gnu-zip-archive</string>
@@ -29,6 +30,25 @@
 	</dict>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.afni.niml</string>
+			<key>UTTypeDescription</key>
+			<string>AFNI NIML Data</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>niml</string>
+					<string>niml.dset</string>
+				</array>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeConformsTo</key>
 			<array>
