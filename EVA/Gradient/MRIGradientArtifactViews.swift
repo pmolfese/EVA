@@ -60,6 +60,7 @@ extension WaveformView {
         let canApply = signal != nil && !gradient.isProcessing && (selectedCount ?? 0) >= 2
             && gradient.missingRequiredMotion == nil
             && gradient.acquisitionTimingValidationMessage == nil
+            && gradient.eventProtectionValidationMessage(for: signal) == nil
             && motionAlignmentOK
             && spacing.hasEnoughTriggers && spacing.isEvenlySpaced
 
@@ -257,6 +258,8 @@ extension WaveformView {
             }
             .help("Stretches the correction could not be trusted on — epochs left uncorrected with no usable donors or an empty template, or corrected from donors taken across a motion event — become \(GradientCoverage.unreliableEventCode) events with their duration. Normal edge TRs are never marked. PSA can reject epochs that overlap them. Off: reported in the run details only.")
 
+            mriEventProtection(for: signal)
+
             mriMethodOptions()
 
             mriAdvancedOptions()
@@ -332,7 +335,8 @@ extension WaveformView {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canApply)
-                .help(applyButtonHelp(motionUsable: motionUsable, selectedCount: selectedCount, spacing: spacing, motionAlignmentOK: motionAlignmentOK))
+                .help(gradient.eventProtectionValidationMessage(for: signal)
+                      ?? applyButtonHelp(motionUsable: motionUsable, selectedCount: selectedCount, spacing: spacing, motionAlignmentOK: motionAlignmentOK))
             }
         }
         .padding(16)
@@ -933,6 +937,48 @@ extension WaveformView {
             Toggle("Skip targets with too few donors", isOn: $gradient.localSkipsTargetsWithoutEnoughDonors)
                 .font(.caption)
                 .help("On: an event without enough donors is left uncorrected and reported. Off: it is corrected with whatever donors are available.")
+        }
+    }
+
+    @ViewBuilder
+    func mriEventProtection(for signal: MFFSignalData?) -> some View {
+        if gradient.supportsEventProtection {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Protect event responses", isOn: $gradient.eventProtectionEnabled)
+                    .font(.caption.weight(.semibold))
+                    .help("Optional: exclude event windows from donor templates and use fixed temporal donors for overlapping targets. Alignment, scaling, OBS and ANC remain separate settings.")
+                if gradient.eventProtectionEnabled {
+                    HStack {
+                        Text("Event code").font(.caption)
+                        TextField("Event code", text: $gradient.eventProtectionMarkerCode)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                        Menu("Choose event") {
+                            ForEach(signal.map(eventCodeCounts) ?? [], id: \.code) { entry in
+                                Button("\(entry.code) (\(entry.count))") {
+                                    gradient.eventProtectionMarkerCode = entry.code
+                                }
+                            }
+                        }
+                    }
+                    Menu("Window: \(gradient.eventProtectionPreset.label)") {
+                        ForEach(GradientProtectionWindowPreset.allCases.filter { $0 != .custom }) { preset in
+                            Button(preset.label) { gradient.eventProtectionPreset = preset }
+                        }
+                    }
+                    mriDoubleRow("Protection start", value: $gradient.eventProtectionStartMilliseconds,
+                                 suffix: "ms", help: "Relative to each selected event onset. Negative values protect time before the event.")
+                    mriDoubleRow("Protection end", value: $gradient.eventProtectionEndMilliseconds,
+                                 suffix: "ms", help: "Relative to each selected event onset. Must be later than the start; the end is excluded.")
+                    Text("Select a preset or enter a range covering the expected response. Longer windows leave fewer donors.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let message = gradient.eventProtectionValidationMessage(for: signal) {
+                        Text(message).font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
         }
     }
 

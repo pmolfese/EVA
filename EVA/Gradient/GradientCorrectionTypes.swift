@@ -486,6 +486,10 @@ nonisolated struct GradientCorrectionDiagnostics: Sendable {
     /// Actual correction ownership on the upsampled axis for slice partitions.
     var outputRanges: [Range<Int>]? = nil
 
+    /// Targets intentionally using temporal donors under event protection.
+    /// This is a configured selection rule, not a correlation-shortage fallback.
+    var protectedTemporalTargets: [Int] = []
+
     var correctedEpochCount: Int { epochs.filter(\.corrected).count }
 }
 
@@ -503,6 +507,11 @@ nonisolated struct GradientDonorPolicy: Sendable {
     /// Retained for source compatibility with experiment callers. The template
     /// corrector always matches acquisition groups, even when this is false.
     var matchAcquisitionGroup: Bool = true
+    /// For correlation schemes, choose temporal donors when the target's full
+    /// extraction support overlaps protection. Off preserves existing behavior.
+    /// This controls donor selection only; alignment, scaling, OBS and ANC can
+    /// still depend on the target waveform when enabled separately.
+    var useTemporalDonorsForProtectedTargets: Bool = false
 
     func permitsWindow(start: Double, end: Double) -> Bool {
         !protectedIntervals.contains { $0.lowerBound < end && start < $0.upperBound }

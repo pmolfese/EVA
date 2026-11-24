@@ -261,6 +261,7 @@ nonisolated enum GradientTemplateCorrector {
         // Extraction support can change after alignment padding and ownership are
         // resolved. Use this final geometry for donors, targets and diagnostics.
         var donorEligible = [Bool](repeating: false, count: epochCount)
+        var protectedTargets = [Bool](repeating: false, count: epochCount)
         for epoch in 0..<epochCount {
             let start = plan.windowStarts[epoch]
             guard start >= 0, start + plan.windowLength <= plan.upsampledCount,
@@ -280,6 +281,7 @@ nonisolated enum GradientTemplateCorrector {
                     end: Double(start + plan.windowLength + padding) / rate)
             }
             donorEligible[epoch] = !censored && !protected
+            protectedTargets[epoch] = protected
         }
         func isEligible(_ epoch: Int) -> Bool { donorEligible[epoch] }
 
@@ -309,12 +311,15 @@ nonisolated enum GradientTemplateCorrector {
         // it is enumerated once and scored for every channel at once.
         let usesCorrelation = effectiveScheme == .correlationRanked
             || effectiveScheme == .squaredCorrelationRanked
+        let protectedTemporalTargets = protectedTargets.map {
+            usesCorrelation && $0 && config.donorPolicy?.useTemporalDonorsForProtectedTargets == true
+        }
         var correlationPairs: [GradientEpochPair] = []
         var correlationDistances: [Int32] = []
         var correlationRanges = [Range<Int>](repeating: 0..<0, count: epochCount)
         if usesCorrelation {
             for target in 0..<epochCount {
-                guard plan.windowStarts[target] >= 0 else { continue }
+                guard plan.windowStarts[target] >= 0, !protectedTemporalTargets[target] else { continue }
                 let first = correlationPairs.count
                 for (candidate, distance) in GradientDonorSelection.correlationCandidates(
                     target: target,
@@ -441,11 +446,13 @@ nonisolated enum GradientTemplateCorrector {
                     return selection
                 }
 
-                guard usesCorrelation else {
+                guard usesCorrelation && !protectedTemporalTargets[target] else {
                     // Temporal and motion-informed donors depend only on the
                     // epoch grid, so one selection serves every channel.
                     let selection = enforceMinimum(selectDonors(
-                        target: target, scheme: effectiveScheme, layout: layout,
+                        target: target,
+                        scheme: protectedTemporalTargets[target] ? .temporalNeighbors : effectiveScheme,
+                        layout: layout,
                         config: config, desired: desiredDonors,
                         motionDonorVolumes: motionDonorVolumes,
                         isEligible: targetEligible, scored: nil
@@ -657,7 +664,9 @@ nonisolated enum GradientTemplateCorrector {
                 ancAppliedChannels: ancAppliedChannels,
                 warnings: warnings,
                 upsampleFactor: factor,
-                outputRanges: partitions
+                outputRanges: partitions,
+                protectedTemporalTargets: emitsDiagnostics
+                    ? protectedTemporalTargets.indices.filter { protectedTemporalTargets[$0] } : []
             )
         )
     }

@@ -67,6 +67,32 @@ enum GradientDonorRanking: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Presets are conveniences; the start and end fields remain directly editable.
+enum GradientProtectionWindowPreset: String, CaseIterable, Identifiable {
+    case brief, standard, broad, sustained, preAndPost, custom
+    var id: String { rawValue }
+    var milliseconds: Range<Double>? {
+        switch self {
+        case .brief: return 0..<400
+        case .standard: return 0..<800
+        case .broad: return 0..<1200
+        case .sustained: return 0..<2000
+        case .preAndPost: return -200..<800
+        case .custom: return nil
+        }
+    }
+    var label: String {
+        switch self {
+        case .brief: return "0–400 ms"
+        case .standard: return "0–800 ms"
+        case .broad: return "0–1200 ms"
+        case .sustained: return "0–2000 ms"
+        case .preAndPost: return "−200–800 ms"
+        case .custom: return "Custom"
+        }
+    }
+}
+
 /// How FASTR obtains the distinct acquisition times within one TR.
 enum GradientAcquisitionTimingMode: String, CaseIterable, Identifiable, Sendable {
     case wholeVolume
@@ -327,6 +353,80 @@ final class GradientViewModel {
     var correlationFeature: GradientCorrelationFeature = .firstDifference
     var minimumCorrelatedDonors = 30
     var correlationSearchWindow = 20
+
+    // MARK: Event protection (opt-in, FASTR and FARM)
+    var eventProtectionEnabled = false
+    var eventProtectionMarkerCode = "Stim"
+    var eventProtectionStartMilliseconds = 0.0
+    var eventProtectionEndMilliseconds = 800.0
+    var supportsEventProtection: Bool { method == .fastr || method == .farm }
+    var eventProtectionPreset: GradientProtectionWindowPreset {
+        get {
+            GradientProtectionWindowPreset.allCases.first {
+                $0.milliseconds?.lowerBound == eventProtectionStartMilliseconds
+                    && $0.milliseconds?.upperBound == eventProtectionEndMilliseconds
+            } ?? .custom
+        }
+        set {
+            guard let window = newValue.milliseconds else { return }
+            eventProtectionStartMilliseconds = window.lowerBound
+            eventProtectionEndMilliseconds = window.upperBound
+        }
+    }
+
+    func eventProtectionValidationMessage(for signal: MFFSignalData?) -> String? {
+        guard supportsEventProtection, eventProtectionEnabled else { return nil }
+        guard eventProtectionStartMilliseconds.isFinite, eventProtectionEndMilliseconds.isFinite,
+              eventProtectionStartMilliseconds < eventProtectionEndMilliseconds else {
+            return "Protection start and end must be finite, with start earlier than end."
+        }
+        guard !eventProtectionMarkerCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Select or enter an event code to protect."
+        }
+        guard let signal else { return "Load a recording to select protected events." }
+        let events = signal.events.filter { $0.code == eventProtectionMarkerCode }
+        guard !events.isEmpty else { return "No \(eventProtectionMarkerCode) events in this recording." }
+        guard events.allSatisfy({ $0.beginTimeSeconds.isFinite }) else {
+            return "Protected events must have finite onset times."
+        }
+        guard !eventProtectionIntervals(in: signal).isEmpty else {
+            return "The protection windows do not overlap this recording."
+        }
+        return nil
+    }
+
+    /// Uses the EEG recording's event times for both EEG and PNS. Bounds are
+    /// snapped outward to native samples, clipped to the data, then merged.
+    private func eventProtectionIntervals(in signal: MFFSignalData) -> [Range<Double>] {
+        let rate = signal.samplingRate
+        guard rate.isFinite, rate > 0, let count = signal.data.first?.count, count > 0 else { return [] }
+        let duration = Double(count) / rate
+        let windows = signal.events.filter { $0.code == eventProtectionMarkerCode }.compactMap { event -> Range<Double>? in
+            let start = max(0, min(duration, event.beginTimeSeconds + eventProtectionStartMilliseconds / 1000))
+            let end = max(0, min(duration, event.beginTimeSeconds + eventProtectionEndMilliseconds / 1000))
+            guard start.isFinite, end.isFinite, start < end else { return nil }
+            return max(0, floor(start * rate) / rate)..<min(duration, ceil(end * rate) / rate)
+        }.sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [Range<Double>] = []
+        for window in windows {
+            if let last = merged.last, window.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound..<max(last.upperBound, window.upperBound)
+            } else {
+                merged.append(window)
+            }
+        }
+        return merged
+    }
+
+    func eventProtectionPolicy(for signal: MFFSignalData) throws -> GradientDonorPolicy? {
+        guard supportsEventProtection, eventProtectionEnabled else { return nil }
+        if let message = eventProtectionValidationMessage(for: signal) {
+            throw GradientCorrectionError.invalidConfiguration(message)
+        }
+        return GradientDonorPolicy(protectedIntervals: eventProtectionIntervals(in: signal),
+                                   maximumDistanceSeconds: 90, minimumDonors: 4,
+                                   useTemporalDonorsForProtectedTargets: true)
+    }
 
     // MARK: OBS (FASTR family)
     var obsSelection = GradientOBSSelection.off
@@ -936,6 +1036,12 @@ final class GradientViewModel {
             params["correlationThreshold"] = String(format: "%.4f", correlationThreshold)
             params["minimumCorrelatedDonors"] = "\(minimumCorrelatedDonors)"
             params["correlationSearchWindow"] = "\(correlationSearchWindow)"
+            if supportsEventProtection {
+                params["eventProtectionEnabled"] = "\(eventProtectionEnabled)"
+                params["eventProtectionMarkerCode"] = eventProtectionMarkerCode
+                params["eventProtectionStartMilliseconds"] = String(eventProtectionStartMilliseconds)
+                params["eventProtectionEndMilliseconds"] = String(eventProtectionEndMilliseconds)
+            }
             params["obs"] = obsSelection.rawValue
             params["obsFixedComponents"] = "\(obsFixedComponents)"
             params["obsVarianceThreshold"] = String(format: "%.4f", obsVarianceThreshold)
@@ -1083,6 +1189,11 @@ final class GradientViewModel {
         correlationFeature = p["correlationFeature"].flatMap(GradientCorrelationFeature.init(rawValue:)) ?? .rawWaveform
         minimumCorrelatedDonors = p["minimumCorrelatedDonors"].flatMap(Int.init) ?? 4
         correlationSearchWindow = p["correlationSearchWindow"].flatMap(Int.init) ?? 240
+        // A historical step must never inherit protection from a previous run.
+        eventProtectionEnabled = p["eventProtectionEnabled"] == "true"
+        eventProtectionMarkerCode = p["eventProtectionMarkerCode"] ?? "Stim"
+        eventProtectionStartMilliseconds = p["eventProtectionStartMilliseconds"].flatMap(Double.init) ?? 0
+        eventProtectionEndMilliseconds = p["eventProtectionEndMilliseconds"].flatMap(Double.init) ?? 800
 
         if let v = p["obs"].flatMap(GradientOBSSelection.init(rawValue:)) { obsSelection = v }
         if let v = p["obsFixedComponents"].flatMap(Int.init) { obsFixedComponents = v }
@@ -1186,6 +1297,14 @@ final class GradientViewModel {
         pnsSignal: MFFSignalData?,
         onApplied: @escaping () -> Void
     ) async {
+        let donorPolicy: GradientDonorPolicy?
+        do {
+            donorPolicy = try eventProtectionPolicy(for: signal)
+        } catch {
+            statusMessage = error.localizedDescription
+            statusIsError = true
+            return
+        }
         if let acquisitionTimingValidationMessage {
             statusMessage = acquisitionTimingValidationMessage
             statusIsError = true
@@ -1239,8 +1358,8 @@ final class GradientViewModel {
             )
         }
 
-        let run = correctionClosure(samplingRate: signal.samplingRate)
-        let pnsRun = pnsInput.map { correctionClosure(samplingRate: $0.samplingRate) }
+        let run = correctionClosure(samplingRate: signal.samplingRate, donorPolicy: donorPolicy)
+        let pnsRun = pnsInput.map { correctionClosure(samplingRate: $0.samplingRate, donorPolicy: donorPolicy) }
         // Capture parameters before the await; reopening/editing the popover
         // during a run must not relabel that run's timing assessment.
         let timingSchedule: GradientAcquisitionSchedule? = method.supportsSliceEpochs
@@ -1399,20 +1518,23 @@ final class GradientViewModel {
     /// Its common tuple return adapts the three engines’ different diagnostics/coverage
     /// representations into the publication path above.
     private func correctionClosure(
-        samplingRate: Double
+        samplingRate: Double,
+        donorPolicy: GradientDonorPolicy? = nil
     ) -> @Sendable ([[Float]], [Int], @escaping (Double) -> Void) throws -> (
         channels: [[Float]], report: [String], correctedEpochs: Int, totalEpochs: Int,
         coverage: GradientCoverage
     ) {
         switch method.engine {
         case .sliceTemplate:
-            let config = sliceTemplateConfig()
+            var config = sliceTemplateConfig()
+            config.donorPolicy = donorPolicy
+            let frozenConfig = config
             let label = method.label
             return { channels, triggers, progress in
                 let result = try GradientTemplateCorrector.correct(
                     channels: channels,
                     volumeTriggers: triggers,
-                    config: config,
+                    config: frozenConfig,
                     samplingRate: samplingRate,
                     progress: progress
                 )
@@ -1422,7 +1544,7 @@ final class GradientViewModel {
                     GradientCoverage.from(
                         diagnostics: result.diagnostics,
                         sampleCount: channels.first?.count ?? 0,
-                        usesMotionInformedDonors: config.templateScheme == .motionInformed
+                        usesMotionInformedDonors: frozenConfig.templateScheme == .motionInformed
                     )
                 )
             }
@@ -1583,6 +1705,9 @@ final class GradientViewModel {
             + "corrected=\(corrected), uncorrected=\(uncorrected), "
             + "referenceChannel=\(diagnostics.referenceChannel + 1)"
         )
+        if !diagnostics.protectedTemporalTargets.isEmpty {
+            lines.append("\(operation) eventProtection: temporalTargets=\(diagnostics.protectedTemporalTargets.count)")
+        }
 
         if !diagnostics.highMotionVolumes.isEmpty {
             let volumes = diagnostics.highMotionVolumes.sorted()

@@ -19,6 +19,86 @@ import SwiftUI
 @testable import EVA
 
 struct GradientViewModelTests {
+    @MainActor
+    @Test func eventProtectionIsOptionalEditableAndReplaysWithoutLeakingState() throws {
+        let vm = GradientViewModel(store: RecordingStore())
+        vm.method = .farm
+        let signal = GradientCoverageTests.periodicGradientSignal(nTR: 40)
+        #expect(!vm.eventProtectionEnabled)
+        #expect(try vm.eventProtectionPolicy(for: signal) == nil)
+        vm.eventProtectionEnabled = true
+        vm.eventProtectionMarkerCode = "TR"
+        vm.eventProtectionPreset = .preAndPost
+        #expect(vm.eventProtectionStartMilliseconds == -200)
+        #expect(vm.eventProtectionEndMilliseconds == 800)
+        vm.eventProtectionStartMilliseconds = -123.5
+        vm.eventProtectionEndMilliseconds = 456.25
+        #expect(vm.eventProtectionPreset == .custom)
+        let policy = try #require(try vm.eventProtectionPolicy(for: signal))
+        #expect(policy.useTemporalDonorsForProtectedTargets)
+        #expect(policy.protectedIntervals == [0..<4]) // Overlapping event windows merge and clip.
+        let restored = GradientViewModel(store: RecordingStore())
+        restored.apply(parameters: vm.parameters)
+        #expect(restored.eventProtectionEnabled)
+        #expect(restored.eventProtectionMarkerCode == "TR")
+        #expect(restored.eventProtectionStartMilliseconds == -123.5)
+        #expect(restored.eventProtectionEndMilliseconds == 456.25)
+        restored.apply(parameters: ["method": "FARM"])
+        #expect(!restored.eventProtectionEnabled)
+        #expect(try restored.eventProtectionPolicy(for: signal) == nil)
+    }
+
+    @MainActor
+    @Test func eventProtectionValidatesAndSnapsEventRelativeRanges() throws {
+        let vm = GradientViewModel(store: RecordingStore()); vm.method = .farm
+        vm.eventProtectionEnabled = true
+        let base = GradientCoverageTests.periodicGradientSignal(nTR: 40)
+        let signal = base.replacingEvents(base.events + [MFFEvent(id: "stim", code: "Stim", beginTimeSeconds: 1.0004, rawBeginTime: "", sourceFile: "test")])
+        vm.eventProtectionStartMilliseconds = -100.2; vm.eventProtectionEndMilliseconds = 300.2
+        let policy = try #require(try vm.eventProtectionPolicy(for: signal))
+        #expect(policy.protectedIntervals == [0.900..<1.301])
+        vm.eventProtectionEndMilliseconds = -200
+        #expect(vm.eventProtectionValidationMessage(for: signal) != nil)
+        #expect(throws: GradientCorrectionError.self) { try vm.eventProtectionPolicy(for: signal) }
+        vm.eventProtectionEndMilliseconds = .infinity
+        #expect(vm.eventProtectionValidationMessage(for: signal) != nil)
+        vm.eventProtectionPreset = .standard; vm.eventProtectionMarkerCode = "missing"
+        #expect(vm.eventProtectionValidationMessage(for: signal)?.contains("missing") == true)
+        vm.eventProtectionMarkerCode = "Stim"; vm.eventProtectionStartMilliseconds = 10_000; vm.eventProtectionEndMilliseconds = 11_000
+        #expect(vm.eventProtectionValidationMessage(for: signal)?.contains("overlap") == true)
+        vm.eventProtectionEnabled = false
+        #expect(vm.eventProtectionValidationMessage(for: signal) == nil)
+        vm.eventProtectionEnabled = true; vm.method = .moosmann
+        #expect(try vm.eventProtectionPolicy(for: signal) == nil)
+    }
+
+    @MainActor
+    @Test func eventProtectionFlowsIntoEEGAndDifferentRatePNSCorrection() async throws {
+        let base = GradientCoverageTests.periodicGradientSignal(nTR: 40)
+        let signal = base.replacingEvents(base.events + [MFFEvent(id: "stim", code: "Stim", beginTimeSeconds: 2, rawBeginTime: "", sourceFile: "test")])
+        let pns = MFFSignalData(signalURL: URL(fileURLWithPath: "/tmp/pns.bin"), signalType: "PNS",
+                                numberOfChannels: 1, samplingRate: 500, duration: 4, recordingStartTime: nil,
+                                events: [], data: [stride(from: 0, to: 4000, by: 2).map { signal.data[0][$0] }])
+        let vm = GradientViewModel(store: RecordingStore()); vm.method = .farm; vm.trMarkerCode = "TR"
+        vm.donorVolumes = 6; vm.minimumCorrelatedDonors = 2; vm.eventProtectionEnabled = true
+        vm.eventProtectionStartMilliseconds = -50; vm.eventProtectionEndMilliseconds = 150
+        await vm.apply(to: signal, pnsSignal: pns)
+        #expect(!vm.statusIsError)
+        #expect(vm.auditLogLines.contains { $0.contains("eventProtection: temporalTargets=") })
+        var c = GradientCorrectionConfig()
+        c.templateScheme = .correlationRanked; c.alignmentEnabled = false; c.subSampleAlignment = false
+        c.templateScaling = .unscaled; c.obs = .off; c.anc = false
+        c.averagingWindowBefore = 3; c.averagingWindowAfter = 3
+        c.correlationFeature = .firstDifference; c.correlationThreshold = 0.9
+        c.minimumCorrelatedDonors = 2; c.correlationSearchWindow = 20
+        c.donorPolicy = try vm.eventProtectionPolicy(for: signal)
+        for (input, output) in [(signal, vm.correctedSignal), (pns, vm.correctedPNSSignal)] {
+            let expected = try GradientTemplateCorrector.correct(channels: input.data,
+                volumeTriggers: (0..<40).map { $0 * Int(input.samplingRate / 10) },
+                config: c, samplingRate: input.samplingRate)
+            #expect(try #require(output).data == expected.channels)
+        }
+    }
 
     @MainActor
     @Test func farmPresetAndLegacyReplay() {

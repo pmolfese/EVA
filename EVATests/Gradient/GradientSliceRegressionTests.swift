@@ -3,6 +3,91 @@ import Testing
 @testable import EVA
 
 struct GradientSliceRegressionTests {
+    @Test(arguments: GradientComputeBackend.allCases)
+    func protectedTargetsKeepFixedDonorsWhenTheResponseChanges(backend: GradientComputeBackend) throws {
+        guard supports(backend) else { return }
+        let groups = 3, period = 32, volumes = 40, tr = groups * period
+        let target = 20 * groups + 1, start = target * period
+        let raw = (0..<(volumes * tr)).map { sample -> Float in
+            let phase = 2 * Double.pi * Double(sample % period) / Double(period)
+            return Float(100 * (sample / tr % 2 == 0 ? sin(phase) : cos(phase)))
+        }
+        var augmented = raw
+        for offset in 0..<period {
+            augmented[start + offset] += Float(300 * cos(2 * .pi * Double(offset) / Double(period)))
+        }
+        var c = config(backend, groups: groups)
+        c.templateScheme = .correlationRanked
+        c.averagingWindowBefore = 3; c.averagingWindowAfter = 3
+        c.minimumCorrelatedDonors = 2; c.correlationThreshold = 0.5
+        c.correlationSearchWindow = 10
+        c.donorPolicy = GradientDonorPolicy(protectedIntervals: [Double(start) / 1000..<Double(start + period) / 1000], minimumDonors: 3)
+        let triggers = (0..<volumes).map { $0 * tr }
+        let before = try GradientTemplateCorrector.correct(channels: [raw], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        let beforeProbe = try GradientTemplateCorrector.correct(channels: [augmented], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        #expect(before.diagnostics.epochs[target].donorIndices != beforeProbe.diagnostics.epochs[target].donorIndices)
+        #expect(before.diagnostics.protectedTemporalTargets.isEmpty)
+
+        c.donorPolicy?.useTemporalDonorsForProtectedTargets = true
+        let after = try GradientTemplateCorrector.correct(channels: [raw], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        let afterProbe = try GradientTemplateCorrector.correct(channels: [augmented], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        let protected = Set(after.diagnostics.protectedTemporalTargets)
+        #expect(protected.contains(target))
+        var temporalConfig = c; temporalConfig.templateScheme = .temporalNeighbors
+        let temporal = try GradientTemplateCorrector.correct(channels: [raw], volumeTriggers: triggers, config: temporalConfig, samplingRate: 1000)
+        for epoch in after.diagnostics.epochs {
+            #expect(epoch.corrected)
+            #expect(epoch.donorIndices == afterProbe.diagnostics.epochs[epoch.epoch].donorIndices)
+            #expect(epoch.donorIndices.allSatisfy { !protected.contains($0) && $0 % groups == epoch.slicePosition })
+            if protected.contains(epoch.epoch) {
+                #expect(epoch.donorIndices == temporal.diagnostics.epochs[epoch.epoch].donorIndices)
+                #expect(!after.diagnostics.warnings.contains(.correlationDonorsFellBack(epoch: epoch.epoch)))
+            } else {
+                #expect(epoch.donorIndices == before.diagnostics.epochs[epoch.epoch].donorIndices)
+            }
+        }
+        for sample in raw.indices {
+            let recovered = afterProbe.channels[0][sample] - after.channels[0][sample]
+            #expect(abs(recovered - (augmented[sample] - raw[sample])) < 0.001)
+        }
+    }
+
+    @Test(arguments: GradientComputeBackend.allCases)
+    func protectedSelectionRespectsPaddingAndCannotBypassDonorMinimum(backend: GradientComputeBackend) throws {
+        guard supports(backend) else { return }
+        let groups = 3, period = 40, tr = groups * period, volumes = 40
+        let input = (0..<(volumes * tr)).map { Float(100 * sin(2 * .pi * Double($0 % period) / Double(period))) }
+        var c = config(backend, groups: groups)
+        c.templateScheme = .correlationRanked
+        c.correlationThreshold = 2 // Outside protected targets, the normal fallback still applies.
+        c.alignmentEnabled = true; c.alignmentSearchRadius = 2
+        c.upsampleFactor = 2; c.subSampleAlignment = true
+        let target = 15 * groups, onset = Double(target * period + period + 5) / 1000
+        c.donorPolicy = GradientDonorPolicy(protectedIntervals: [onset..<(onset + 0.001)], minimumDonors: 4,
+                                           useTemporalDonorsForProtectedTargets: true)
+        let triggers = (0..<volumes).map { $0 * tr }
+        let result = try GradientTemplateCorrector.correct(channels: [input], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        // Protection begins beyond the nominal target epoch, inside the padded
+        // extraction/interpolation support. It must still control selection.
+        #expect(result.diagnostics.protectedTemporalTargets.contains(target))
+        #expect(!result.diagnostics.warnings.contains(.correlationDonorsFellBack(epoch: target)))
+        #expect(result.diagnostics.warnings.contains { if case .correlationDonorsFellBack = $0 { true } else { false } })
+
+        c.alignmentEnabled = false; c.subSampleAlignment = false; c.upsampleFactor = 1
+        c.donorPolicy?.protectedIntervals = [0..<Double(input.count) / 1000]
+        let starved = try GradientTemplateCorrector.correct(channels: [input], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        #expect(starved.channels[0] == input)
+        #expect(starved.diagnostics.epochs.allSatisfy { !$0.corrected && $0.donorIndices.isEmpty })
+        #expect(!starved.diagnostics.warnings.contains { if case .correlationDonorsFellBack = $0 { true } else { false } })
+
+        c.donorPolicy?.protectedIntervals = []
+        let empty = try GradientTemplateCorrector.correct(channels: [input], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        c.donorPolicy?.useTemporalDonorsForProtectedTargets = false
+        let disabled = try GradientTemplateCorrector.correct(channels: [input], volumeTriggers: triggers, config: c, samplingRate: 1000)
+        #expect(empty.channels == disabled.channels)
+        #expect(empty.diagnostics.protectedTemporalTargets.isEmpty)
+    }
+
     private func config(_ backend: GradientComputeBackend, groups: Int) -> GradientCorrectionConfig {
         var config = GradientCorrectionConfig()
         config.computeBackend = backend

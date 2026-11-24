@@ -191,6 +191,37 @@ add protection, distance and minimum-count restrictions; they cannot relax group
 matching. Existing callers may retain the `matchAcquisitionGroup` compatibility
 field, but false does not enable cross-group averaging.
 
+#### Optional event-protected target selection
+
+`GradientDonorPolicy.useTemporalDonorsForProtectedTargets` defaults to false.
+When enabled, correlation-ranked targets whose full extraction support overlaps
+`protectedIntervals` use nearest eligible temporal donors instead of target-side
+correlation selection. This includes alignment padding and interpolation support,
+using the same overlap calculation that excludes protected donors. Unprotected
+targets retain the configured correlation rule. Same-group matching, censoring,
+distance limits and the minimum donor count still apply. An intentional protected
+selection is reported in `protectedTemporalTargets`, not as a correlation-shortage
+warning. Without sufficient eligible donors, the target remains uncorrected.
+
+The FASTR/FARM UI exposes this as **Protect event responses**, off by default.
+Users select or enter an event code and choose a preset or edit start/end offsets
+in milliseconds relative to event onset, including negative starts. Presets cover
+0–400, 0–800, 0–1200, 0–2000 and −200–800 ms. The end is exclusive. Intervals are
+snapped outward to native EEG samples, clipped to the recording and merged.
+The same seconds intervals apply to PNS even at a different sampling rate.
+Enabling the option excludes protected donors for FASTR as well as FARM; FARM
+also changes selection for protected targets. The UI policy uses a 90-second
+maximum donor distance and a four-donor minimum. Missing events, invalid ranges,
+or windows outside the recording block correction rather than silently disabling
+protection. Settings are recorded in processing history; older steps restore
+protection off.
+
+This is donor-selection protection, not a guarantee that every correction stage
+preserves responses. Alignment, fitted scaling, OBS and ANC remain separate,
+potentially waveform-dependent operations. A longer window also reduces the
+available donor pool and may increase residual artifact. No universal protection
+window is enabled automatically.
+
 Target and donor bounds must use the final extraction window after alignment
 padding and ownership support are resolved. A target with no valid extraction
 or output interval is uncorrected, excluded from donors, and reported as an edge
