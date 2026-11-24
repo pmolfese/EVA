@@ -182,6 +182,28 @@ the configured window sizes. The target epoch itself should normally be excluded
 from a simple temporal-neighbor template unless a compatibility option
 explicitly includes it.
 
+In slice/group mode, donors must match the target's acquisition-group position
+across volumes. This applies to every strategy and all temporal fallbacks,
+including missing/quiet motion, empty motion donor lists and insufficient
+correlation matches. The donor count therefore counts matching group epochs,
+not adjacent slices. Volume-level behavior is unchanged. Optional donor policies
+add protection, distance and minimum-count restrictions; they cannot relax group
+matching. Existing callers may retain the `matchAcquisitionGroup` compatibility
+field, but false does not enable cross-group averaging.
+
+Target and donor bounds must use the final extraction window after alignment
+padding and ownership support are resolved. A target with no valid extraction
+or output interval is uncorrected, excluded from donors, and reported as an edge
+epoch. It must not receive a successful correction diagnostic.
+
+CPU channel tiles use a 512 MiB estimated working-buffer budget and at most one
+worker per active processor. The estimate includes dense windows/templates,
+residuals, scoring arrays, donor lists and OBS sample/Gram storage; the host
+budget also caps Metal tiles. Input/output recordings and shared epoch/pair
+metadata are outside this budget. A single channel is the minimum tile, so an
+exceptionally long or highly upsampled channel can exceed the estimate's budget;
+this is channel tiling, not streaming within a channel.
+
 At boundaries, prefer a documented edge policy:
 
 - clamp/saturate the donor window to valid epochs, or

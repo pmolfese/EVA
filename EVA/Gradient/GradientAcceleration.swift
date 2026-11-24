@@ -326,9 +326,41 @@ nonisolated final class GradientCPUBackend: GradientBackend {
 
     var backend: GradientComputeBackend { .cpu }
 
-    /// The CPU holds one channel's intermediates at a time regardless of tile
-    /// width, so there is nothing to bound.
-    func maximumTileChannels(plan: GradientBatchPlan) -> Int { .max }
+    /// Dense intermediates are allocated for the entire tile, even though the
+    /// arithmetic runs independently per channel. Bound both memory and workers.
+    func maximumTileChannels(plan: GradientBatchPlan) -> Int {
+        min(ProcessInfo.processInfo.activeProcessorCount, Self.maximumHostTileChannels(plan: plan))
+    }
+
+    /// Conservative working-buffer budget, excluding the caller's input/output
+    /// recordings and shared epoch/pair metadata. One channel is the minimum:
+    /// recordings larger than that budget still require a full channel's buffers.
+    static let hostTileBudgetBytes = 512 * 1024 * 1024
+
+    static func maximumHostTileChannels(
+        plan: GradientBatchPlan,
+        correlationPairCount: Int = 0,
+        donorCount: Int = 0,
+        obsSampleCounts: [Int] = [],
+        budgetBytes: Int = hostTileBudgetBytes
+    ) -> Int {
+        // Double arithmetic avoids overflowing Int while estimating very large
+        // plans. 64 bytes/sample covers windows (including scoring windows),
+        // Double templates, residuals, estimates, OBS contributions and scratch.
+        let epochSamples = Double(plan.epochCount) * Double(plan.windowLength)
+        let sampleBytes = 24 * Double(plan.sampleCount) * Double(plan.upsampleFactor)
+        let donorBytes = Double(plan.epochCount) * (128 + 8 * Double(donorCount))
+        // Scores plus a temporary scoring block can coexist. OBS holds sampled
+        // residual copies and Gram/eigensolver storage for multiple jobs.
+        let scoreBytes = 16 * Double(correlationPairCount)
+        let obsBytes = obsSampleCounts.reduce(0.0) { total, count in
+            let n = Double(count)
+            return total + 16 * n * Double(plan.windowLength) + 48 * n * n
+        }
+        let perChannel = max(1, 64 * epochSamples + sampleBytes + donorBytes + scoreBytes + obsBytes)
+        let budget = max(1, budgetBytes)
+        return max(1, Int(min(Double(budget), Double(budget) / perChannel)))
+    }
 
     private func floats(_ buffer: GradientDeviceBuffer, stage: String) throws -> [Float] {
         guard let box = buffer.storage as? HostBuffer<Float> else {

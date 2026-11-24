@@ -226,27 +226,10 @@ nonisolated enum GradientTemplateCorrector {
         let epochCount = layout.count
         let length = layout.length
         var windowStarts = [Int](repeating: -1, count: epochCount)
-        var donorEligible = [Bool](repeating: false, count: epochCount)
         for epoch in 0..<epochCount {
             let start = layout.windowStart(of: epoch, shift: alignment.integerShifts[epoch])
             windowStarts[epoch] = start ?? -1
-            let volume = layout.volumeIndex[epoch]
-            let censored = config.censoredVolumes.contains(volume) || highMotionVolumes.contains(volume)
-            var protected = false
-            if let start, let policy = config.donorPolicy {
-                // Include the source support of both interpolation stages.
-                let padding = (factor > 1 ? GradientSincResampler.upsampleLobes * factor : 0)
-                    + (config.subSampleAlignment ? GradientSincResampler.delayLobes + 1 : 0)
-                let rate = samplingRate * Double(factor)
-                protected = !policy.permitsWindow(
-                    start: Double(start - padding) / rate,
-                    end: Double(start + length + padding) / rate)
-            }
-            donorEligible[epoch] = start != nil && !censored && !protected
         }
-        /// Reads precomputed donor eligibility: valid bounds, no censor/high-motion flag,
-        /// and no overlap with protected intervals including interpolation support.
-        func isEligible(_ epoch: Int) -> Bool { donorEligible[epoch] }
 
         var plan = GradientBatchPlan(
             sampleCount: workingCount,
@@ -268,27 +251,37 @@ nonisolated enum GradientTemplateCorrector {
             plan.windowLength = max(length, longestPartition) + 2 * alignmentPadding
             for epoch in 0..<epochCount where plan.windowStarts[epoch] >= 0 {
                 plan.windowStarts[epoch] -= alignmentPadding
-                if plan.windowStarts[epoch] < 0 { donorEligible[epoch] = false }
             }
             for epoch in 0..<epochCount where plan.windowStarts[epoch] >= 0 {
                 let required = partitions[epoch].upperBound - plan.windowStarts[epoch]
                 plan.windowLength = max(plan.windowLength, required)
             }
-            for epoch in 0..<epochCount where plan.windowStarts[epoch] >= 0 {
-                if plan.windowStarts[epoch] + plan.windowLength > plan.upsampledCount {
-                    plan.windowStarts[epoch] = -1
-                    donorEligible[epoch] = false
-                }
-                if let policy = config.donorPolicy, plan.windowStarts[epoch] >= 0 {
-                    let padding = (factor > 1 ? GradientSincResampler.upsampleLobes * factor : 0)
-                        + (config.subSampleAlignment ? GradientSincResampler.delayLobes + 1 : 0)
-                    let rate = samplingRate * Double(factor)
-                    donorEligible[epoch] = donorEligible[epoch] && policy.permitsWindow(
-                        start: Double(plan.windowStarts[epoch] - padding) / rate,
-                        end: Double(plan.windowStarts[epoch] + plan.windowLength + padding) / rate)
-                }
-            }
         }
+
+        // Extraction support can change after alignment padding and ownership are
+        // resolved. Use this final geometry for donors, targets and diagnostics.
+        var donorEligible = [Bool](repeating: false, count: epochCount)
+        for epoch in 0..<epochCount {
+            let start = plan.windowStarts[epoch]
+            guard start >= 0, start + plan.windowLength <= plan.upsampledCount,
+                  !plan.outputRange(of: epoch).isEmpty else {
+                plan.windowStarts[epoch] = -1
+                continue
+            }
+            let volume = layout.volumeIndex[epoch]
+            let censored = config.censoredVolumes.contains(volume) || highMotionVolumes.contains(volume)
+            var protected = false
+            if let policy = config.donorPolicy {
+                let padding = (factor > 1 ? GradientSincResampler.upsampleLobes * factor : 0)
+                    + (config.subSampleAlignment ? GradientSincResampler.delayLobes + 1 : 0)
+                let rate = samplingRate * Double(factor)
+                protected = !policy.permitsWindow(
+                    start: Double(start - padding) / rate,
+                    end: Double(start + plan.windowLength + padding) / rate)
+            }
+            donorEligible[epoch] = !censored && !protected
+        }
+        func isEligible(_ epoch: Int) -> Bool { donorEligible[epoch] }
 
         // MARK: Backend and tiling
 
@@ -299,14 +292,6 @@ nonisolated enum GradientTemplateCorrector {
             channelCount: activeChannels.count,
             minimumWorkload: config.metalMinimumWorkload
         )
-        let tileWidth = max(1, min(
-            max(activeChannels.count, 1),
-            backend.maximumTileChannels(plan: plan)
-        ))
-        let tiles = stride(from: 0, to: activeChannels.count, by: tileWidth).map { start in
-            Array(activeChannels[start..<min(start + tileWidth, activeChannels.count)])
-        }
-
         let emitsDiagnostics = activeChannels.contains(diagnosticChannel)
         let periodAtSampleRate = max(1, layout.period / factor)
         let obsChunks = config.obs.isEnabled
@@ -344,6 +329,22 @@ nonisolated enum GradientTemplateCorrector {
                 }
                 correlationRanges[target] = first..<correlationPairs.count
             }
+        }
+
+        // Include host-side donor scores and OBS jobs, which are not covered by
+        // the backend's dense-buffer limit. Apply this cap to Metal tiles too.
+        let hostTileWidth = GradientCPUBackend.maximumHostTileChannels(
+            plan: plan,
+            correlationPairCount: correlationPairs.count,
+            donorCount: desiredDonors,
+            obsSampleCounts: obsChunks.map { min($0.count, max(0, config.obsMaximumEpochsPerChunk)) }
+        )
+        let tileWidth = max(1, min(
+            max(activeChannels.count, 1),
+            min(backend.maximumTileChannels(plan: plan), hostTileWidth)
+        ))
+        let tiles = stride(from: 0, to: activeChannels.count, by: tileWidth).map { start in
+            Array(activeChannels[start..<min(start + tileWidth, activeChannels.count)])
         }
 
         // MARK: Correct
@@ -409,7 +410,7 @@ nonisolated enum GradientTemplateCorrector {
             }
 
             for target in 0..<epochCount {
-                guard windowStarts[target] >= 0 else {
+                guard plan.isInBounds(target) else {
                     if emitsDiagnostics, diagnosticSlot != nil {
                         epochWarningsByEpoch[target].append(.epochOutOfBounds(epoch: target))
                         epochDiagnostics.append(diagnostic(
@@ -420,13 +421,15 @@ nonisolated enum GradientTemplateCorrector {
                     continue
                 }
 
-                /// Adds target-dependent donor restrictions to global eligibility: optional acquisition
-                /// group matching and maximum temporal distance on the internally upsampled axis.
+                /// Adds acquisition-group matching and optional maximum temporal
+                /// distance to global donor eligibility.
                 func targetEligible(_ candidate: Int) -> Bool {
                     guard isEligible(candidate) else { return false }
+                    // Every strategy, including motion/correlation fallbacks,
+                    // must describe the target's acquisition group.
+                    guard layout.slicePosition[candidate] == layout.slicePosition[target] else { return false }
                     guard let policy = config.donorPolicy else { return true }
-                    return (!policy.matchAcquisitionGroup || layout.slicePosition[candidate] == layout.slicePosition[target])
-                        && Double(abs(layout.triggers[candidate] - layout.triggers[target]))
+                    return Double(abs(layout.triggers[candidate] - layout.triggers[target]))
                             <= policy.maximumDistanceSeconds * samplingRate * Double(factor)
                 }
                 /// Turns an undersized donor set into an empty set while preserving the fallback flag.
@@ -501,7 +504,7 @@ nonisolated enum GradientTemplateCorrector {
                     let index = slot * epochCount + epoch
                     guard templates.present[index] else {
                         if slot == diagnosticSlot, emitsDiagnostics,
-                           windowStarts[epoch] >= 0, donors.offsets[index + 1] > donors.offsets[index] {
+                           plan.isInBounds(epoch), donors.offsets[index + 1] > donors.offsets[index] {
                             epochWarningsByEpoch[epoch].append(.degenerateTemplate(epoch: epoch))
                             epochDiagnostics.append(diagnostic(
                                 layout: layout, alignment: alignment, epoch: epoch,
@@ -774,22 +777,15 @@ nonisolated enum GradientTemplateCorrector {
         scored: [GradientDonorSelection.ScoredCandidate]?
     ) -> (donors: [Int], fellBack: Bool) {
 
-        /// Finds nearby eligible epochs, preserving acquisition-position matching when
-        /// serving as a fallback for correlation-based selection.
+        /// Finds nearby eligible epochs. The caller enforces acquisition-group
+        /// matching and optional donor restrictions for every strategy/fallback.
         func temporal() -> [Int] {
             GradientDonorSelection.nearestTemporalDonors(
                 target: target,
                 epochCount: layout.count,
                 desired: desired,
                 allowsSelfDonation: config.allowsSelfDonation,
-                isEligible: { candidate in
-                    // Correlation candidates already match the acquisition-order
-                    // slot; fallback must keep that same constraint.
-                    let matchesGroup = scheme != .correlationRanked
-                        && scheme != .squaredCorrelationRanked
-                        || layout.slicePosition[candidate] == layout.slicePosition[target]
-                    return matchesGroup && isEligible(candidate)
-                }
+                isEligible: isEligible
             )
         }
 

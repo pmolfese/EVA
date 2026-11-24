@@ -213,7 +213,7 @@ nonisolated struct GradientCorrectionConfig: Sendable {
     /// epoch. 0 puts the whole window after the trigger.
     var relativeTriggerPosition: Double = 0
 
-    /// Optional experimental restrictions. Nil preserves existing donor behavior.
+    /// Optional experimental restrictions in addition to acquisition-group matching.
     var donorPolicy: GradientDonorPolicy? = nil
 
     // Donor window
@@ -500,6 +500,8 @@ nonisolated struct GradientDonorPolicy: Sendable {
     var protectedIntervals: [Range<Double>] = []
     var maximumDistanceSeconds: Double = 60
     var minimumDonors: Int = 4
+    /// Retained for source compatibility with experiment callers. The template
+    /// corrector always matches acquisition groups, even when this is false.
     var matchAcquisitionGroup: Bool = true
 
     func permitsWindow(start: Double, end: Double) -> Bool {
